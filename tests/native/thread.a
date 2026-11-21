@@ -148,6 +148,7 @@ test_detached :: fn() {
 
 main :: fn() {
     expect(thread.supported)
+    expect(thread.sleep(1).is_success())
     test_values()
     test_mutex()
     test_detached()

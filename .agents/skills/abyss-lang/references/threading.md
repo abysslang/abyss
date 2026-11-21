@@ -25,6 +25,7 @@ main :: fn() {
 - `spawn_task(work, value)` and `spawn_shared_task(work, state)` accept functions with no return type. Their handles join with a `Unit` result. Use `thread.Unit` and `.{}` for a task without any state.
 - `spawn_detached(work, value)` accepts a pointer-free capture and a function with no return type. It returns once the OS starts the thread. The worker releases its own job, and there is no handle to join. Arrange completion separately if the program must wait for it.
 - `yield()` offers the current thread's turn to the scheduler. Use synchronization to coordinate access to shared state.
+- `sleep(milliseconds)` pauses the calling thread without busy waiting. For example, `thread.sleep(250).unwrap()` waits for about a quarter of a second. Zero returns immediately. The result reports system errors; the platform timer and scheduler determine the actual wake-up time.
 
 Treat each `Thread(R)` as a single-owner handle. Keep it in one variable and join it once. A second join on that variable returns `ErrorKind.closed`. A failed OS join leaves the handle available for a retry. The type system checks callback, capture, and result types; it does not enforce handle ownership or the lifetime of borrowed memory.
 

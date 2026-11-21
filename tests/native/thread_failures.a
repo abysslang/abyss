@@ -3,6 +3,7 @@ sys :: @import("std/sys")
 
 inject :: extern "thread_test_inject" fn(mode i32)
 balance :: extern "thread_test_balance" fn() i32
+monotonic_ns :: extern "thread_test_monotonic_ns" fn() u64
 
 expect :: fn(ok bool) {
     if not ok { sys.fall_at(@source_location()) }
@@ -12,7 +13,25 @@ answer :: fn() i32 { 42 }
 
 discard :: fn(value i32) { expect(value == 42) }
 
+test_sleep :: fn() {
+    inject(5)
+    expect(thread.sleep(0).is_success())
+    problem := thread.sleep(1).unwrap_error()
+    expect(problem.kind == thread.ErrorKind.system and problem.code == 104)
+
+    inject(6)
+    expect(thread.sleep(1250).is_success())
+
+    inject(8)
+    expect(thread.sleep(~(0 as u64)).is_success())
+
+    start := monotonic_ns()
+    expect(thread.sleep(20).is_success())
+    expect(monotonic_ns() - start >= 20000000)
+}
+
 main :: fn() {
+    test_sleep()
     inject(1)
     expect(thread.spawn(answer).unwrap_error().kind == thread.ErrorKind.allocation)
     expect(balance() == 0)

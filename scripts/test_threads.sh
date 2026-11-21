@@ -24,6 +24,7 @@ if [[ "${HOST}" == Linux ]] && command -v gcc >/dev/null; then
     "${COMPILER}" b tests/native/thread_failures.a "${WORK_DIR}/failures.c"
     gcc -std=gnu11 -pthread -O2 "${STRICT[@]}" "${WORK_DIR}/failures.c" tests/native/thread_faults.c \
         -Wl,--wrap=malloc,--wrap=free,--wrap=pthread_create,--wrap=pthread_join,--wrap=pthread_mutex_init \
+        -Wl,--wrap=nanosleep \
         -o "${WORK_DIR}/failures"
     timeout 15s "${WORK_DIR}/failures"
 fi
@@ -53,6 +54,13 @@ reject r "${WORK_DIR}/unsupported.a"
 reject b --target wasi "${WORK_DIR}/unsupported.a" "${WORK_DIR}/wasi.c"
 reject b --target freestanding "${WORK_DIR}/unsupported.a" "${WORK_DIR}/free.c"
 [[ ! -e "${WORK_DIR}/wasi.c" && ! -e "${WORK_DIR}/free.c" ]]
+
+cat > "${WORK_DIR}/sleep.a" <<'ABYSS'
+thread :: @import("std/thread")
+main :: fn() { thread.sleep(1).unwrap() }
+ABYSS
+
+reject r "${WORK_DIR}/sleep.a"
 
 cat > "${WORK_DIR}/availability.a" <<'ABYSS'
 thread :: @import("std/thread")

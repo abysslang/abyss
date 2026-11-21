@@ -200,6 +200,12 @@ spawn_detached :: fn(C type, work fn(C), capture C) Result(Unit) {
 
 yield :: fn() { native.yield() }
 
+sleep :: fn(milliseconds u64) Result(Unit) {
+    code := native.sleep(milliseconds)
+    if code != 0 { ret Result(Unit).err(system_error(code)) }
+    Result(Unit).ok(.{})
+}
+
 Mutex :: fn(T type) type {
     struct {
         handle &u8
