@@ -5,13 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILER="${1:-${ROOT_DIR}/abyssc}"
 WORK_DIR=$(mktemp -d "${ROOT_DIR}/tmp/reflection_codegen.XXXXXX")
 cat > "${WORK_DIR}/format.a" <<'ABYSS'
-fmt :: @import("std/fmt").fmt
+format :: @import("std/fmt")
 Arena :: @import("std/allocator").Arena
 print :: @import("std/io").print
 main :: fn() {
     arena := Arena.new(64)
     values: [3]u16 = .[7, 8, 9]
-    text := fmt(&arena, "__FMT_STATIC_OPEN__ {} {} __FMT_STATIC_CLOSE__", .{values, true})
+    text := format.fmt(&arena, "__FMT_STATIC_OPEN__ {} {} __FMT_STATIC_CLOSE__", .{values, true})
+    format.fmt_into(&text, " __FMT_APPEND_STATIC__ {}", .{7 as u16})
     print(text)
     arena.destroy()
 }
@@ -35,6 +36,13 @@ assert '__FMT_STATIC_OPEN__ {} {}' not in generated, 'format template was retain
 converters = [re.search(r'\bsym_\d+', signature).group() for signature, body in functions if '% 10' in body]
 assert len(converters) == 1, 'expected one unsigned numeric conversion helper'
 assert len(re.findall(r'\b' + converters[0] + r'\(', body)) == 3, 'fixed array elements must convert through three direct calls'
+appends = [(signature, body) for signature, body in functions if '__FMT_APPEND_STATIC__' in body]
+assert len(appends) == 1, 'expected one specialization for the appended format literal'
+signature, body = appends[0]
+assert re.search(r'\bvoid\s+sym_\d+\([^,]*\*[^,]*,[^,]+\)$', signature), 'append specialization must take a destination pointer and values'
+assert not re.search(r'\b(?:while|for|malloc|realloc)\s*\(', body), 'append specialization contains runtime traversal or dispatch'
+assert re.search(r'\b' + converters[0] + r'\(', body), 'append specialization must convert directly into the destination'
+assert '__FMT_APPEND_STATIC__ {}' not in generated, 'append template was retained at runtime'
 assert '[format error]' not in generated, 'format parser was emitted at runtime'
 assert 'TypeInfo' not in generated and 'FieldInfo' not in generated, 'reflection metadata leaked into runtime code'
 core = root / 'pods/core'
@@ -47,7 +55,7 @@ for path in core.rglob('*.a'):
 PY
 gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O0 -Werror=implicit-function-declaration -Werror=incompatible-pointer-types "${WORK_DIR}/out.c" -o "${WORK_DIR}/program"
 "${WORK_DIR}/program" > "${WORK_DIR}/actual.out"
-printf '__FMT_STATIC_OPEN__ [\n    7,\n    8,\n    9,\n] true __FMT_STATIC_CLOSE__\n' > "${WORK_DIR}/expected.out"
+printf '__FMT_STATIC_OPEN__ [\n    7,\n    8,\n    9,\n] true __FMT_STATIC_CLOSE__ __FMT_APPEND_STATIC__ 7\n' > "${WORK_DIR}/expected.out"
 cmp "${WORK_DIR}/expected.out" "${WORK_DIR}/actual.out"
 printf "  \033[1;32m✔ PASS\033[0m  %-36s \033[0;90m[Comptime]\033[0m\n" "format_and_reflection_metadata"
 cat > "${WORK_DIR}/wide.a" <<'ABYSS'

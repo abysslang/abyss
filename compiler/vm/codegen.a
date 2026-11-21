@@ -2091,10 +2091,12 @@ VmCodeGen :: struct {
         }
     }
 
-    define_func_type :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {}
-    define_union :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {}
-    define_enum :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {}
-    define_array :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {}
+    define_type :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {
+        kind := types.kind(ty_id)
+        if kind == type_defs.TyKind.struct_ or kind == type_defs.TyKind.nominal {
+            self.define_struct(types, arena, ty_id)
+        }
+    }
 
     iterator_name :: fn(self &Self, arena &Arena, id u32, index u32) VmVal {
         slot := self.alloc_temp()

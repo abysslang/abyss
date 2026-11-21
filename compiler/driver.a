@@ -195,7 +195,7 @@ Driver :: struct {
             }
             ret
         }
-        ccg := c_codegen.CCodeGen_new(self.arena)
+        ccg := c_codegen.CCodeGen.new(self.arena)
         builder := c_codegen.CCodeBuilder.new()
         ccg.target_os = self.config.target_os
         if executable {
@@ -204,8 +204,8 @@ Driver :: struct {
             ccg.main_returns_status = eng.nexus.types.kind(return_type) != TyKind.unit
         }
         eng.compile(&ccg, &builder, self.arena, sym_id)
-        c_code := c_codegen.CCodeGen_finish(&ccg)
+        c_code := ccg.finish()
         fs.write_file(self.config.out_path, c_code)
-        c_codegen.CCodeGen_destroy(&ccg)
+        ccg.destroy()
     }
 }

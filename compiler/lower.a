@@ -2352,25 +2352,8 @@ lower_function :: fn(
 
     sorted := topo_sort(db, &type_queue)
 
-    for t in sorted {
-        match db.types.kind(t) {
-            struct_, nominal {
-                ccg.define_struct(&db.types, arena, t)
-            }
-            array {
-                ccg.define_array(&db.types, arena, t)
-            }
-            func {
-                ccg.define_func_type(&db.types, arena, t)
-            }
-            union_ {
-                ccg.define_union(&db.types, arena, t)
-            }
-            enum_ {
-                ccg.define_enum(&db.types, arena, t)
-            }
-            else {}
-        }
+    for ty in sorted {
+        ccg.define_type(&db.types, arena, ty)
     }
 
     sorted.destroy()

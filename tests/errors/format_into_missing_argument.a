@@ -1,0 +1,10 @@
+format :: @import("std/fmt")
+Arena :: @import("std/allocator").Arena
+String :: @import("std/string").String
+
+main :: fn() {
+    arena := Arena.new(64)
+    out := String.new(&arena)
+    format.fmt_into(&out, "{} {}", .{ 1 })
+    arena.destroy()
+}

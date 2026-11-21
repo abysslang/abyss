@@ -1,8 +1,6 @@
 Arena :: @import("std/allocator").Arena
 String :: @import("std/string").String
-fall :: @import("std/sys").fall
-format_float :: @import("std/sys").format_float
-write_console :: @import("std/sys").write_console
+sys :: @import("std/sys")
 
 Convert :: struct {
     unsigned64 :: fn(out &String, value u64) {
@@ -55,7 +53,7 @@ Convert :: struct {
 
     float64 :: fn(out &String, value f64) {
         out.reserve(out.len + 384)
-        count := format_float(out.ptr + out.len, 384, value)
+        count := sys.format_float(out.ptr + out.len, 384, value)
         out.len = out.len + count
     }
 
@@ -146,7 +144,7 @@ Convert :: struct {
     call :: fn(out &String, function Str, value Str) {
         out.push_str("Convert.")
         out.push_str(function)
-        out.push_str("(&out, ")
+        out.push_str("(out, ")
         out.push_str(value)
         out.push_str(")\n")
     }
@@ -240,7 +238,7 @@ Convert :: struct {
             ret
         }
         if (kind == TypeKind.float) or (kind == TypeKind.untyped_float) {
-            out.push_str("Convert.float64(&out, ")
+            out.push_str("Convert.float64(out, ")
             out.push_str(value)
             out.push_str(" as f64)\n")
             ret
@@ -279,7 +277,7 @@ Convert :: struct {
             } else {
                 Convert.literal(out, info.name)
                 Convert.literal(out, "(")
-                out.push_str("Convert.unsigned64(&out, ")
+                out.push_str("Convert.unsigned64(out, ")
                 out.push_str(value)
                 out.push_str(" as u64)\n")
                 Convert.literal(out, ")")
@@ -319,7 +317,7 @@ Convert :: struct {
             }
             Convert.literal(out, info.name)
             Convert.literal(out, "(")
-            out.push_str("Convert.unsigned64(&out, ")
+            out.push_str("Convert.unsigned64(out, ")
             out.push_str(value)
             out.push_str(" as u64)\n")
             Convert.literal(out, ")")
@@ -429,6 +427,6 @@ value_code :: fn(info &TypeInfo(), value Str) Str {
 }
 
 conversion_error :: fn(message Str) {
-    write_console(message)
-    #fall
+    sys.write_console(message)
+    sys.fall_at(@source_location())
 }

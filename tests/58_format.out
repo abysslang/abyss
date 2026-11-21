@@ -14,3 +14,9 @@ without newline:10 next line
 true
 true
 100
+true
+prefix {-42} 3 4
+true
+true
+true
+true

@@ -14,9 +14,10 @@ String :: struct {
     }
 
     of :: fn(T type, arena &Arena, value T) Self {
-        out := String.new(arena)
+        buffer := String.new(arena)
+        out := &buffer
         #value_code(@type_info(T), "value")
-        out
+        buffer
     }
 
     reserve :: fn(self &Self, needed u64) {

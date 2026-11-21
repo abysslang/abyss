@@ -31,6 +31,21 @@ Str :: struct {
 3. **Conversions**:
    - `Str.of(cstr)` converts `&u8` to `Str` (calculating length).
    - `to_cstr(&arena, str)` converts `Str` to a null-terminated `&u8` allocated in the arena.
+4. **Building text**:
+   - Append literal or dynamic fragments with `String.push_str`, `push_char`, or `push_u32` rather than writing forwarding functions.
+   - For fixed templates, use `fmt` to create a `String` and `fmt_into` to append into an existing buffer. Both require a compile-time `Str` pattern and a tuple of arguments. `fmt_into` uses the destination's arena and capacity and does not build an intermediate formatted string.
+   - Use `Fmt` for short fragments composed from runtime parts, such as `format.Fmt.new(arena).wrap("(", expression, ")").as_str()`.
+
+   ```abyss
+   format :: @import("std/fmt")
+   Arena :: @import("std/allocator").Arena
+
+   declaration :: fn(arena &Arena, name Str, value u32) Str {
+       out := format.fmt(arena, "static u32 {}", .{name})
+       format.fmt_into(&out, " = {};\n", .{value})
+       out.as_str()
+   }
+   ```
 
 ---
 

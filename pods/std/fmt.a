@@ -208,8 +208,13 @@ format_code :: fn(pattern Str, info &TypeInfo()) Str {
     out.as_str()
 }
 
-fmt :: fn(T type, arena &Arena, cmpt pattern Str, args T) String {
-    out := String.new(arena)
+fmt_into :: fn(T type, out &String, cmpt pattern Str, args T) {
     #format_code(pattern, @type_info(T))
-    out
+}
+
+fmt :: fn(T type, arena &Arena, cmpt pattern Str, args T) String {
+    buffer := String.new(arena)
+    out := &buffer
+    #format_code(pattern, @type_info(T))
+    buffer
 }

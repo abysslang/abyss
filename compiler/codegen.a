@@ -1,6 +1,6 @@
 Os :: @import("core/target").Os
 Arena :: @import("std/allocator").Arena
-Fmt :: @import("std/fmt").Fmt
+text :: @import("std/fmt")
 String :: @import("std/string").String
 fall :: @import("std/sys").fall
 
@@ -12,26 +12,21 @@ reflection :: @import("./typer/reflection")
 type_defs :: @import("./types")
 TypeStorage :: type_defs.TypeStorage
 
-append_str :: fn(v &String, s Str) {
-    v.push_str(s)
-}
-
-append_char :: fn(v &String, c u8) {
-    v.push_char(c)
-}
-
-append_u32 :: fn(v &String, n u32) {
-    v.push_u32(n)
-}
-
-string_view :: fn(v &String) Str {
-    v.as_str()
-}
-
 is_process_symbol :: fn(name Str) bool {
     name.eq("abyss_process_arg_count") or name.eq("abyss_process_arg") or
         name.eq("abyss_process_args") or
         name.eq("abyss_process_set_args")
+}
+
+integer_type :: fn(width u32, signed bool) Str {
+    if width == 8 { ret if signed { "int8_t" } else { "uint8_t" } }
+    if width == 16 { ret if signed { "int16_t" } else { "uint16_t" } }
+    if width == 32 { ret if signed { "int32_t" } else { "uint32_t" } }
+    if width == 64 { ret if signed { "int64_t" } else { "uint64_t" } }
+    if width == 128 { ret if signed { "__int128" } else { "unsigned __int128" } }
+    print("\n[codegen error] unsupported integer width")
+    #fall
+    ""
 }
 
 LoopCondition :: struct {
@@ -57,9 +52,7 @@ CCodeBuilder :: struct {
     }
 
     append_list_item :: fn(self &Self, list &String, value Str, first bool) {
-        if not first {
-            list.push_str(Str.of(", "))
-        }
+        if not first { list.push_str(", ") }
         list.push_str(value)
     }
 
@@ -79,7 +72,7 @@ CCodeGen :: struct {
     reflection_count     u32
     static_init          bool
     code                 String
-    emitted_structs      Vec(u32)
+    emitted_types        HashSet(u32)
     main_sym             u32
     has_main             bool
     main_returns_status  bool
@@ -99,7 +92,7 @@ CCodeGen :: struct {
             reflection_count: 0
             static_init: false
             code: String.new(arena)
-            emitted_structs: Vec(u32).new()
+            emitted_types: HashSet(u32).new()
             main_sym: 0
             has_main: false
             main_returns_status: false
@@ -111,7 +104,7 @@ CCodeGen :: struct {
     }
 
     destroy :: fn(self &Self) {
-        self.emitted_structs.destroy()
+        self.emitted_types.destroy()
     }
 
     empty_value :: fn(self &Self) Str {
@@ -125,11 +118,7 @@ CCodeGen :: struct {
     intrinsic_trap :: fn(self &Self) Str { "__builtin_trap()" }
 
     intrinsic_memcpy :: fn(self &Self, arena &Arena, args Str) Str {
-        call := String.new(arena)
-        call.push_str("(void)__builtin_memcpy(")
-        call.push_str(args)
-        call.push_char(')')
-        call.as_str()
+        text.Fmt.new(arena).wrap("(void)__builtin_memcpy(", args, ")").as_str()
     }
 
     has_value :: fn(self &Self, value Str) bool {
@@ -141,62 +130,46 @@ CCodeGen :: struct {
     }
 
     expr_typed_float :: fn(self &Self, raw Str, narrow bool) Str {
-        if not narrow {
-            ret raw
-        }
-        fmt := Fmt.new(self.arena)
-        fmt.cstr(c"((float)(").str(raw).cstr(c"))")
-        fmt.as_str()
+        if narrow { text.Fmt.new(self.arena).wrap("((float)(", raw, "))").as_str() } else { raw }
     }
 
     expr_folded_float :: fn(self &Self, arena &Arena, value f64, narrow bool) Str {
         bits := *(&value as &u64)
         exponent := ((bits >> 52) & 2047) as i32
         fraction := bits & (((1 as u64) << 52) - 1)
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"(")
+        fmt := text.Fmt.new(arena)
+        fmt.str("(")
         if (bits >> 63) != 0 {
-            fmt.cstr(c"-")
+            fmt.str("-")
         }
         if exponent == 2047 {
-            fmt.cstr(if fraction == 0 { c"(1.0/0.0)" } else { c"(0.0/0.0)" })
+            fmt.str(if fraction == 0 { "(1.0/0.0)" } else { "(0.0/0.0)" })
         } else {
-            fmt.cstr(if exponent == 0 { c"0x0." } else { c"0x1." })
+            fmt.str(if exponent == 0 { "0x0." } else { "0x1." })
             for index in Range.new(0, 13) {
                 digit := ((fraction >> (((12 - index) * 4) as u64)) & 15) as u64
                 fmt.char("0123456789abcdef".ptr[digit])
             }
-            fmt.cstr(c"p").int32(if exponent == 0 { -1022 } else { exponent - 1023 })
+            fmt.str("p").int32(if exponent == 0 { -1022 } else { exponent - 1023 })
         }
-        fmt.cstr(c")")
+        fmt.str(")")
         self.expr_typed_float(fmt.as_str(), narrow)
     }
 
     empty_parameters :: fn(self &Self) Str {
-        Str.of("void")
+        "void"
     }
 
     parameter_name :: fn(self &Self, arena &Arena, index u32) Str {
-        value := String.new(arena)
-        value.push_str(Str.of("_a"))
-        value.push_u32(index)
-        value.as_str()
+        text.Fmt.new(arena).sym("_a", index).as_str()
     }
 
-    parameter :: fn(self &Self, arena &Arena, ty Str, name Str) Str {
-        value := String.new(arena)
-        value.push_str(ty)
-        value.push_char(32 as u8)
-        value.push_str(name)
-        value.as_str()
+    parameter :: fn(self &Self, arena &Arena, ty, name Str) Str {
+        text.Fmt.new(arena).str(ty).space().str(name).as_str()
     }
 
     indent_line :: fn(self &Self) {
-        i: u32 = 0
-        while i < self.indent {
-            append_str(&self.code, Str.of("    "))
-            i = i + 1
-        }
+        for i in Range.new(0, self.indent as i32) { self.code.push_str("    ") }
     }
 
     abyss_main :: fn(self &Self, sym_id u32) {
@@ -206,64 +179,45 @@ CCodeGen :: struct {
 
     reset_locals :: fn(self &Self) {}
 
-    declare_function :: fn(self &Self, fn_name Str, ret_type Str, params Str) {
-        append_str(&self.func_decls, ret_type)
-        append_char(&self.func_decls, 32 as u8)
-        append_str(&self.func_decls, fn_name)
-        append_char(&self.func_decls, 40 as u8)
-        append_str(&self.func_decls, params)
-        append_str(&self.func_decls, Str.of(");\n"))
+    declare_function :: fn(self &Self, fn_name, ret_type, params Str) {
+        text.fmt_into(&self.func_decls, "{} {}({});\n", .{ ret_type, fn_name, params })
     }
 
-    declare_foreign :: fn(self &Self, fn_name Str, ret_type Str, params Str, module Str, name Str) {
+    declare_foreign :: fn(self &Self, fn_name, ret_type, params, module, name Str) {
         if self.target_os == Os.wasi and
             (name.eq("__builtin_wasm_memory_size") or name.eq("__builtin_wasm_memory_grow")) { ret }
         if is_process_symbol(name) {
             self.func_decls.push_str("static ")
         } else if module.len > 0 {
-            self.func_decls.push_str("__attribute__((import_module(\"")
-            self.func_decls.push_str(module)
-            self.func_decls.push_str("\"), import_name(\"")
-            self.func_decls.push_str(name)
-            self.func_decls.push_str("\"))) ")
-        } else if self.target_os == Os.darwin and
-            (name.eq("opendir") or name.eq("readdir") or name.eq("closedir")) {
-            self.func_decls.push_str(ret_type)
-            self.func_decls.push_char(' ')
-            self.func_decls.push_str(fn_name)
-            self.func_decls.push_char('(')
-            self.func_decls.push_str(params)
-            self.func_decls.push_str(") ")
-            self.func_decls.push_str(
-                if name.eq("opendir") {
-                    "__DARWIN_ALIAS_I("
-                } else if name.eq("readdir") {
-                    "__DARWIN_INODE64("
-                } else {
-                    "__DARWIN_ALIAS("
-                }
+            text.fmt_into(
+                &self.func_decls
+                "__attribute__((import_module(\"{}\"), import_name(\"{}\"))) "
+                .{ module, name }
             )
-            self.func_decls.push_str(name)
-            self.func_decls.push_str(");\n")
-            ret
+        } else if self.target_os == Os.darwin {
+            alias := if name.eq("opendir") { "__DARWIN_ALIAS_I" } else if name.eq("readdir") {
+                "__DARWIN_INODE64"
+            } else if name.eq("closedir") { "__DARWIN_ALIAS" } else { "" }
+            if alias.len > 0 {
+                text.fmt_into(
+                    &self.func_decls
+                    "{} {}({}) {}({});\n"
+                    .{ ret_type, fn_name, params, alias, name }
+                )
+                ret
+            }
         }
         self.declare_function(fn_name, ret_type, params)
     }
 
-    start_function :: fn(self &Self, fn_name Str, ret_type Str, params Str, exported bool) {
+    start_function :: fn(self &Self, fn_name, ret_type, params Str, exported bool) {
         if not exported or is_process_symbol(fn_name) {
             self.func_decls.push_str("static ")
             self.code.push_str("static ")
         }
         self.declare_function(fn_name, ret_type, params)
         self.temp_count = 0
-
-        append_str(&self.code, ret_type)
-        append_char(&self.code, 32 as u8)
-        append_str(&self.code, fn_name)
-        append_char(&self.code, 40 as u8)
-        append_str(&self.code, params)
-        append_str(&self.code, Str.of(") {\n"))
+        text.fmt_into(&self.code, "{} {}({}) {{\n", .{ ret_type, fn_name, params })
         self.indent = self.indent + 1
     }
 
@@ -271,98 +225,72 @@ CCodeGen :: struct {
         if self.indent > 0 {
             self.indent = self.indent - 1
         }
-        append_str(&self.code, Str.of("}\n\n"))
+        self.code.push_str("}\n\n")
     }
 
     begin_inline_scope :: fn(self &Self) {
         self.indent_line()
-        append_str(&self.code, Str.of("{\n"))
+        self.code.push_str("{\n")
         self.indent = self.indent + 1
     }
 
     end_inline_scope :: fn(self &Self) {
         self.indent = self.indent - 1
         self.indent_line()
-        append_str(&self.code, Str.of("}\n"))
+        self.code.push_str("}\n")
     }
 
     global_ref :: fn(self &Self, arena &Arena, sym u32, ty u32) Str {
         self.sym_name(arena, sym)
     }
 
-    declare_global :: fn(self &Self, sym u32, ty u32, name Str, type_name Str) {
-        self.global_decls.push_str("static ")
-        self.global_decls.push_str(type_name)
-        self.global_decls.push_char(' ')
-        self.global_decls.push_str(name)
-        self.global_decls.push_str(";\n")
+    declare_global :: fn(self &Self, sym, ty u32, name, type_name Str) {
+        text.fmt_into(&self.global_decls, "static {} {};\n", .{ type_name, name })
     }
 
     begin_globals :: fn(self &Self) {
         self.static_init = true
     }
 
-    initialize_global :: fn(self &Self, name Str, ty Str, value Str) {
-        self.global_defs.push_str("static ")
-        self.global_defs.push_str(ty)
-        self.global_defs.push_char(' ')
-        self.global_defs.push_str(name)
-        self.global_defs.push_str(" = ")
-        self.global_defs.push_str(value)
-        self.global_defs.push_str(";\n")
+    initialize_global :: fn(self &Self, name, ty, value Str) {
+        text.fmt_into(&self.global_defs, "static {} {} = {};\n", .{ ty, name, value })
     }
 
     end_globals :: fn(self &Self) {
         self.static_init = false
     }
 
-    create_variable :: fn(self &Self, name Str, ty Str, init_val Str, has_init bool) {
+    create_variable :: fn(self &Self, name, ty, init_val Str, has_init bool) {
         self.indent_line()
-        append_str(&self.code, ty)
-        append_char(&self.code, 32 as u8)
-        append_str(&self.code, name)
-        if has_init {
-            append_str(&self.code, Str.of(" = "))
-            append_str(&self.code, init_val)
-        } else {
-            append_str(&self.code, Str.of(" = {0}"))
-        }
-        append_str(&self.code, Str.of(";\n"))
+        value := if has_init { init_val } else { "{0}" }
+        text.fmt_into(&self.code, "{} {} = {};\n", .{ ty, name, value })
     }
 
     new_temp :: fn(self &Self, arena &Arena, ty Str) Str {
         self.temp_count = self.temp_count + 1
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"_t").uint32(self.temp_count)
-        name := fmt.as_str()
-        self.create_variable(name, ty, Str.empty(), false)
+        name := text.Fmt.new(arena).sym("_t", self.temp_count).as_str()
+        self.create_variable(name, ty, "", false)
         name
     }
 
     expr :: fn(self &Self, e Str) {
-        if e.len == 0 {
-            ret
-        }
+        if e.len == 0 { ret }
         self.indent_line()
-        append_str(&self.code, e)
-        append_str(&self.code, Str.of(";\n"))
+        text.fmt_into(&self.code, "{};\n", .{ e })
     }
 
     gen_return :: fn(self &Self, val Str, has_val bool) {
         self.indent_line()
-        append_str(&self.code, Str.of("return"))
-        if has_val and (val.len > 0) {
-            append_char(&self.code, 32 as u8)
-            append_str(&self.code, val)
+        if has_val and val.len > 0 {
+            text.fmt_into(&self.code, "return {};\n", .{ val })
+        } else {
+            self.code.push_str("return;\n")
         }
-        append_str(&self.code, Str.of(";\n"))
     }
 
     start_if :: fn(self &Self, cond Str) {
         self.indent_line()
-        append_str(&self.code, Str.of("if ("))
-        append_str(&self.code, cond)
-        append_str(&self.code, Str.of(") {\n"))
+        text.fmt_into(&self.code, "if ({}) {{\n", .{ cond })
         self.indent = self.indent + 1
     }
 
@@ -371,15 +299,13 @@ CCodeGen :: struct {
             self.indent = self.indent - 1
         }
         self.indent_line()
-        append_str(&self.code, Str.of("} else {\n"))
+        self.code.push_str("} else {\n")
         self.indent = self.indent + 1
     }
 
     start_while :: fn(self &Self, cond Str) {
         self.indent_line()
-        append_str(&self.code, Str.of("while ("))
-        append_str(&self.code, cond)
-        append_str(&self.code, Str.of(") {\n"))
+        text.fmt_into(&self.code, "while ({}) {{\n", .{ cond })
         self.indent = self.indent + 1
     }
 
@@ -388,67 +314,59 @@ CCodeGen :: struct {
             self.indent = self.indent - 1
         }
         self.indent_line()
-        append_str(&self.code, Str.of("}\n"))
+        self.code.push_str("}\n")
     }
 
     loop_label :: fn(self &Self, arena &Arena, id u32, suffix Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.sym(Str.of("_loop_"), id).str(suffix)
-        fmt.as_str()
+        text.Fmt.new(arena).sym("_loop_", id).str(suffix).as_str()
     }
 
     loop_begin_label :: fn(self &Self, arena &Arena, id u32) Str {
-        self.loop_label(arena, id, Str.of("_begin"))
+        self.loop_label(arena, id, "_begin")
     }
 
     loop_end_label :: fn(self &Self, arena &Arena, id u32) Str {
-        self.loop_label(arena, id, Str.of("_end"))
+        self.loop_label(arena, id, "_end")
     }
 
-    iterator_name :: fn(self &Self, arena &Arena, id u32, index u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"_for_").uint32(id).char(95 as u8).uint32(index)
-        fmt.as_str()
+    iterator_name :: fn(self &Self, arena &Arena, id, index u32) Str {
+        text.Fmt.new(arena).sym("_for_", id).char('_').uint32(index).as_str()
     }
 
-    iterator_next_name :: fn(self &Self, arena &Arena, id u32, index u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"_for_next_").uint32(id).char(95 as u8).uint32(index)
-        fmt.as_str()
+    iterator_next_name :: fn(self &Self, arena &Arena, id, index u32) Str {
+        text.Fmt.new(arena).sym("_for_next_", id).char('_').uint32(index).as_str()
     }
 
-    emit_label :: fn(self &Self, arena &Arena, label Str) {
-        fmt := Fmt.new(arena)
-        fmt.str(label).char(58 as u8)
-        self.expr(fmt.as_str())
+    emit_label :: fn(self &Self, label Str) {
+        self.indent_line()
+        text.fmt_into(&self.code, "{}:;\n", .{ label })
     }
 
-    emit_goto :: fn(self &Self, arena &Arena, label Str) {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"goto ").str(label)
-        self.expr(fmt.as_str())
+    emit_goto :: fn(self &Self, label Str) {
+        self.indent_line()
+        text.fmt_into(&self.code, "goto {};\n", .{ label })
     }
 
     emit_break :: fn(self &Self, arena &Arena) {
         if self.loop_condition.id == hir.hir_none() {
-            self.expr(Str.of("break"))
+            self.expr("break")
         } else {
             self.loop_condition.breaks = true
-            self.emit_goto(arena, self.loop_label(arena, self.loop_condition.id, Str.of("_end")))
+            self.emit_goto(self.loop_label(arena, self.loop_condition.id, "_end"))
         }
     }
 
     emit_cont :: fn(self &Self, arena &Arena) {
         if self.loop_condition.id == hir.hir_none() {
-            self.expr(Str.of("continue"))
+            self.expr("continue")
         } else {
             self.loop_condition.continues = true
-            self.emit_goto(arena, self.loop_label(arena, self.loop_condition.id, Str.of("_begin")))
+            self.emit_goto(self.loop_label(arena, self.loop_condition.id, "_begin"))
         }
     }
 
     break_statement :: fn(self &Self) {
-        self.expr(Str.of("break"))
+        self.expr("break")
     }
 
     begin_loop :: fn(self &Self, id u32) LoopScope {
@@ -462,15 +380,15 @@ CCodeGen :: struct {
         continues := self.loop_condition.continues
         self.set_loop(hir.hir_none(), false, false)
         if continues {
-            self.emit_label(arena, self.loop_begin_label(arena, scope.id))
+            self.emit_label(self.loop_begin_label(arena, scope.id))
         }
-        self.start_while(self.expr_one(arena))
+        self.start_while("1")
     }
 
     start_iterator_loop :: fn(self &Self, arena &Arena, scope &LoopScope) {
         scope.iterator = true
-        self.start_while(self.expr_one(arena))
-        self.emit_label(arena, self.loop_begin_label(arena, scope.id))
+        self.start_while("1")
+        self.emit_label(self.loop_begin_label(arena, scope.id))
     }
 
     end_loop :: fn(self &Self, arena &Arena, scope &LoopScope) {
@@ -480,206 +398,96 @@ CCodeGen :: struct {
         }
         self.end_block()
         if breaks {
-            self.emit_label(arena, self.loop_end_label(arena, scope.id))
+            self.emit_label(self.loop_end_label(arena, scope.id))
         }
         self.loop_condition = scope.outer
-    }
-
-    loop_id :: fn(self &Self) u32 {
-        self.loop_condition.id
-    }
-
-    loop_breaks :: fn(self &Self) bool {
-        self.loop_condition.breaks
-    }
-
-    loop_continues :: fn(self &Self) bool {
-        self.loop_condition.continues
     }
 
     set_loop :: fn(self &Self, id u32, breaks bool, continues bool) {
         self.loop_condition = .{ id: id, breaks: breaks, continues: continues }
     }
 
-    decl_struct :: fn(self &Self, name Str) {
-        append_str(&self.struct_forward_decls, Str.of("typedef struct "))
-        append_str(&self.struct_forward_decls, name)
-        append_char(&self.struct_forward_decls, 32 as u8)
-        append_str(&self.struct_forward_decls, name)
-        append_str(&self.struct_forward_decls, Str.of(";\n"))
-    }
-
-    def_struct :: fn(self &Self, ty_id u32, name Str, body Str) {
-        i: u64 = 0
-        while i < self.emitted_structs.len {
-            if self.emitted_structs.get(i) == ty_id {
-                ret
-            }
-            i = i + 1
-        }
-
-        self.emitted_structs.push(ty_id)
-        self.decl_struct(name)
-
-        append_str(&self.struct_defs, Str.of("struct "))
-        append_str(&self.struct_defs, name)
-        append_str(&self.struct_defs, Str.of(" {\n"))
-        append_str(&self.struct_defs, body)
-        append_str(&self.struct_defs, Str.of("};\n\n"))
+    start_struct :: fn(self &Self, name Str) {
+        text.fmt_into(&self.struct_forward_decls, "typedef struct {} {};\n", .{ name, name })
+        text.fmt_into(&self.struct_defs, "struct {} {{\n", .{ name })
     }
 
     define_struct :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {
-        if (types.kind(ty_id) == type_defs.TyKind.nominal) and
-            (types.nominal_base(ty_id) == type_defs.ty_id_none()) {
-            ret
+        fields := types.get_struct_fields(ty_id)
+        if fields.len == 0 {
+            self.struct_defs.push_str("    uint8_t _dummy;\n")
         }
-        i: u64 = 0
-        while i < self.emitted_structs.len {
-            if self.emitted_structs.get(i) == ty_id {
-                ret
-            }
-            i = i + 1
+        for field in fields.chunks(2) {
+            ty := self.type_str(types, arena, field.get(1))
+            text.fmt_into(&self.struct_defs, "    {} _f{};\n", .{ ty, field.get(0) })
         }
-
-        s_name := TypeStorage.name(arena, ty_id)
-        fmt := Fmt.new(arena)
-        s_fields := (&(*types)).get_struct_fields(ty_id)
-        f_count := s_fields.len / 2
-
-        if f_count == 0 {
-            fmt.cstr(c"    uint8_t _dummy;\n")
-        }
-        f_i: u64 = 0
-        while f_i < f_count {
-            fn_name := *(s_fields.ptr + (f_i * 2))
-            fn_ty := *(s_fields.ptr + (f_i * 2) + 1)
-            fn_ty_str := self.type_str(types, arena, fn_ty)
-
-            fmt.cstr(c"    ").str(fn_ty_str).cstr(c" _f").uint32(fn_name).cstr(c";\n")
-            f_i = f_i + 1
-        }
-
-        self.def_struct(ty_id, s_name, fmt.as_str())
     }
 
-    define_func_type :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {
-        i: u64 = 0
-        while i < self.emitted_structs.len {
-            if self.emitted_structs.get(i) == ty_id {
-                ret
-            }
-            i = i + 1
-        }
-        self.emitted_structs.push(ty_id)
-
-        fn_name := TypeStorage.name(arena, ty_id)
-        ret_ty := (&(*types)).func_return(ty_id)
-        ret_str := self.type_str(types, arena, ret_ty)
-
-        params := (&(*types)).func_params(ty_id)
-        params_fmt := Fmt.new(arena)
+    define_func_type :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32, name Str) {
+        ret_type := self.type_str(types, arena, types.func_return(ty_id))
+        dst := &self.struct_decls
+        text.fmt_into(dst, "typedef {} (*{})(", .{ ret_type, name })
+        params := types.func_params(ty_id)
         if params.len == 0 {
-            params_fmt.cstr(c"void")
+            dst.push_str("void")
         } else {
-            p_i: u64 = 0
-            while p_i < params.len {
-                p_ty := *(params.ptr + p_i)
-                p_str := self.type_str(types, arena, p_ty)
-                if p_i > 0 {
-                    params_fmt.cstr(c", ")
-                }
-                params_fmt.str(p_str)
-                p_i = p_i + 1
+            first := true
+            for ty in params {
+                if not first { dst.push_str(", ") }
+                dst.push_str(self.type_str(types, arena, ty))
+                first = false
             }
         }
-
-        append_str(&self.struct_decls, Str.of("typedef "))
-        append_str(&self.struct_decls, ret_str)
-        append_str(&self.struct_decls, Str.of(" (*"))
-        append_str(&self.struct_decls, fn_name)
-        append_str(&self.struct_decls, Str.of(")("))
-        append_str(&self.struct_decls, params_fmt.as_str())
-        append_str(&self.struct_decls, Str.of(");\n"))
-    }
-
-    define_enum :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {
-        i: u64 = 0
-        while i < self.emitted_structs.len {
-            if self.emitted_structs.get(i) == ty_id {
-                ret
-            }
-            i = i + 1
-        }
-        self.emitted_structs.push(ty_id)
-
-        e_name := TypeStorage.name(arena, ty_id)
-        backing_ty := (&(*types)).enum_backing(ty_id)
-        backing_str := self.type_str(types, arena, backing_ty)
-
-        append_str(&self.struct_decls, Str.of("typedef "))
-        append_str(&self.struct_decls, backing_str)
-        append_char(&self.struct_decls, 32 as u8)
-        append_str(&self.struct_decls, e_name)
-        append_str(&self.struct_decls, Str.of(";\n"))
+        dst.push_str(");\n")
     }
 
     define_union :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {
-        i: u64 = 0
-        while i < self.emitted_structs.len {
-            if self.emitted_structs.get(i) == ty_id {
-                ret
-            }
-            i = i + 1
+        dst := &self.struct_defs
+        dst.push_str("    uint32_t tag;\n    union {\n")
+        index: u32 = 0
+        for member in types.union_members(ty_id) {
+            ty := self.type_str(types, arena, member)
+            text.fmt_into(dst, "        {} _v{};\n", .{ ty, index })
+            index = index + 1
         }
-        self.emitted_structs.push(ty_id)
-
-        u_name := TypeStorage.name(arena, ty_id)
-        self.decl_struct(u_name)
-
-        members := (&(*types)).union_members(ty_id)
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"    uint32_t tag;\n    union {\n")
-        m_i: u64 = 0
-        while m_i < members.len {
-            m_ty := *(members.ptr + m_i)
-            m_str := self.type_str(types, arena, m_ty)
-            fmt.cstr(c"        ").str(m_str).cstr(c" _v").uint32(m_i as u32).cstr(c";\n")
-            m_i = m_i + 1
-        }
-        fmt.cstr(c"    } val;\n")
-
-        append_str(&self.struct_defs, Str.of("struct "))
-        append_str(&self.struct_defs, u_name)
-        append_str(&self.struct_defs, Str.of(" {\n"))
-        append_str(&self.struct_defs, fmt.as_str())
-        append_str(&self.struct_defs, Str.of("};\n\n"))
+        dst.push_str("    } val;\n")
     }
 
-    define_array :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {
-        i: u64 = 0
-        while i < self.emitted_structs.len {
-            if self.emitted_structs.get(i) == ty_id {
+    define_type :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {
+        kind := types.kind(ty_id)
+        if kind == type_defs.TyKind.nominal and
+            types.nominal_base(ty_id) == type_defs.ty_id_none() { ret }
+        if not self.emitted_types.insert(ty_id) { ret }
+
+        name := TypeStorage.name(arena, ty_id)
+        match kind {
+            func {
+                self.define_func_type(types, arena, ty_id, name)
                 ret
             }
-            i = i + 1
+            enum_ {
+                backing := self.type_str(types, arena, types.enum_backing(ty_id))
+                text.fmt_into(&self.struct_decls, "typedef {} {};\n", .{ backing, name })
+                ret
+            }
+            struct_, nominal, union_, array {}
+            else { ret }
         }
-        self.emitted_structs.push(ty_id)
-
-        a_name := TypeStorage.name(arena, ty_id)
-        self.decl_struct(a_name)
-
-        elem_ty := (&(*types)).get_array_type(ty_id)
-        elem_len := (&(*types)).get_array_len(ty_id)
-        elem_str := self.type_str(types, arena, elem_ty)
-
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"    ").str(elem_str).cstr(c" _v[").uint32(elem_len).cstr(c"];\n")
-
-        append_str(&self.struct_defs, Str.of("struct "))
-        append_str(&self.struct_defs, a_name)
-        append_str(&self.struct_defs, Str.of(" {\n"))
-        append_str(&self.struct_defs, fmt.as_str())
-        append_str(&self.struct_defs, Str.of("};\n\n"))
+        self.start_struct(name)
+        match kind {
+            struct_, nominal { self.define_struct(types, arena, ty_id) }
+            union_ { self.define_union(types, arena, ty_id) }
+            array {
+                ty := self.type_str(types, arena, types.get_array_type(ty_id))
+                text.fmt_into(
+                    &self.struct_defs
+                    "    {} _v[{}];\n"
+                    .{ ty, types.get_array_len(ty_id) }
+                )
+            }
+            else {}
+        }
+        self.struct_defs.push_str("};\n\n")
     }
 
     c_header :: fn(self &Self) Str {
@@ -706,17 +514,21 @@ typedef uint16_t _Float16;
     }
 
     finish :: fn(self &Self) Str {
+        parts := .[
+            self.c_header()
+            self.struct_forward_decls.as_str()
+            self.struct_decls.as_str()
+            self.struct_defs.as_str()
+            self.func_decls.as_str()
+            self.global_decls.as_str()
+            self.global_defs.as_str()
+            self.code.as_str()
+        ]
+        length: u64 = 0
+        for part in parts { length = length + part.len }
         out := String.new(self.arena)
-
-        out.push_str(self.c_header())
-
-        out.push_str(self.struct_forward_decls.as_str())
-        out.push_str(self.struct_decls.as_str())
-        out.push_str(self.struct_defs.as_str())
-        out.push_str(self.func_decls.as_str())
-        out.push_str(self.global_decls.as_str())
-        out.push_str(self.global_defs.as_str())
-        out.push_str(self.code.as_str())
+        out.reserve(length)
+        for part in parts { out.push_str(part) }
 
         if self.has_main {
             if self.target_os == Os.wasi {
@@ -726,14 +538,11 @@ typedef uint16_t _Float16;
                     "int main(int argc, char **argv) { abyss_process_set_args(argc, (uint8_t **)argv); "
                 )
             }
-            if self.main_returns_status { out.push_str("return ") }
-            out.push_str("sym_")
-            out.push_u32(self.main_sym)
-            out.push_str("(); ")
-            if not self.main_returns_status { out.push_str("return 0; ") }
-            out.push_str("}\n")
+            prefix := if self.main_returns_status { "return " } else { "" }
+            suffix := if self.main_returns_status { "" } else { "return 0; " }
+            text.fmt_into(&out, "{}sym_{}(); {}}}\n", .{ prefix, self.main_sym, suffix })
         }
-        string_view(&out)
+        out.as_str()
     }
 
     type_str :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) Str {
@@ -742,120 +551,49 @@ typedef uint16_t _Float16;
             #fall
         }
         kind := types.kind(ty_id)
-        payload := types.payload(ty_id)
-
-        if kind == type_defs.TyKind.unit {
-            ret Str.of("void")
+        width := types.payload(ty_id)
+        match kind {
+            unit { "void" }
+            bool { "bool" }
+            type_ { "uint32_t" }
+            untyped_int { "int32_t" }
+            untyped_float { "double" }
+            int, uint { integer_type(width, kind == type_defs.TyKind.int) }
+            float {
+                if width == 32 { ret "float" }
+                if width == 64 { ret "double" }
+                print("\n[codegen error] unsupported float width")
+                #fall
+                ""
+            }
+            ptr {
+                inner := self.type_str(types, arena, width)
+                text.Fmt.new(arena).str(inner).char('*').as_str()
+            }
+            struct_, nominal, func, enum_, union_, array { TypeStorage.name(arena, ty_id) }
+            infer, unknown, error {
+                print("\n[codegen error] unresolved type")
+                #fall
+                ""
+            }
+            else {
+                print("\n[codegen error] unsupported type")
+                #fall
+                ""
+            }
         }
-        if kind == type_defs.TyKind.bool {
-            ret Str.of("bool")
-        }
-        if kind == type_defs.TyKind.type_ {
-            ret Str.of("uint32_t")
-        }
-        if kind == type_defs.TyKind.int {
-            if payload == 8 {
-                ret Str.of("int8_t")
-            }
-            if payload == 16 {
-                ret Str.of("int16_t")
-            }
-            if payload == 32 {
-                ret Str.of("int32_t")
-            }
-            if payload == 64 {
-                ret Str.of("int64_t")
-            }
-            if payload == 128 {
-                ret Str.of("__int128")
-            }
-            print("\n[codegen error] unsupported integer width")
-            #fall
-            ret Str.empty()
-        }
-        if kind == type_defs.TyKind.uint {
-            if payload == 8 {
-                ret Str.of("uint8_t")
-            }
-            if payload == 16 {
-                ret Str.of("uint16_t")
-            }
-            if payload == 32 {
-                ret Str.of("uint32_t")
-            }
-            if payload == 64 {
-                ret Str.of("uint64_t")
-            }
-            if payload == 128 {
-                ret Str.of("unsigned __int128")
-            }
-            print("\n[codegen error] unsupported integer width")
-            #fall
-            ret Str.empty()
-        }
-        if kind == type_defs.TyKind.float {
-            if payload == 32 {
-                ret Str.of("float")
-            }
-            if payload == 64 {
-                ret Str.of("double")
-            }
-            print("\n[codegen error] unsupported float width")
-            #fall
-            ret Str.empty()
-        }
-        if kind == type_defs.TyKind.untyped_int {
-            ret Str.of("int32_t")
-        }
-        if kind == type_defs.TyKind.untyped_float {
-            ret Str.of("double")
-        }
-        if kind == type_defs.TyKind.ptr {
-            inner_ty := types.payload(ty_id)
-            inner_str := self.type_str(types, arena, inner_ty)
-            fmt := Fmt.new(arena)
-            fmt.str(inner_str).cstr(c"*")
-            ret fmt.as_str()
-        }
-        if (kind == type_defs.TyKind.struct_) or (kind == type_defs.TyKind.nominal) or
-            (kind == type_defs.TyKind.func) or
-            (kind == type_defs.TyKind.enum_) or
-            (kind == type_defs.TyKind.union_) or
-            (kind == type_defs.TyKind.array) {
-            ret TypeStorage.name(arena, ty_id)
-        }
-        if (kind == type_defs.TyKind.infer) or (kind == type_defs.TyKind.unknown) or
-            (kind == type_defs.TyKind.error) {
-            print("\n[codegen error] unresolved type")
-            #fall
-        }
-        print("\n[codegen error] unsupported type")
-        #fall
-        Str.empty()
     }
 
     sym_name :: fn(self &Self, arena &Arena, sym_id u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.sym(Str.of("sym_"), sym_id)
-        fmt.as_str()
-    }
-
-    field_name :: fn(self &Self, arena &Arena, field_id u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.sym(Str.of("_f"), field_id)
-        fmt.as_str()
+        text.Fmt.new(arena).sym("sym_", sym_id).as_str()
     }
 
     expr_int :: fn(self &Self, arena &Arena, val u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.uint32(val)
-        fmt.as_str()
+        text.Fmt.new(arena).uint32(val).as_str()
     }
 
     expr_u64 :: fn(self &Self, arena &Arena, val u64) Str {
-        out := Fmt.new(arena)
-        out.uint64(val).str("ULL")
-        out.as_str()
+        text.Fmt.new(arena).uint64(val).str("ULL").as_str()
     }
 
     expr_typed_cast :: fn(self &Self, arena &Arena, ty Str, inner Str, source u32) Str {
@@ -878,40 +616,40 @@ typedef uint16_t _Float16;
     }
 
     expr_one :: fn(self &Self, arena &Arena) Str {
-        self.expr_int(arena, 1)
+        "1"
     }
 
     format_raw_str :: fn(arena &Arena, raw Str) Str {
-        if (raw.len < 2) or (*(raw.ptr) != 96) {
+        if (raw.len < 2) or (raw.ptr[0] != 96) {
             ret raw
         }
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"\"")
+        fmt := text.Fmt.new(arena)
+        fmt.str("\"")
         i: u64 = 1
         end := raw.len - 1
         while i < end {
-            c := *(raw.ptr + i)
+            c := raw.ptr[i]
             if c == 10 {
-                fmt.cstr(c"\\n")
+                fmt.str("\\n")
             } else if c == 13 {
-                fmt.cstr(c"\\r")
+                fmt.str("\\r")
             } else if c == 9 {
-                fmt.cstr(c"\\t")
+                fmt.str("\\t")
             } else if c == 34 {
-                fmt.cstr(c"\\\"")
+                fmt.str("\\\"")
             } else if c == 92 {
-                if (i + 1 < end) and (*(raw.ptr + i + 1) == 96) {
+                if (i + 1 < end) and (raw.ptr[i + 1] == 96) {
                     fmt.char(96 as u8)
                     i = i + 1
                 } else {
-                    fmt.cstr(c"\\\\")
+                    fmt.str("\\\\")
                 }
             } else {
                 fmt.char(c)
             }
             i = i + 1
         }
-        fmt.cstr(c"\"")
+        fmt.str("\"")
         fmt.as_str()
     }
 
@@ -924,17 +662,17 @@ typedef uint16_t _Float16;
         raw Str
     ) Str {
         c_raw := raw
-        if (raw.len >= 2) and (*(raw.ptr) == 96) {
+        if (raw.len >= 2) and (raw.ptr[0] == 96) {
             c_raw = Self.format_raw_str(arena, raw)
         }
-        fmt := Fmt.new(arena)
+        fmt := text.Fmt.new(arena)
         if struct_name.len == 0 {
-            fmt.wrap(Str.of("((uint8_t*)"), c_raw, Str.of(")"))
+            fmt.wrap("((uint8_t*)", c_raw, ")")
             ret fmt.as_str()
         }
-        fmt.cstr(c"._f").uint32(ptr_id).cstr(c" = ((uint8_t*)").str(c_raw).cstr(c"), ._f").uint32(
+        fmt.str("._f").uint32(ptr_id).str(" = ((uint8_t*)").str(c_raw).str("), ._f").uint32(
             len_id
-        ).cstr(c" = (sizeof(").str(c_raw).cstr(c") - 1)")
+        ).str(" = (sizeof(").str(c_raw).str(") - 1)")
         self.expr_struct_init(arena, struct_name, fmt.as_str())
     }
 
@@ -944,57 +682,44 @@ typedef uint16_t _Float16;
 
     expr_cstr_lit :: fn(self &Self, arena &Arena, raw Str) Str {
         c_raw := raw
-        if (raw.len >= 2) and (*(raw.ptr) == 99) {
+        if (raw.len >= 2) and (raw.ptr[0] == 'c') {
             c_raw = raw.sub(1, raw.len - 1)
-        } else if (raw.len >= 2) and (*(raw.ptr) == 96) {
+        } else if (raw.len >= 2) and (raw.ptr[0] == 96) {
             c_raw = Self.format_raw_str(arena, raw)
         }
-        fmt := Fmt.new(arena)
-        fmt.wrap(Str.of("((uint8_t*)"), c_raw, Str.of(")"))
-        fmt.as_str()
+        text.Fmt.new(arena).wrap("((uint8_t*)", c_raw, ")").as_str()
     }
 
     expr_bool :: fn(self &Self, val bool) Str {
-        if val {
-            ret Str.of("true")
-        }
-        Str.of("false")
+        if val { "true" } else { "false" }
     }
 
-    expr_assign :: fn(self &Self, arena &Arena, lhs Str, rhs Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.str(lhs).cstr(c" = ").str(rhs)
-        fmt.as_str()
+    expr_assign :: fn(self &Self, arena &Arena, lhs, rhs Str) Str {
+        text.Fmt.new(arena).str(lhs).str(" = ").str(rhs).as_str()
     }
 
-    expr_binary :: fn(self &Self, arena &Arena, op Str, lhs Str, rhs Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.binary(op, lhs, rhs)
-        fmt.as_str()
+    expr_binary :: fn(self &Self, arena &Arena, op, lhs, rhs Str) Str {
+        text.Fmt.new(arena).binary(op, lhs, rhs).as_str()
     }
 
     expr_zero :: fn(self &Self, arena &Arena, ty Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"((").str(ty).cstr(c"){0})")
-        fmt.as_str()
+        text.Fmt.new(arena).wrap("((", ty, "){0})").as_str()
     }
 
-    expr_unary :: fn(self &Self, arena &Arena, op Str, inner Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.char(40 as u8).str(op).char(40 as u8).str(inner).cstr(c"))")
-        fmt.as_str()
+    expr_unary :: fn(self &Self, arena &Arena, op, inner Str) Str {
+        text.Fmt.new(arena).char('(').str(op).wrap("(", inner, "))").as_str()
     }
 
     expr_neg :: fn(self &Self, arena &Arena, inner Str, ty u32) Str {
-        self.expr_unary(arena, Str.of("-"), inner)
+        self.expr_unary(arena, "-", inner)
     }
 
     expr_not :: fn(self &Self, arena &Arena, inner Str) Str {
-        self.expr_unary(arena, Str.of("!"), inner)
+        self.expr_unary(arena, "!", inner)
     }
 
     expr_bit_not :: fn(self &Self, arena &Arena, inner Str) Str {
-        self.expr_unary(arena, Str.of("~"), inner)
+        self.expr_unary(arena, "~", inner)
     }
 
     expr_typed_address :: fn(self &Self, arena &Arena, inner Str, ty u32) Str {
@@ -1002,7 +727,7 @@ typedef uint16_t _Float16;
     }
 
     expr_address :: fn(self &Self, arena &Arena, inner Str) Str {
-        self.expr_unary(arena, Str.of("&"), inner)
+        self.expr_unary(arena, "&", inner)
     }
 
     expr_typed_deref :: fn(self &Self, arena &Arena, inner Str, ty u32) Str {
@@ -1010,25 +735,19 @@ typedef uint16_t _Float16;
     }
 
     expr_deref :: fn(self &Self, arena &Arena, inner Str) Str {
-        self.expr_unary(arena, Str.of("*"), inner)
+        self.expr_unary(arena, "*", inner)
     }
 
     expr_str_deref :: fn(self &Self, arena &Arena, inner Str, ptr_id u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"(*(").str(inner).cstr(c"._f").uint32(ptr_id).cstr(c"))")
-        fmt.as_str()
+        text.Fmt.new(arena).str("(*(").str(inner).sym("._f", ptr_id).str("))").as_str()
     }
 
-    expr_cast :: fn(self &Self, arena &Arena, ty_str Str, inner Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"((").str(ty_str).cstr(c")").str(inner).char(41 as u8)
-        fmt.as_str()
+    expr_cast :: fn(self &Self, arena &Arena, ty_str, inner Str) Str {
+        text.Fmt.new(arena).wrap("((", ty_str, ")").str(inner).char(')').as_str()
     }
 
-    expr_call :: fn(self &Self, arena &Arena, callee Str, args Str, ty u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.str(callee).char(40 as u8).str(args).char(41 as u8)
-        fmt.as_str()
+    expr_call :: fn(self &Self, arena &Arena, callee, args Str, ty u32) Str {
+        text.Fmt.new(arena).str(callee).paren(args).as_str()
     }
 
     expr_typed_member :: fn(
@@ -1043,46 +762,30 @@ typedef uint16_t _Float16;
     }
 
     expr_member :: fn(self &Self, arena &Arena, lhs Str, depth u32, field_id u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.char(40 as u8)
-        d := depth
-        while d > 0 {
-            fmt.cstr(c"*(")
-            d = d - 1
-        }
+        fmt := text.Fmt.new(arena)
+        fmt.char('(')
+        for i in Range.new(0, depth as i32) { fmt.str("*(") }
         fmt.str(lhs)
-        d = depth
-        while d > 0 {
-            fmt.char(41 as u8)
-            d = d - 1
-        }
-        fmt.cstr(c")._f").uint32(field_id)
-        fmt.as_str()
+        for i in Range.new(0, depth as i32) { fmt.char(')') }
+        fmt.sym(")._f", field_id).as_str()
     }
 
     expr_struct_init_field :: fn(self &Self, arena &Arena, field_id u32, val_str Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"._f").uint32(field_id).cstr(c" = ").str(val_str)
-        fmt.as_str()
+        text.Fmt.new(arena).sym("._f", field_id).str(" = ").str(val_str).as_str()
     }
 
-    expr_struct_init :: fn(self &Self, arena &Arena, struct_name Str, fields_body Str) Str {
-        fmt := Fmt.new(arena)
+    expr_struct_init :: fn(self &Self, arena &Arena, struct_name, fields_body Str) Str {
         body := if fields_body.len > 0 { fields_body } else { "0" }
         if self.static_init {
-            fmt.cstr(c"{").str(body).cstr(c"}")
-        } else {
-            fmt.cstr(c"((").str(struct_name).cstr(c"){").str(body).cstr(c"})")
+            ret text.Fmt.new(arena).wrap("{", body, "}").as_str()
         }
-        fmt.as_str()
+        text.Fmt.new(arena).wrap("((", struct_name, "){").str(body).str("})").as_str()
     }
 
     reflection_symbol :: fn(self &Self, arena &Arena) Str {
         count := self.reflection_count
         self.reflection_count = count + 1
-        out := Fmt.new(arena)
-        out.cstr(c"abyss_reflection_").uint32(count)
-        out.as_str()
+        text.Fmt.new(arena).sym("abyss_reflection_", count).as_str()
     }
 
     reflection_record :: fn(
@@ -1106,15 +809,15 @@ typedef uint16_t _Float16;
         type_name := self.type_str(&db.types, arena, ty)
         self.declare_global(0, ty, name, type_name)
 
-        out := Fmt.new(arena)
-        out.cstr(c"{")
+        out := text.Fmt.new(arena)
+        out.str("{")
         fields := db.types.get_struct_fields(ty)
         for index in Range.new(0, (fields.len / 2) as i32) {
             i := index as u64
             field := fields.ptr[i * 2]
             field_ty := fields.ptr[i * 2 + 1]
             bits := (value as &u64)[i]
-            out.cstr(c"._f").uint32(field).cstr(c" = ")
+            out.str("._f").uint32(field).str(" = ")
             if field_ty == db.str_type {
                 ptr := reflection.reflection_read(db, bits, field_ty, "ptr") as &u8
                 len := reflection.reflection_read(db, bits, field_ty, "len")
@@ -1147,9 +850,9 @@ typedef uint16_t _Float16;
             } else {
                 out.str(self.expr_u64(arena, bits))
             }
-            out.cstr(c", ")
+            out.str(", ")
         }
-        out.cstr(c"}")
+        out.str("}")
         self.initialize_global(name, type_name, out.as_str())
         address
     }
@@ -1167,17 +870,15 @@ typedef uint16_t _Float16;
             ret "0"
         }
         name := self.reflection_symbol(arena)
-        out := Fmt.new(arena)
-        out.cstr(c"static ").str(self.type_str(&db.types, arena, ty)).char(' ').str(name).cstr(
-            c"[] = {"
-        )
+        out := text.Fmt.new(arena)
+        out.str("static ").str(self.type_str(&db.types, arena, ty)).space().str(name).str("[] = {")
         item_ty := db.types.payload(ty)
         items := value as &&u8
         for index in Range.new(0, count as i32) {
             out.str(self.reflection_record(arena, db, records, item_ty, items[index] as u64))
-            out.cstr(c", ")
+            out.str(", ")
         }
-        out.cstr(c"};\n")
+        out.str("};\n")
         self.global_defs.push_str(out.as_str())
         name
     }
@@ -1193,179 +894,94 @@ typedef uint16_t _Float16;
     }
 
     expr_sizeof :: fn(self &Self, arena &Arena, ty Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"((uint64_t)sizeof(").str(ty).cstr(c"))")
-        fmt.as_str()
+        text.Fmt.new(arena).wrap("((uint64_t)sizeof(", ty, "))").as_str()
     }
 
     expr_union :: fn(self &Self, arena &Arena, union_name Str, tag u32, value Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c" .tag = ").uint32(tag).cstr(c", .val = { ._v").uint32(tag).cstr(c" = ").str(
-            value
-        ).cstr(c" } ")
-        self.expr_struct_init(arena, union_name, fmt.as_str())
+        body := text.fmt(
+            arena
+            " .tag = {}, .val = {{ ._v{} = {} }} "
+            .{ tag, tag, value }
+        ).as_str()
+        self.expr_struct_init(arena, union_name, body)
     }
 
     expr_union_member :: fn(self &Self, arena &Arena, value Str, tag u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"((").str(value).cstr(c").val._v").uint32(tag).cstr(c")")
-        fmt.as_str()
+        text.Fmt.new(arena).wrap("((", value, ").val").sym("._v", tag).char(')').as_str()
     }
 
     expr_union_tag :: fn(self &Self, arena &Arena, value Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"((").str(value).cstr(c").tag)")
-        fmt.as_str()
+        text.Fmt.new(arena).wrap("((", value, ").tag)").as_str()
     }
 
     expr_union_is :: fn(self &Self, arena &Arena, value Str, tag u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"(").str(self.expr_union_tag(arena, value)).cstr(c" == ").uint32(tag).cstr(c")")
-        fmt.as_str()
+        text.Fmt.new(arena).wrap("(((", value, ").tag) == ").uint32(tag).char(')').as_str()
     }
 
     expr_enum_value :: fn(self &Self, arena &Arena, enum_name Str, value u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"((").str(enum_name).cstr(c")").uint32(value).cstr(c")")
-        fmt.as_str()
+        text.Fmt.new(arena).wrap("((", enum_name, ")").uint32(value).char(')').as_str()
     }
 
-    expr_address_of_value :: fn(self &Self, arena &Arena, ty Str, value Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.cstr(c"&((").str(ty).cstr(c"[]){").str(value).cstr(c"})[0]")
-        fmt.as_str()
+    expr_address_of_value :: fn(self &Self, arena &Arena, ty, value Str) Str {
+        text.Fmt.new(arena).wrap("&((", ty, "[]){").str(value).str("})[0]").as_str()
     }
 
     expr_field_value :: fn(self &Self, arena &Arena, value Str, field_id u32) Str {
         self.expr_member(arena, value, 0, field_id)
     }
 
-    expr_index :: fn(self &Self, arena &Arena, value Str, index Str) Str {
-        fmt := Fmt.new(arena)
-        fmt.char(40 as u8).str(value).char(91 as u8).str(index).char(93 as u8).char(41 as u8)
-        fmt.as_str()
-    }
-
     expr_array_index :: fn(
         self &Self
         arena &Arena
-        value Str
-        index Str
+        value, index Str
         elem_ty u32
         is_ptr bool
     ) Str {
-        fmt := Fmt.new(arena)
-        if is_ptr {
-            fmt.char(40 as u8).str(value).cstr(c"->_v[").str(index).cstr(c"])")
-        } else {
-            fmt.char(40 as u8).str(value).cstr(c"._v[").str(index).cstr(c"])")
+        access := if is_ptr { "->" } else { "." }
+        text.Fmt.new(arena).char('(').str(value).str(access).wrap("_v[", index, "])").as_str()
+    }
+
+    expr_slice_index :: fn(self &Self, arena &Arena, value, index Str, elem_ty, ptr_id u32) Str {
+        text.Fmt.new(arena).char('(').str(value).sym("._f", ptr_id).wrap("[", index, "])").as_str()
+    }
+
+    expr_ptr_index :: fn(self &Self, arena &Arena, value, index Str, elem_ty u32) Str {
+        text.Fmt.new(arena).char('(').str(value).wrap("[", index, "])").as_str()
+    }
+
+    expr_array_init :: fn(self &Self, arena &Arena, arr_name, elems Str, elem_ty, count u32) Str {
+        body := if count == 0 { " 0 " } else {
+            text.Fmt.new(arena).wrap(" { ", elems, " } ").as_str()
         }
-        fmt.as_str()
-    }
-
-    expr_slice_index :: fn(
-        self &Self
-        arena &Arena
-        value Str
-        index Str
-        elem_ty u32
-        ptr_id u32
-    ) Str {
-        fmt := Fmt.new(arena)
-        fmt.char(40 as u8).str(value).cstr(c"._f").uint32(ptr_id).cstr(c"[").str(index).cstr(c"])")
-        fmt.as_str()
-    }
-
-    expr_ptr_index :: fn(self &Self, arena &Arena, value Str, index Str, elem_ty u32) Str {
-        fmt := Fmt.new(arena)
-        fmt.char(40 as u8).str(value).cstr(c"[").str(index).cstr(c"])")
-        fmt.as_str()
-    }
-
-    expr_array_init :: fn(
-        self &Self
-        arena &Arena
-        arr_name Str
-        elems Str
-        elem_ty u32
-        count u32
-    ) Str {
-        fmt := Fmt.new(arena)
-        if count == 0 {
-            ret self.expr_struct_init(arena, arr_name, " 0 ")
-        }
-        fmt.cstr(c" { ").str(elems).cstr(c" } ")
-        self.expr_struct_init(arena, arr_name, fmt.as_str())
+        self.expr_struct_init(arena, arr_name, body)
     }
 
     expr_array_init_elem :: fn(self &Self, arena &Arena, val Str) Str {
         val
     }
 
-    append_list_item :: fn(self &Self, list &String, value Str, first bool) {
-        if not first {
-            list.push_str(Str.of(", "))
-        }
-        list.push_str(value)
-    }
-
     binary_op :: fn(self &Self, kind HirExprKind) Str {
-        k := hir.hir_kind
-        if kind == k.binary_add {
-            ret Str.of(" + ")
+        match kind {
+            binary_add { " + " }
+            binary_sub { " - " }
+            binary_mul { " * " }
+            binary_div { " / " }
+            binary_mod { " % " }
+            binary_eq_eq { " == " }
+            binary_neq { " != " }
+            binary_lt { " < " }
+            binary_gt { " > " }
+            binary_lt_eq { " <= " }
+            binary_gt_eq { " >= " }
+            binary_and { " && " }
+            binary_or { " || " }
+            binary_bit_and { " & " }
+            binary_bit_or { " | " }
+            binary_bit_xor { " ^ " }
+            binary_shl { " << " }
+            binary_shr { " >> " }
+            else { " " }
         }
-        if kind == k.binary_sub {
-            ret Str.of(" - ")
-        }
-        if kind == k.binary_mul {
-            ret Str.of(" * ")
-        }
-        if kind == k.binary_div {
-            ret Str.of(" / ")
-        }
-        if kind == k.binary_mod {
-            ret Str.of(" % ")
-        }
-        if kind == k.binary_eq_eq {
-            ret Str.of(" == ")
-        }
-        if kind == k.binary_neq {
-            ret Str.of(" != ")
-        }
-        if kind == k.binary_lt {
-            ret Str.of(" < ")
-        }
-        if kind == k.binary_gt {
-            ret Str.of(" > ")
-        }
-        if kind == k.binary_lt_eq {
-            ret Str.of(" <= ")
-        }
-        if kind == k.binary_gt_eq {
-            ret Str.of(" >= ")
-        }
-        if kind == k.binary_and {
-            ret " && "
-        }
-        if kind == k.binary_or {
-            ret " || "
-        }
-        if kind == k.binary_bit_and {
-            ret Str.of(" & ")
-        }
-        if kind == k.binary_bit_or {
-            ret Str.of(" | ")
-        }
-        if kind == k.binary_bit_xor {
-            ret Str.of(" ^ ")
-        }
-        if kind == k.binary_shl {
-            ret Str.of(" << ")
-        }
-        if kind == k.binary_shr {
-            ret Str.of(" >> ")
-        }
-        Str.of(" ")
     }
 
     expr_binary_kind :: fn(self &Self, arena &Arena, kind HirExprKind, lhs Str, rhs Str) Str {
@@ -1373,34 +989,18 @@ typedef uint16_t _Float16;
     }
 
     expr_equal :: fn(self &Self, arena &Arena, lhs Str, rhs Str) Str {
-        self.expr_binary(arena, Str.of(" == "), lhs, rhs)
+        self.expr_binary(arena, " == ", lhs, rhs)
     }
 
     expr_or :: fn(self &Self, arena &Arena, lhs Str, rhs Str) Str {
-        self.expr_binary(arena, Str.of(" || "), lhs, rhs)
+        self.expr_binary(arena, " || ", lhs, rhs)
     }
 
     expr_less_equal :: fn(self &Self, arena &Arena, lhs Str, rhs Str) Str {
-        self.expr_binary(arena, Str.of(" <= "), lhs, rhs)
+        self.expr_binary(arena, " <= ", lhs, rhs)
     }
 
     expr_add :: fn(self &Self, arena &Arena, lhs Str, rhs Str) Str {
-        self.expr_binary(arena, Str.of(" + "), lhs, rhs)
+        self.expr_binary(arena, " + ", lhs, rhs)
     }
-}
-
-CCodeGen_finish :: fn(self &CCodeGen) Str {
-    self.finish()
-}
-
-CCodeGen_new :: fn(arena &Arena) CCodeGen {
-    CCodeGen.new(arena)
-}
-
-CCodeGen_destroy :: fn(self &CCodeGen) {
-    self.destroy()
-}
-
-CCodeGen_abyss_main :: fn(self &CCodeGen, sym_id u32) {
-    self.abyss_main(sym_id)
 }
