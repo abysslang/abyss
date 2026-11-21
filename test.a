@@ -1,0 +1,25 @@
+thread :: @import("std/thread")
+
+Counter :: thread.Mutex(i32)
+
+increment :: fn(counter &Counter) i32 {
+    counter.with_lock(
+        fn(value &i32) i32 {
+            *value = *value + 1
+            *value
+        }
+    )
+}
+
+main :: fn() {
+    square := thread.spawn_with(fn(n i32) i32 { n * n }, 7 as i32).unwrap()
+    counter := Counter.new(0 as i32).unwrap()
+    worker := thread.spawn_shared(increment, &counter).unwrap()
+
+    increment(&counter)
+    worker.join().unwrap()
+
+    printf("7 squared: {}\n", .{ square.join().unwrap() })
+    printf("Shared counter: {}\n", .{ counter.with_lock(fn(value &i32) i32 { *value }) })
+    counter.destroy().unwrap()
+}

@@ -1,9 +1,10 @@
 target :: @import("core/target")
+native_output :: @import("core/target_values").native_output
 mem :: @import("std/mem")
 sys :: @import("std/sys")
 native :: @import("std/sys/thread_native")
 
-supported :: target.native_output and target.target_os != target.Os.wasi and
+supported :: native_output and target.target_os != target.Os.wasi and
     target.target_os != target.Os.freestanding
 
 Unit :: struct {}
