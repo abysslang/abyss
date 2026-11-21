@@ -50,6 +50,7 @@ Abyss is a statically typed, expression-oriented systems programming language fe
      - `write(value)` in `std.io` formats and prints `value` **without** a trailing newline. Use `write` for inline output, concatenations, or progress indicators.
      - `printf(pattern, args)` in `std.io` formats according to `pattern` without an automatic trailing newline.
    - **Build text with `std/fmt`**: Use `fmt(arena, pattern, args)` for a new `String` and `fmt_into(&buffer, pattern, args)` to append to an existing one. Both specialize the template at compile time. For single fragments, call `String` methods directly; use `Fmt` to chain small writes into a new fragment.
+   - **Run native threads with `std/thread`**: Pass pointer-free captures by value with `spawn_with`. Use `spawn_shared` for explicit borrows, `Mutex(T)` to synchronize mutable state, and `join()` to collect a typed result.
    - **Prefer High-Level Abstractions**: Never write low-level C-style null checks, ad-hoc arrays, or manual loop copies when standard collections (`Vec`, `HashMap`, `HashSet`) or abstractions (`Maybe`) can make the code clean, concise, and expressive.
    - **Embrace `Maybe` (Abyss's `Option`)**: Use `Maybe` for any optional or fallible value instead of sentinel values (`-1`, null pointers). Use `.is_some()`, `.is_none()`, `.unwrap()`, and `.unwrap_or(default)`.
 
@@ -477,3 +478,4 @@ Read these detailed documents when implementing complex features:
 - [Compiler Architecture & Codebase Layout](./references/architecture.md): Subsystems, pipeline phases, Nexus data structures, and bootstrap invariants.
 - [Grammar & Syntax Reference](./references/grammar.md): Full formal grammar, expressions, types, and compiler internals.
 - [Idiomatic Patterns & Standard Library](./references/idioms.md): Detailed recipes for `Str`, `Maybe`, `Vec`, memory ownership, and error handling.
+- [Native Threads](./references/threading.md): Typed workers, capture rules, mutexes, and lifecycle.

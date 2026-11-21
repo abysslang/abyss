@@ -1,0 +1,8 @@
+thread :: @import("std/thread")
+
+borrow :: fn(value &i32) &i32 { value }
+
+main :: fn() {
+    lock: thread.Mutex(i32)
+    lock.with_lock(borrow)
+}

@@ -1,0 +1,8 @@
+start :: extern "abyss_native_thread_start" fn(handle &u64, job &u8, detached bool) i32
+join :: extern "abyss_native_thread_join" fn(handle u64) i32
+yield :: extern "abyss_native_thread_yield" fn()
+mutex_new :: extern "abyss_native_thread_mutex_new" fn(handle &&u8) i32
+mutex_destroy :: extern "abyss_native_thread_mutex_destroy" fn(handle &u8) i32
+mutex_lock :: extern "abyss_native_thread_mutex_lock" fn(handle &u8) i32
+mutex_try_lock :: extern "abyss_native_thread_mutex_try_lock" fn(handle &u8) bool
+mutex_unlock :: extern "abyss_native_thread_mutex_unlock" fn(handle &u8) i32

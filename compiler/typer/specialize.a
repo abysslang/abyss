@@ -170,7 +170,11 @@ specialize_nominal_from_creator :: fn(eng &Engine, callee_sym u32, concrete_args
             f_ptr = fields_vec.ptr_at(0)
         }
         f_slice: Slice(u32) = .{ ptr: f_ptr, len: fields_vec.len }
-        structural_ty := types_ptr.alloc_struct(f_slice)
+        structural_ty := if db.is_extern_struct(struct_node) {
+            types_ptr.alloc_extern_struct(f_slice)
+        } else {
+            types_ptr.alloc_struct(f_slice)
+        }
         fields_vec.destroy()
 
         types_ptr.set_nominal_base(nom_ty, structural_ty)

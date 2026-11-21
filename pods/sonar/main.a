@@ -16,6 +16,7 @@ JsonVal :: @import("json").JsonVal
 parse_json :: @import("json").parse_json
 
 Builder :: @import("./builder").Builder
+thread_flags :: @import("./builder").thread_flags
 CBuildInfo :: @import("./manifest").CBuildInfo
 Dependency :: @import("./manifest").Dependency
 PodManifest :: @import("./manifest").PodManifest
@@ -506,7 +507,9 @@ cmd_test :: fn(arena &Arena, target_arg Str) {
         }
         cmd_run.push_char(' ' as u8)
         cmd_run.push_str(tf)
-        cmd_run.push_str(" /tmp/_sonar_t.c >/dev/null 2>&1 && gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O2 -Wno-implicit-function-declaration -Wno-error=incompatible-pointer-types ")
+        cmd_run.push_str(" /tmp/_sonar_t.c >/dev/null 2>&1 && gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O2 -Wno-implicit-function-declaration -Wno-error=incompatible-pointer-types")
+        cmd_run.push_str(thread_flags)
+        cmd_run.push_char(' ' as u8)
         oi: u64 = 0
         while oi < objects.len {
             cmd_run.push_str(objects.get(oi))

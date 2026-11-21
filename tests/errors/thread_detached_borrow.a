@@ -1,0 +1,8 @@
+thread :: @import("std/thread")
+
+worker :: fn(value &i32) { *value = 42 }
+
+main :: fn() {
+    value: i32
+    thread.spawn_detached(worker, &value)
+}

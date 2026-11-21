@@ -252,6 +252,17 @@ if [[ -z "${FILTER}" || fall == *"${FILTER}"* ]]; then
     fi
 fi
 
+if [[ -z "${FILTER}" || thread == *"${FILTER}"* ]]; then
+    TOTAL=$((TOTAL + 1))
+    if bash "${ROOT_DIR}/scripts/test_threads.sh" "${COMPILER}" "${C_COMPILER}" "${WORK_DIR}/thread"; then
+        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[Native]${RESET}\n" "thread_runtime"
+        PASSED=$((PASSED + 1))
+    else
+        printf "  ${RED}✘ FAIL${RESET}  %-36s ${DIM}[Native]${RESET}\n" "thread_runtime"
+        FAILED=$((FAILED + 1))
+    fi
+fi
+
 if [[ ${TOTAL} -eq 0 ]]; then
     echo -e "${YELLOW}No tests matched: ${FILTER}${RESET}"
     exit 1

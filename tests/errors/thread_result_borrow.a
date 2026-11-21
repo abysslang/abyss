@@ -1,0 +1,12 @@
+thread :: @import("std/thread")
+
+Return :: struct {
+    payload &i32
+}
+
+worker :: fn(value &i32) Return { .{ payload: value } }
+
+main :: fn() {
+    value: i32
+    thread.spawn_shared(worker, &value)
+}

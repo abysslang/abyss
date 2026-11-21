@@ -544,26 +544,8 @@ tyck_mono_function :: fn(eng &Engine, sym_id u32) {
     if orig_func_ty == type_defs.ty_id_none() {
         orig_func_ty = mono_func_ty
     }
-    struct_ty := type_defs.ty_id_none()
+    struct_ty := db.mono_context(sym_id)
     mono_params := db.types.func_params(mono_func_ty)
-    if mono_params.len > 0 {
-        p0 := db.types.unwrap_ptr(*(mono_params.ptr + 0))
-        if db.types.kind(p0) == type_defs.TyKind.nominal {
-            s_origin := db.types.nominal_origin(p0)
-            if db.types.get_nominal_creator_sym(s_origin) != type_defs.ty_id_none() {
-                struct_ty = p0
-            }
-        }
-    }
-    if struct_ty == type_defs.ty_id_none() {
-        r0 := db.types.unwrap_ptr(db.types.func_return(mono_func_ty))
-        if db.types.kind(r0) == type_defs.TyKind.nominal {
-            s_origin := db.types.nominal_origin(r0)
-            if db.types.get_nominal_creator_sym(s_origin) != type_defs.ty_id_none() {
-                struct_ty = r0
-            }
-        }
-    }
     if struct_ty != type_defs.ty_id_none() {
         s_origin := db.types.nominal_origin(struct_ty)
         creator_sym := db.types.get_nominal_creator_sym(s_origin)

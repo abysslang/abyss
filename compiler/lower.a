@@ -1,7 +1,9 @@
 Arena :: @import("std/allocator").Arena
 fall :: @import("std/sys").fall
+Os :: @import("core/target").Os
 
 hir :: @import("./hir")
+native_thread :: @import("./native_thread")
 decode_char_lit :: @import("./lexer").decode_char_lit
 Nexus :: @import("./nexus/nexus").Nexus
 id_none :: @import("./nexus/pool").id_none
@@ -142,9 +144,10 @@ resolve_call_symbol :: fn(db &Nexus, id u32, callee_id u32, queue &Vec(u32)) u32
     }
     mono_func_ty := db.get_const_type(id)
     if mono_func_ty != type_defs.ty_id_none() {
-        mono_sym := db.find_mono_sym(target_sym, mono_func_ty)
+        owner := db.mono_owner(callee_id, target_sym)
+        mono_sym := db.find_mono_sym(target_sym, mono_func_ty, owner)
         if mono_sym == id_none() {
-            mono_sym = db.alloc_mono_sym(target_sym, mono_func_ty)
+            mono_sym = db.alloc_mono_sym(target_sym, mono_func_ty, owner)
         }
         if not queue.contains(mono_sym) {
             queue.push(mono_sym)
@@ -978,14 +981,22 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
             if db.get_hir_symbol(id) != id_none() {
                 method_sym := db.get_hir_symbol(id)
                 real_sym := db.resolve_sym(method_sym)
-                if db.module_receiver(lhs_id) != id_none() {
-                    fn_node := db.get_fn_node(real_sym)
-                    if fn_node != hir.hir_none() {
-                        ty := db.get_node_type(id)
-                        add_type_to_queue(db, ty, type_queue)
-                        if not queue.contains(real_sym) { queue.push(real_sym) }
-                        ret lower_function_name(ctx, real_sym, fn_node, ty)
+                fn_node := db.get_fn_node(real_sym)
+                if fn_node != hir.hir_none() and
+                    (
+                        db.module_receiver(lhs_id) != id_none() or
+                            db.get_node_type(lhs_id) == type_defs.ty_id_type()
+                    ) {
+                    ty := db.get_node_type(id)
+                    target := if db.static_owner(id) == type_defs.ty_id_none() { real_sym } else {
+                        db.find_mono_sym(real_sym, ty, db.mono_owner(id, real_sym))
                     }
+                    if target == id_none() or db.types.func_has_type_param(ty) {
+                        db.type_error(id, "function value requires a concrete signature")
+                    }
+                    add_type_to_queue(db, ty, type_queue)
+                    if not queue.contains(target) { queue.push(target) }
+                    ret lower_function_name(ctx, target, fn_node, ty)
                 }
                 method_hir := db.get_sym_hir(real_sym)
                 if (method_hir != id_none()) and
@@ -2056,10 +2067,16 @@ lower_function_name :: fn(
     ccg := ctx.ccg
     if node != id_none() and db.is_extern_fn(node) and
         (not ccg.is_vm() or db.hir.extra(node) == hir.hir_none()) {
-        if not ccg.is_vm() and db.extern_module(node).len > 0 {
+        name := db.interner.get(db.extern_link_name(sym, node))
+        module := db.extern_module(node)
+        if module.len == 0 and native_thread.is_symbol(name) and
+            (ccg.is_vm() or db.target_os == Os.wasi or db.target_os == Os.freestanding) {
+            db.type_error(node, "threads require a hosted native target")
+        }
+        if not ccg.is_vm() and module.len > 0 {
             ret ccg.sym_name(ctx.arena, sym)
         }
-        ret ccg.extern_name(db.interner.get(db.extern_link_name(sym, node)), ty)
+        ret ccg.extern_name(name, ty)
     }
     ccg.sym_name(ctx.arena, sym)
 }

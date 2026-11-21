@@ -1,0 +1,9 @@
+Callback :: fn(T type) type {
+    struct {
+        size u64
+
+        new :: fn() Self { .{ size: @sizeof(T) } }
+
+        add_size :: fn(x i32) i32 { x + (@sizeof(T) as i32) }
+    }
+}

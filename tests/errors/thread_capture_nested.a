@@ -1,0 +1,14 @@
+thread :: @import("std/thread")
+
+Item :: i32 | Str
+
+Capture :: struct {
+    payload [2]Item
+}
+
+worker :: fn(value Capture) bool { true }
+
+main :: fn() {
+    capture: Capture
+    thread.spawn_with(worker, capture)
+}

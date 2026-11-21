@@ -1,6 +1,7 @@
 target_os :: @import("core/target_values").target_os
 target_arch :: @import("core/target_values").target_arch
 target_ptr_bits :: @import("core/target_values").target_ptr_bits
+native_output :: @import("core/target_values").native_output
 
 Os :: enum u8 {
     linux
@@ -17,8 +18,8 @@ Arch :: enum u8 {
 }
 
 Target :: struct {
-    os Os
-    arch Arch
+    os       Os
+    arch     Arch
     ptr_bits u8
 }
 

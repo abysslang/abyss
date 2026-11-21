@@ -52,6 +52,9 @@ try_load_source :: fn(db &nexus.Nexus, arena &Arena, target_path Str) Str {
         source.push_str("\ntarget_ptr_bits :: ")
         source.push_str(if db.target_arch == target.Arch.wasm32 { "32" } else { "64" })
         source.push_str(" as u8\n")
+        source.push_str(
+            if db.native_output { "native_output :: true\n" } else { "native_output :: false\n" }
+        )
         ret source.as_str()
     }
     stem := target_path.sub(0, target_path.len - 2)

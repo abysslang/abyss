@@ -1,0 +1,154 @@
+thread :: @import("std").thread
+sys :: @import("std/sys")
+
+expect :: fn(ok bool) {
+    if not ok { sys.fall_at(@source_location()) }
+}
+
+Capture :: struct {
+    nums [3]i32
+    pair struct { i32, i32 }
+}
+
+Sum :: i32 | bool
+
+answer :: fn() i32 { 42 }
+
+copied :: fn(capture Capture) i32 {
+    capture.nums[0] + capture.nums[2] + capture.pair.0
+}
+
+branch :: fn(flag bool) Sum {
+    if flag { ret true }
+    value: Sum = 42 as i32
+    value
+}
+
+return_error :: fn() thread.Error {
+    .{ kind: thread.ErrorKind.system, code: 42 }
+}
+
+copy_capture :: fn(capture Capture) Capture { capture }
+
+write_shared :: fn(value &i32) i32 {
+    *value = 42
+    *value
+}
+
+write_task :: fn(value &i32) { *value = 7 }
+
+run_task :: fn(capture i32) { expect(capture == 42) }
+
+Lock :: thread.Mutex(u64)
+Workers :: 8
+Rounds :: 8000
+
+increment :: fn(lock &Lock) u64 {
+    for i in Range.new(0, Rounds) {
+        value := lock.lock()
+        *value = *value + 1
+        lock.unlock()
+    }
+    Rounds as u64
+}
+
+try_once :: fn(lock &Lock) bool {
+    value := lock.try_lock()
+    if value.is_none() { ret false }
+    lock.unlock()
+    true
+}
+
+read_and_clear :: fn(value &u64) u64 {
+    count := *value
+    *value = 0
+    ret count
+}
+
+completions: Lock
+
+detach :: fn(value u64) {
+    count := completions.lock()
+    *count = *count + value
+    completions.unlock()
+}
+
+test_values :: fn() {
+    capture: Capture = .{ nums: .[ 10, 90, 12 ], pair: .{ 20, 0 } }
+    noargs := thread.spawn(answer).unwrap()
+    inline := thread.spawn_with(fn(value i32) i32 { value * 2 }, 21 as i32).unwrap()
+    copy := thread.spawn_with(copied, capture).unwrap()
+    composite := thread.spawn_with(copy_capture, capture).unwrap()
+    left := thread.spawn_with(branch, true).unwrap()
+    right := thread.spawn_with(branch, false).unwrap()
+    error := thread.spawn(return_error).unwrap()
+    capture.nums[0] = 99
+    expect(error.join().unwrap().code == 42)
+    expect((right.join().unwrap() as i32) == 42)
+    expect(left.join().unwrap() as bool)
+    expect(composite.join().unwrap().nums[0] == 10)
+    expect(copy.join().unwrap() == 42)
+    expect(noargs.join().unwrap() == 42)
+    expect(noargs.join().unwrap_error().kind == thread.ErrorKind.closed)
+    expect(inline.join().unwrap() == 42)
+
+    value: i32
+    shared := thread.spawn_shared(write_shared, &value).unwrap()
+    expect(shared.join().unwrap() == 42)
+    expect(value == 42)
+    task := thread.spawn_task(run_task, 42 as i32).unwrap()
+    no_state := thread.spawn_task(fn(value thread.Unit) {}, .{}).unwrap()
+    shared_task := thread.spawn_shared_task(write_task, &value).unwrap()
+    expect(task.join().is_success())
+    expect(no_state.join().is_success())
+    expect(shared_task.join().is_success())
+    expect(value == 7)
+}
+
+test_mutex :: fn() {
+    empty: Lock
+    expect(empty.try_lock().is_none())
+    expect(empty.destroy().unwrap_error().kind == thread.ErrorKind.closed)
+    lock := Lock.new(0 as u64).unwrap()
+    found := lock.try_lock()
+    expect(found.is_some())
+    expect(*found.unwrap() == 0)
+    checker := thread.spawn_shared(try_once, &lock).unwrap()
+    expect(not checker.join().unwrap())
+    expect(lock.destroy().unwrap_error().kind == thread.ErrorKind.system)
+    lock.unlock()
+
+    Worker :: thread.Thread(u64)
+    pool: [Workers]Worker
+    for i in Range.new(0, Workers) {
+        pool[i] = thread.spawn_shared(increment, &lock).unwrap()
+    }
+    for i in Range.new(0, Workers) {
+        expect(pool[Workers - 1 - i].join().unwrap() == (Rounds as u64))
+    }
+    expect(lock.with_lock(read_and_clear) == ((Workers * Rounds) as u64))
+    expect(lock.with_lock(read_and_clear) == 0)
+    expect(lock.destroy().is_success())
+    expect(lock.destroy().unwrap_error().kind == thread.ErrorKind.closed)
+}
+
+test_detached :: fn() {
+    completions = Lock.new(0 as u64).unwrap()
+    for i in Range.new(0, Workers) {
+        expect(thread.spawn_detached(detach, 1 as u64).is_success())
+    }
+    while true {
+        count := *completions.lock()
+        completions.unlock()
+        if count == (Workers as u64) { break }
+        thread.yield()
+    }
+    expect(completions.destroy().is_success())
+}
+
+main :: fn() {
+    expect(thread.supported)
+    test_values()
+    test_mutex()
+    test_detached()
+}

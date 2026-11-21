@@ -13,6 +13,7 @@ pool :: @import("./pool")
 MonoFunc :: struct {
     orig_sym   u32
     mono_ty    u32
+    owner      u32
     mono_sym   u32
     snap_start u32
     snap_len   u32
@@ -1028,14 +1029,43 @@ Nexus :: struct {
         false
     }
 
-    find_mono_sym :: fn(self &Self, orig_sym u32, mono_ty u32) u32 {
+    static_owner :: fn(self &Self, callee u32) u32 {
+        if self.hir.kind(callee) != ir.hir_kind.member { ret type_defs.ty_id_none() }
+        receiver := self.hir.lhs(callee)
+        if self.get_node_type(receiver) != type_defs.ty_id_type() { ret type_defs.ty_id_none() }
+        owner := self.get_const_type(receiver)
+        if self.types.kind(owner) == type_defs.TyKind.nominal and
+            self.types.get_nominal_creator_sym(self.types.nominal_origin(owner)) !=
+                type_defs.ty_id_none() {
+            ret owner
+        }
+        type_defs.ty_id_none()
+    }
+
+    returns_self :: fn(self &Self, sym u32) bool {
+        fn_node := self.get_fn_node(sym)
+        if fn_node == pool.id_none() { ret false }
+        result := self.hir.rhs(fn_node)
+        if result == ir.hir_none() { ret false }
+        if self.hir.kind(result) == ir.hir_kind.unary_addr_of { result = self.hir.lhs(result) }
+        self.hir.kind(result) == ir.hir_kind.ident and
+            self.interner.get(self.hir.lhs(result)).eq("Self")
+    }
+
+    mono_owner :: fn(self &Self, callee, sym u32) u32 {
+        owner := self.static_owner(callee)
+        if owner == type_defs.ty_id_none() or self.returns_self(sym) { ret type_defs.ty_id_none() }
+        owner
+    }
+
+    find_mono_sym :: fn(self &Self, orig_sym, mono_ty, owner u32) u32 {
         if (orig_sym == pool.id_none()) or (mono_ty == type_defs.ty_id_none()) {
             ret pool.id_none()
         }
         i: u64 = 0
         while i < self.mono_funcs.len {
             f := self.mono_funcs.get(i)
-            if (f.orig_sym == orig_sym) and (f.mono_ty == mono_ty) {
+            if f.orig_sym == orig_sym and f.mono_ty == mono_ty and f.owner == owner {
                 ret f.mono_sym
             }
             i = i + 1
@@ -1043,7 +1073,7 @@ Nexus :: struct {
         pool.id_none()
     }
 
-    alloc_mono_sym :: fn(self &Self, orig_sym u32, mono_ty u32) u32 {
+    alloc_mono_sym :: fn(self &Self, orig_sym, mono_ty, owner u32) u32 {
         if (orig_sym == pool.id_none()) or (mono_ty == type_defs.ty_id_none()) {
             ret pool.id_none()
         }
@@ -1074,7 +1104,14 @@ Nexus :: struct {
 
         idx := self.mono_funcs.len as u32
         self.mono_funcs.push(
-            .{ orig_sym: orig_sym, mono_ty: mono_ty, mono_sym: sym_id, snap_start: 0, snap_len: 0 }
+            .{
+                orig_sym: orig_sym
+                mono_ty: mono_ty
+                owner: owner
+                mono_sym: sym_id
+                snap_start: 0
+                snap_len: 0
+            }
         )
         self.sym_to_mono.set_safe(sym_id, idx, pool.id_none())
         sym_id
@@ -1102,6 +1139,30 @@ Nexus :: struct {
         self.mono_funcs.get(idx as u64).mono_ty
     }
 
+    mono_context :: fn(self &Self, sym u32) u32 {
+        f := self.mono_funcs.get(self.sym_to_mono.get(sym) as u64)
+        if f.owner != type_defs.ty_id_none() { ret f.owner }
+        result := self.types.unwrap_ptr(self.types.func_return(f.mono_ty))
+        if self.returns_self(f.orig_sym) and self.types.kind(result) == type_defs.TyKind.nominal {
+            ret result
+        }
+        params := self.types.func_params(f.mono_ty)
+        if params.len > 0 {
+            first := self.types.unwrap_ptr(*params.ptr)
+            if self.types.kind(first) == type_defs.TyKind.nominal and
+                self.types.get_nominal_creator_sym(self.types.nominal_origin(first)) !=
+                    type_defs.ty_id_none() {
+                ret first
+            }
+        }
+        if self.types.kind(result) == type_defs.TyKind.nominal and
+            self.types.get_nominal_creator_sym(self.types.nominal_origin(result)) !=
+                type_defs.ty_id_none() {
+            ret result
+        }
+        type_defs.ty_id_none()
+    }
+
     set_mono_type :: fn(self &Self, sym u32, ty u32) {
         if (sym as u64) >= (self.sym_to_mono.count() as u64) {
             ret
@@ -1124,10 +1185,11 @@ Nexus :: struct {
             ret
         }
         target_sym = self.resolve_sym(target_sym)
+        owner := self.mono_owner(callee, target_sym)
         i: u64 = 0
         while i < self.mono_funcs.len {
             f := self.mono_funcs.ptr_at(i)
-            if (f.orig_sym == target_sym) and (f.mono_ty == old_ty) {
+            if f.orig_sym == target_sym and f.mono_ty == old_ty and f.owner == owner {
                 f.mono_ty = new_ty
                 ret
             }
@@ -1325,27 +1387,7 @@ Nexus :: struct {
                 n = n + 1
             }
         }
-        mono_func_ty := self.get_mono_type(sym_id)
-        struct_ty := type_defs.ty_id_none()
-        mono_params := self.types.func_params(mono_func_ty)
-        if mono_params.len > 0 {
-            p0 := self.types.unwrap_ptr(*(mono_params.ptr + 0))
-            if self.types.kind(p0) == type_defs.TyKind.nominal {
-                s_origin := self.types.nominal_origin(p0)
-                if self.types.get_nominal_creator_sym(s_origin) != type_defs.ty_id_none() {
-                    struct_ty = p0
-                }
-            }
-        }
-        if struct_ty == type_defs.ty_id_none() {
-            r0 := self.types.unwrap_ptr(self.types.func_return(mono_func_ty))
-            if self.types.kind(r0) == type_defs.TyKind.nominal {
-                s_origin := self.types.nominal_origin(r0)
-                if self.types.get_nominal_creator_sym(s_origin) != type_defs.ty_id_none() {
-                    struct_ty = r0
-                }
-            }
-        }
+        struct_ty := self.mono_context(sym_id)
         if struct_ty != type_defs.ty_id_none() {
             s_origin := self.types.nominal_origin(struct_ty)
             creator_sym := self.types.get_nominal_creator_sym(s_origin)

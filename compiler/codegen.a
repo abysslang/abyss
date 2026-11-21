@@ -5,6 +5,7 @@ String :: @import("std/string").String
 fall :: @import("std/sys").fall
 
 hir :: @import("./hir")
+native_thread :: @import("./native_thread")
 HirExprKind :: hir.HirExprKind
 decode_char_lit :: @import("./lexer").decode_char_lit
 Nexus :: @import("./nexus/nexus").Nexus
@@ -77,6 +78,7 @@ CCodeGen :: struct {
     has_main             bool
     main_returns_status  bool
     target_os            Os
+    uses_threads         bool
     indent               u32
     loop_condition       LoopCondition
     temp_count           u32
@@ -97,6 +99,7 @@ CCodeGen :: struct {
             has_main: false
             main_returns_status: false
             target_os: Os.linux
+            uses_threads: false
             indent: 0
             loop_condition: .{ id: hir.hir_none(), breaks: false, continues: false }
             temp_count: 0
@@ -184,6 +187,10 @@ CCodeGen :: struct {
     }
 
     declare_foreign :: fn(self &Self, fn_name, ret_type, params, module, name Str) {
+        if module.len == 0 and native_thread.is_symbol(name) {
+            self.uses_threads = true
+            ret
+        }
         if self.target_os == Os.wasi and
             (name.eq("__builtin_wasm_memory_size") or name.eq("__builtin_wasm_memory_grow")) { ret }
         if is_process_symbol(name) {
@@ -514,8 +521,14 @@ typedef uint16_t _Float16;
     }
 
     finish :: fn(self &Self) Str {
+        threads := if not self.uses_threads { "" } else if self.target_os == Os.windows {
+            native_thread.windows
+        } else {
+            native_thread.posix
+        }
         parts := .[
             self.c_header()
+            threads
             self.struct_forward_decls.as_str()
             self.struct_decls.as_str()
             self.struct_defs.as_str()

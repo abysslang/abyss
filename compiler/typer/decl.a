@@ -626,6 +626,14 @@ synth_member :: fn(eng &Engine, id u32) {
                         db.set_hir_symbol(id, method_sym)
                         db.set_const_type(id, concrete_method_ty)
                         db.bind_type(slot, concrete_method_ty)
+                        if is_type and not types_ptr.has_infer(concrete_method_ty) and
+                            not types_ptr.func_has_type_param(concrete_method_ty) {
+                            original := db.resolve_sym(method_sym)
+                            owner := db.mono_owner(id, original)
+                            if db.find_mono_sym(original, concrete_method_ty, owner) == id_none() {
+                                db.alloc_mono_sym(original, concrete_method_ty, owner)
+                            }
+                        }
                         ret
                     }
                     method_slot := unify_ptr.get_slot(method)

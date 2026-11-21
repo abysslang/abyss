@@ -1,3 +1,4 @@
+target :: @import("core/target")
 Arena :: @import("std/allocator").Arena
 Vec :: @import("std/collections/vec").Vec
 File :: @import("std/fs").File
@@ -11,6 +12,8 @@ ResolvedPod :: @import("./resolver").ResolvedPod
 ensure_dir_all :: @import("./vendor").ensure_dir_all
 
 system :: extern fn(cmd &u8) i32
+
+thread_flags :: if target.target_os == target.Os.windows { "" } else { " -pthread" }
 
 Builder :: struct {
     arena      &Arena
@@ -127,6 +130,7 @@ Builder :: struct {
         }
         cmd_link := String.new(self.arena)
         cmd_link.push_str(self.cc)
+        cmd_link.push_str(thread_flags)
         cmd_link.push_str(" -std=gnu99 -D_POSIX_C_SOURCE=200809L -Wno-implicit-function-declaration -Wno-error=incompatible-pointer-types -O2 ")
         cmd_link.push_str(out_c)
 

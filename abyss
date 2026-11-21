@@ -118,7 +118,7 @@ case "${CMD}" in
         else
             "${COMPILER_BIN}" b "${ROOT_DIR}/main.a" "${ROOT_DIR}/tmp/out.c"
         fi
-        gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 -march=native -mtune=native -fomit-frame-pointer -funroll-loops "${ROOT_DIR}/tmp/out.c" -o "${ROOT_DIR}/tmp/out"
+        gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 -march=native -mtune=native -fomit-frame-pointer -funroll-loops -pthread "${ROOT_DIR}/tmp/out.c" -o "${ROOT_DIR}/tmp/out"
         ;;
     br)
         prepare_compiler
@@ -128,7 +128,7 @@ case "${CMD}" in
         else
             "${COMPILER_BIN}" b "${ROOT_DIR}/main.a" "${ROOT_DIR}/tmp/out.c"
         fi
-        gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 -march=native -mtune=native -fomit-frame-pointer -funroll-loops "${ROOT_DIR}/tmp/out.c" -o "${ROOT_DIR}/tmp/out"
+        gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 -march=native -mtune=native -fomit-frame-pointer -funroll-loops -pthread "${ROOT_DIR}/tmp/out.c" -o "${ROOT_DIR}/tmp/out"
         "${ROOT_DIR}/tmp/out"
         ;;
     b-win|win)

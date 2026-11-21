@@ -1,0 +1,14 @@
+factory :: @import("./modules/static_generic_factory")
+
+main :: fn() {
+    Small :: factory.Callback(i32)
+    Large :: factory.Callback(i64)
+    first := Small.add_size
+    second := Large.add_size
+    make := Large.new
+    print(first(10))
+    print(second(10))
+    print(Small.add_size(20))
+    print(Large.add_size(20))
+    print(make().size)
+}

@@ -1,0 +1,249 @@
+target :: @import("core/target")
+mem :: @import("std/mem")
+sys :: @import("std/sys")
+native :: @import("std/sys/thread_native")
+
+supported :: target.native_output and target.target_os != target.Os.wasi and
+    target.target_os != target.Os.freestanding
+
+Unit :: struct {}
+
+NO_CAPTURE :: 1 as u8
+WITH_CAPTURE :: 2 as u8
+TASK :: 3 as u8
+DETACHED :: 4 as u8
+
+ErrorKind :: enum u8 {
+    allocation
+    system
+    closed
+}
+
+Error :: struct {
+    kind ErrorKind
+    code i32
+}
+
+allocation_error :: fn() Error { .{ kind: ErrorKind.allocation, code: 0 } }
+system_error :: fn(code i32) Error { .{ kind: ErrorKind.system, code: code } }
+closed_error :: fn() Error { .{ kind: ErrorKind.closed, code: 0 } }
+
+Value :: fn(T type) type {
+    struct {
+        value T
+    }
+}
+
+Result :: fn(T type) type {
+    struct {
+        state Value(T) | Error
+
+        ok :: fn(value T) Self {
+            payload: Value(T) = .{ value: value }
+            .{ state: payload }
+        }
+
+        err :: fn(error Error) Self { .{ state: error } }
+
+        is_error :: fn(self &Self) bool {
+            match self.state {
+                Error { true }
+                else { false }
+            }
+        }
+
+        is_success :: fn(self &Self) bool { not self.is_error() }
+
+        unwrap :: fn(self &Self) T {
+            if self.is_error() { fail("[thread error] expected a successful operation\n") }
+            payload := self.state as Value(T)
+            payload.value
+        }
+
+        unwrap_error :: fn(self &Self) Error {
+            if self.is_success() { fail("[thread error] expected a failed operation\n") }
+            self.state as Error
+        }
+    }
+}
+
+Thread :: fn(R type) type {
+    struct {
+        handle u64
+        job    &u8
+        result &R
+
+        join :: fn(self &Self) Result(R) {
+            if self.job == (0 as &u8) { ret Result(R).err(closed_error()) }
+            code := native.join(self.handle)
+            if code != 0 { ret Result(R).err(system_error(code)) }
+            value := *self.result
+            mem.free(self.job)
+            self.job = 0 as &u8
+            self.result = 0 as &R
+            Result(R).ok(value)
+        }
+    }
+}
+
+fail :: fn(message Str) {
+    sys.write_stderr(message)
+    sys.fall_at(@source_location())
+}
+
+value_capture :: fn(info &TypeInfo()) bool {
+    match info.kind {
+        ptr, string { false }
+        array { value_capture(info.element) }
+        struct_, nominal, tuple {
+            for field in Slice(&FieldInfo()).new(info.fields, info.field_count) {
+                if not value_capture(field.type_info) { ret false }
+            }
+            true
+        }
+        union_ {
+            for member in Slice(&TypeInfo()).new(info.members, info.member_count) {
+                if not value_capture(member) { ret false }
+            }
+            true
+        }
+        else { true }
+    }
+}
+
+check_capture :: fn(capture, result &TypeInfo(), shared bool) Str {
+    if not shared and not value_capture(capture) {
+        fail("[thread error] captures must be pointer-free; use spawn_shared for borrowed state\n")
+    }
+    if not value_capture(result) {
+        fail("[thread error] results must be pointer-free\n")
+    }
+    ""
+}
+
+run_code :: fn(mode u8) Str {
+    if mode == NO_CAPTURE { ret "job.result = job.work()" }
+    if mode == WITH_CAPTURE { ret "job.result = job.work(job.capture)" }
+    if mode == DETACHED { ret "job.work(job.capture)\nmem.free(raw)" }
+    "job.work(job.capture)"
+}
+
+Job :: fn(F type, C type, R type, cmpt mode u8) type {
+    extern struct {
+        entry   fn(&u8)
+        work    F
+        capture C
+        result  R
+
+        run :: fn(raw &u8) {
+            job := raw as &Self
+            #run_code(mode)
+        }
+    }
+}
+
+start_job :: fn(F type, C type, R type, cmpt mode u8, work F, capture C) Result(Thread(R)) {
+    JobType :: Job(F, C, R, mode)
+    job := mem.malloc(@sizeof(JobType)) as &JobType
+    if job == (0 as &JobType) { ret Result(Thread(R)).err(allocation_error()) }
+    job.entry = JobType.run
+    job.work = work
+    job.capture = capture
+    if mode == TASK {
+        result: R
+        job.result = result
+    }
+
+    handle: u64
+    result := &job.result
+    code := native.start(&handle, job as &u8, mode == DETACHED)
+    if code != 0 {
+        mem.free(job as &u8)
+        ret Result(Thread(R)).err(system_error(code))
+    }
+    if mode == DETACHED { ret Result(Thread(R)).ok(.{ handle: 0, job: 0 as &u8, result: 0 as &R }) }
+    Result(Thread(R)).ok(.{ handle: handle, job: job as &u8, result: result })
+}
+
+spawn :: fn(R type, work fn() R) Result(Thread(R)) {
+    #check_capture(@type_info(Unit), @type_info(R), false)
+    unit: Unit
+    start_job(fn() R, Unit, R, NO_CAPTURE, work, unit)
+}
+
+spawn_with :: fn(C type, R type, work fn(C) R, capture C) Result(Thread(R)) {
+    #check_capture(@type_info(C), @type_info(R), false)
+    start_job(fn(C) R, C, R, WITH_CAPTURE, work, capture)
+}
+
+spawn_shared :: fn(C type, R type, work fn(C) R, capture C) Result(Thread(R)) {
+    #check_capture(@type_info(C), @type_info(R), true)
+    start_job(fn(C) R, C, R, WITH_CAPTURE, work, capture)
+}
+
+spawn_task :: fn(C type, work fn(C), capture C) Result(Thread(Unit)) {
+    #check_capture(@type_info(C), @type_info(Unit), false)
+    start_job(fn(C), C, Unit, TASK, work, capture)
+}
+
+spawn_shared_task :: fn(C type, work fn(C), capture C) Result(Thread(Unit)) {
+    start_job(fn(C), C, Unit, TASK, work, capture)
+}
+
+spawn_detached :: fn(C type, work fn(C), capture C) Result(Unit) {
+    #check_capture(@type_info(C), @type_info(Unit), false)
+    started := start_job(fn(C), C, Unit, DETACHED, work, capture)
+    if started.is_error() { ret Result(Unit).err(started.unwrap_error()) }
+    Result(Unit).ok(.{})
+}
+
+yield :: fn() { native.yield() }
+
+Mutex :: fn(T type) type {
+    struct {
+        handle &u8
+        data   T
+
+        new :: fn(value T) Result(Self) {
+            handle: &u8
+            code := native.mutex_new(&handle)
+            if code != 0 { ret Result(Self).err(system_error(code)) }
+            Result(Self).ok(.{ handle: handle, data: value })
+        }
+
+        lock :: fn(self &Self) &T {
+            if self.handle == (0 as &u8) or native.mutex_lock(self.handle) != 0 {
+                fail("[thread error] could not lock mutex\n")
+            }
+            &self.data
+        }
+
+        try_lock :: fn(self &Self) Maybe(&T) {
+            if self.handle == (0 as &u8) or not native.mutex_try_lock(self.handle) {
+                ret Maybe(&T).none()
+            }
+            Maybe(&T).some(&self.data)
+        }
+
+        unlock :: fn(self &Self) {
+            if self.handle == (0 as &u8) or native.mutex_unlock(self.handle) != 0 {
+                fail("[thread error] could not unlock mutex\n")
+            }
+        }
+
+        with_lock :: fn(self &Self, R type, work fn(&T) R) R {
+            #check_capture(@type_info(Unit), @type_info(R), false)
+            result := work(self.lock())
+            self.unlock()
+            result
+        }
+
+        destroy :: fn(self &Self) Result(Unit) {
+            if self.handle == (0 as &u8) { ret Result(Unit).err(closed_error()) }
+            code := native.mutex_destroy(self.handle)
+            if code != 0 { ret Result(Unit).err(system_error(code)) }
+            self.handle = 0 as &u8
+            Result(Unit).ok(.{})
+        }
+    }
+}

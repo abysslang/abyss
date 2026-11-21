@@ -309,9 +309,10 @@ register_call_mono_sym :: fn(db &Nexus, id u32, callee u32, mono_func_ty u32) {
     target_sym := db.get_hir_symbol(callee)
     if target_sym != id_none() {
         target_sym = db.resolve_sym(target_sym)
-        mono_sym := db.find_mono_sym(target_sym, mono_func_ty)
+        owner := db.mono_owner(callee, target_sym)
+        mono_sym := db.find_mono_sym(target_sym, mono_func_ty, owner)
         if mono_sym == id_none() {
-            db.alloc_mono_sym(target_sym, mono_func_ty)
+            db.alloc_mono_sym(target_sym, mono_func_ty, owner)
         }
     }
 }
@@ -466,7 +467,7 @@ synth_type_func_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot 
         }
     }
     callee_sym := id_none()
-    if tbl.kind(callee) == hir.hir_kind.ident {
+    if tbl.kind(callee) == hir.hir_kind.ident or tbl.kind(callee) == hir.hir_kind.member {
         sym := db.get_hir_symbol(callee)
         if sym != id_none() {
             callee_sym = db.resolve_sym(sym)
