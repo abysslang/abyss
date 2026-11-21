@@ -20,6 +20,7 @@ TypeKind :: enum u8 {
     union_
     tuple
     string
+    c_type
 }
 
 TypeInfo :: fn() type {

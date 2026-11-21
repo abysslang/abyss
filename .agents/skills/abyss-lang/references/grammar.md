@@ -20,7 +20,8 @@ This reference details the grammar, tokenization, type system, and AST/HIR rules
 - Splice: `#` (compile-time D-style mixin splice; expands string expressions into AST; supports nested multi-level splices `##`, `###`, `####`)
 - Builtins:
   - `@source_location()`: Returns a compile-time `SourceLocation` containing the source path and 1-based line and byte column. In generated code, the location is the enclosing splice invocation.
-  - `@sizeof(T)`: Evaluates memory size of type `T` in bytes as `u64`.
+  - `@sizeof(T)`: Evaluates memory size of type `T` in bytes as `u64`. Sizes of types imported from C headers are resolved by the hosted native toolchain.
+  - `@c_value("header.h", "NAME", T)`: Reads an integer value declared by a target C header. The header and C identifier are string literals; `T` is a fixed-width integer type.
   - `@typeof(x)`: Evaluates the static type of expression `x`.
   - `@is(val, Type)`: Tests if tagged union `val` currently holds variant `Type` (returns `bool`).
   - `@tag(val)`: Returns the numeric discriminant tag of tagged union `val` (`u32`).
@@ -50,6 +51,8 @@ runtime value or use its type through `@typeof(@import(path))`. Circular module
 references are allowed, but circular value initialization is rejected.
 
 ## 3. Types
+
+For hosted native code, use `extern ["header.h"] "symbol" fn(...) T` to use the C declaration in the header. Omit `"symbol"` to use the Abyss binding name. Use `extern ["header.h"] "CType" struct { ... }` for a named native type. Its fields, if listed, keep their C names, and its layout comes from the header.
 
 ### Primitive Types
 - Unsigned integers: `u8`, `u16`, `u32`, `u64`

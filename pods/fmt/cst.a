@@ -13,6 +13,7 @@ CstKind :: enum u16 {
     type_array
     fn_def
     extern_decl
+    extern_header
     fn_param
     struct_def
     struct_field

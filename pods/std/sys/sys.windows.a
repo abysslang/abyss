@@ -57,7 +57,9 @@ write_handle :: fn(handle i64, buf &u8, count u64) i64 {
     sent as i64
 }
 
-close_handle :: fn(handle i64) bool { CloseHandle(os_handle(handle)) != 0 }
+close_native :: fn(handle &u8) bool { CloseHandle(handle) != 0 }
+
+close_handle :: fn(handle i64) bool { close_native(os_handle(handle)) }
 
 seek_handle :: fn(handle i64, offset i64, whence i32) i64 {
     position: i64 = 0

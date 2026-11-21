@@ -3,6 +3,8 @@ native_output :: @import("core/target_values").native_output
 mem :: @import("std/mem")
 sys :: @import("std/sys")
 native :: @import("std/sys/thread_native")
+NativeHandle :: native.Handle
+NativeLock :: native.Lock
 
 supported :: native_output and target.target_os != target.Os.wasi and
     target.target_os != target.Os.freestanding
@@ -70,7 +72,7 @@ Result :: fn(T type) type {
 
 Thread :: fn(R type) type {
     struct {
-        handle u64
+        handle NativeHandle
         job    &u8
         result &R
 
@@ -94,7 +96,7 @@ fail :: fn(message Str) {
 
 value_capture :: fn(info &TypeInfo()) bool {
     match info.kind {
-        ptr, string { false }
+        ptr, string, c_type { false }
         array { value_capture(info.element) }
         struct_, nominal, tuple {
             for field in Slice(&FieldInfo()).new(info.fields, info.field_count) {
@@ -155,14 +157,16 @@ start_job :: fn(F type, C type, R type, cmpt mode u8, work F, capture C) Result(
         job.result = result
     }
 
-    handle: u64
+    handle: NativeHandle
     result := &job.result
     code := native.start(&handle, job as &u8, mode == DETACHED)
     if code != 0 {
         mem.free(job as &u8)
         ret Result(Thread(R)).err(system_error(code))
     }
-    if mode == DETACHED { ret Result(Thread(R)).ok(.{ handle: 0, job: 0 as &u8, result: 0 as &R }) }
+    if mode == DETACHED {
+        ret Result(Thread(R)).ok(.{ handle: handle, job: 0 as &u8, result: 0 as &R })
+    }
     Result(Thread(R)).ok(.{ handle: handle, job: job as &u8, result: result })
 }
 
@@ -208,32 +212,32 @@ sleep :: fn(milliseconds u64) Result(Unit) {
 
 Mutex :: fn(T type) type {
     struct {
-        handle &u8
+        handle &NativeLock
         data   T
 
         new :: fn(value T) Result(Self) {
-            handle: &u8
+            handle: &NativeLock
             code := native.mutex_new(&handle)
             if code != 0 { ret Result(Self).err(system_error(code)) }
             Result(Self).ok(.{ handle: handle, data: value })
         }
 
         lock :: fn(self &Self) &T {
-            if self.handle == (0 as &u8) or native.mutex_lock(self.handle) != 0 {
+            if self.handle == (0 as &NativeLock) or native.mutex_lock(self.handle) != 0 {
                 fail("[thread error] could not lock mutex\n")
             }
             &self.data
         }
 
         try_lock :: fn(self &Self) Maybe(&T) {
-            if self.handle == (0 as &u8) or not native.mutex_try_lock(self.handle) {
+            if self.handle == (0 as &NativeLock) or not native.mutex_try_lock(self.handle) {
                 ret Maybe(&T).none()
             }
             Maybe(&T).some(&self.data)
         }
 
         unlock :: fn(self &Self) {
-            if self.handle == (0 as &u8) or native.mutex_unlock(self.handle) != 0 {
+            if self.handle == (0 as &NativeLock) or native.mutex_unlock(self.handle) != 0 {
                 fail("[thread error] could not unlock mutex\n")
             }
         }
@@ -246,10 +250,10 @@ Mutex :: fn(T type) type {
         }
 
         destroy :: fn(self &Self) Result(Unit) {
-            if self.handle == (0 as &u8) { ret Result(Unit).err(closed_error()) }
+            if self.handle == (0 as &NativeLock) { ret Result(Unit).err(closed_error()) }
             code := native.mutex_destroy(self.handle)
             if code != 0 { ret Result(Unit).err(system_error(code)) }
-            self.handle = 0 as &u8
+            self.handle = 0 as &NativeLock
             Result(Unit).ok(.{})
         }
     }

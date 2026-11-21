@@ -20,7 +20,7 @@ main :: fn() {
 ```
 
 - `spawn(work)` runs a function with no arguments and returns a `Thread(R)` on success.
-- `spawn_with(work, value)` copies the capture into the job. Captures and return values are checked recursively at compile time. Use scalars, arrays, and structs of values. Pointers, slices, `Str`, and any type that contains them are rejected by value.
+- `spawn_with(work, value)` copies the capture into the job. Captures and return values are checked recursively at compile time. Use scalars, arrays, and structs of values. Pointers, slices, `Str`, native types imported from C headers, and types that contain them are rejected by value.
 - `spawn_shared(work, state)` explicitly permits borrowed state. Keep the memory alive until `join()` succeeds and synchronize access if it can be modified concurrently. Results still have to be pointer-free.
 - `spawn_task(work, value)` and `spawn_shared_task(work, state)` accept functions with no return type. Their handles join with a `Unit` result. Use `thread.Unit` and `.{}` for a task without any state.
 - `spawn_detached(work, value)` accepts a pointer-free capture and a function with no return type. It returns once the OS starts the thread. The worker releases its own job, and there is no handle to join. Arrange completion separately if the program must wait for it.
@@ -38,6 +38,6 @@ Operations that can fail return `thread.Result(T)`. Check `is_success()` or `is_
 - `with_lock(work)` passes `&T` to a callback, releases the mutex when the callback returns, and returns its pointer-free result.
 - `destroy()` releases the native lock. Use it after all workers have stopped using the mutex and the lock is free.
 
-A spawn uses one job allocation for its typed callback, capture, and result. Joining or completing a detached worker frees the job. There is no separate capture object or thread pool. Reflection checks run at compile time. Programs that do not use threads do not include the native thread bridge.
+A spawn uses one job allocation for its typed callback, capture, and result. Joining or completing a detached worker frees the job. There is no separate capture object or thread pool. Reflection checks run at compile time. The runtime lives in `std/sys` and calls the target's threading APIs through `extern`. Using `sleep` alone does not pull in thread creation or mutex bindings.
 
 `thread.supported` is a compile-time constant. Threads are available on native Linux, macOS, and Windows builds. The VM, WASI, and freestanding targets do not run them. When linking generated C yourself on POSIX, pass `-pthread`.

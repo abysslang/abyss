@@ -341,13 +341,26 @@ CstParser :: struct {
 
     parse_extern :: fn(self &Self, min_bp u8) &CstNode {
         self.bump()
+        header := Str.empty()
+        if self.consume_if(TokenKind.o_bracket) {
+            header = self.peek_token().text
+            self.expect(TokenKind.lit_str)
+            self.expect(TokenKind.c_bracket)
+        }
         kind := self.peek()
         name := if kind == TokenKind.lit_str or kind == TokenKind.lit_raw_str {
             self.bump().text
         } else {
             Str.empty()
         }
-        node := cst_new(self.arena, CstKind.extern_decl, name)
+        node := cst_new(self.arena, CstKind.extern_decl, "")
+        if header.len > 0 {
+            node.add_child(cst_leaf(self.arena, CstKind.extern_header, header))
+        }
+        if name.len > 0 {
+            kind := if name.ptr[0] == '`' { CstKind.lit_raw_str } else { CstKind.lit_str }
+            node.add_child(cst_leaf(self.arena, kind, name))
+        }
         if self.peek() == TokenKind.lit_str {
             node.add_child(cst_leaf(self.arena, CstKind.lit_str, self.bump().text))
         }

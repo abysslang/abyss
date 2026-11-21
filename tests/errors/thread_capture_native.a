@@ -1,0 +1,9 @@
+thread :: @import("std/thread")
+Native :: extern ["stdio.h"] "FILE" struct {}
+
+worker :: fn(value Native) i32 { 0 }
+
+main :: fn() {
+    value: Native
+    thread.spawn_with(worker, value)
+}

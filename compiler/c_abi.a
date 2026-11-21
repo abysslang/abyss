@@ -1,0 +1,34 @@
+Ascii :: @import("std/ascii").Ascii
+
+identifier :: fn(name Str) bool {
+    if name.len == 0 or not Ascii.is_alpha(name.ptr[0]) { ret false }
+    for byte in Slice(u8).new(name.ptr, name.len) {
+        if not Ascii.is_alphanumeric(byte) { ret false }
+    }
+    true
+}
+
+header_path :: fn(path Str) bool {
+    if path.len == 0 or path.ptr[0] == '/' { ret false }
+    start: u64 = 0
+    for index in Range.new(0, path.len as i32) {
+        byte := path.ptr[index]
+        if byte == '/' {
+            if not header_component(path.sub(start, index as u64 - start)) { ret false }
+            start = index as u64 + 1
+        } else if not Ascii.is_alphanumeric(byte) and byte != '.' and byte != '-' {
+            ret false
+        }
+    }
+    header_component(path.sub(start, path.len - start))
+}
+
+header_component :: fn(name Str) bool {
+    name.len > 0 and not name.eq(".") and not name.eq("..")
+}
+
+type_name :: fn(name Str) bool {
+    if name.starts_with("struct ") { ret identifier(name.sub(7, name.len - 7)) }
+    if name.starts_with("union ") { ret identifier(name.sub(6, name.len - 6)) }
+    identifier(name)
+}

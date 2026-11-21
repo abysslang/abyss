@@ -1,11 +1,11 @@
 Os :: @import("core/target").Os
 Arena :: @import("std/allocator").Arena
 text :: @import("std/fmt")
+Fmt :: text.Fmt
 String :: @import("std/string").String
 fall :: @import("std/sys").fall
 
 hir :: @import("./hir")
-native_thread :: @import("./native_thread")
 HirExprKind :: hir.HirExprKind
 decode_char_lit :: @import("./lexer").decode_char_lit
 Nexus :: @import("./nexus/nexus").Nexus
@@ -78,7 +78,7 @@ CCodeGen :: struct {
     has_main             bool
     main_returns_status  bool
     target_os            Os
-    uses_threads         bool
+    headers              Vec(Str)
     indent               u32
     loop_condition       LoopCondition
     temp_count           u32
@@ -99,7 +99,7 @@ CCodeGen :: struct {
             has_main: false
             main_returns_status: false
             target_os: Os.linux
-            uses_threads: false
+            headers: Vec(Str).new()
             indent: 0
             loop_condition: .{ id: hir.hir_none(), breaks: false, continues: false }
             temp_count: 0
@@ -108,6 +108,7 @@ CCodeGen :: struct {
 
     destroy :: fn(self &Self) {
         self.emitted_types.destroy()
+        self.headers.destroy()
     }
 
     empty_value :: fn(self &Self) Str {
@@ -187,10 +188,6 @@ CCodeGen :: struct {
     }
 
     declare_foreign :: fn(self &Self, fn_name, ret_type, params, module, name Str) {
-        if module.len == 0 and native_thread.is_symbol(name) {
-            self.uses_threads = true
-            ret
-        }
         if self.target_os == Os.wasi and
             (name.eq("__builtin_wasm_memory_size") or name.eq("__builtin_wasm_memory_grow")) { ret }
         if is_process_symbol(name) {
@@ -215,6 +212,28 @@ CCodeGen :: struct {
             }
         }
         self.declare_function(fn_name, ret_type, params)
+    }
+
+    include_header :: fn(self &Self, header Str) {
+        for included in self.headers.as_slice() {
+            if included.eq(header) { ret }
+        }
+        self.headers.push(header)
+    }
+
+    declare_header_type :: fn(self &Self, arena &Arena, id u32, header, name Str) {
+        self.include_header(header)
+        if not self.emitted_types.insert(id) { ret }
+        text.fmt_into(
+            &self.struct_forward_decls
+            "typedef {} {};\n"
+            .{ name, TypeStorage.name(arena, id) }
+        )
+    }
+
+    expr_c_value :: fn(self &Self, arena &Arena, header, name, ty Str) Str {
+        self.include_header(header)
+        self.expr_cast(arena, ty, name)
     }
 
     start_function :: fn(self &Self, fn_name, ret_type, params Str, exported bool) {
@@ -521,14 +540,13 @@ typedef uint16_t _Float16;
     }
 
     finish :: fn(self &Self) Str {
-        threads := if not self.uses_threads { "" } else if self.target_os == Os.windows {
-            native_thread.windows
-        } else {
-            native_thread.posix
+        headers := String.new(self.arena)
+        for header in self.headers.as_slice() {
+            text.fmt_into(&headers, "#include <{}>\n", .{ header })
         }
         parts := .[
             self.c_header()
-            threads
+            headers.as_str()
             self.struct_forward_decls.as_str()
             self.struct_decls.as_str()
             self.struct_defs.as_str()
@@ -770,21 +788,46 @@ typedef uint16_t _Float16;
         depth u32
         field_id u32
         struct_ty u32
+        native_name Str
     ) Str {
-        self.expr_member(arena, lhs, depth, field_id)
+        self.expr_named_member(arena, lhs, depth, field_id, native_name)
     }
 
     expr_member :: fn(self &Self, arena &Arena, lhs Str, depth u32, field_id u32) Str {
+        self.expr_named_member(arena, lhs, depth, field_id, "")
+    }
+
+    expr_named_member :: fn(
+        self &Self
+        arena &Arena
+        lhs Str
+        depth, field_id u32
+        native_name Str
+    ) Str {
         fmt := text.Fmt.new(arena)
         fmt.char('(')
         for i in Range.new(0, depth as i32) { fmt.str("*(") }
         fmt.str(lhs)
         for i in Range.new(0, depth as i32) { fmt.char(')') }
-        fmt.sym(")._f", field_id).as_str()
+        fmt.str(").")
+        self.format_field(&fmt, field_id, native_name)
+        fmt.as_str()
     }
 
-    expr_struct_init_field :: fn(self &Self, arena &Arena, field_id u32, val_str Str) Str {
-        text.Fmt.new(arena).sym("._f", field_id).str(" = ").str(val_str).as_str()
+    format_field :: fn(self &Self, fmt &Fmt, field_id u32, native_name Str) {
+        if native_name.len == 0 { fmt.sym("_f", field_id) } else { fmt.str(native_name) }
+    }
+
+    expr_struct_init_field :: fn(
+        self &Self
+        arena &Arena
+        field_id u32
+        val_str, native_name Str
+    ) Str {
+        fmt := text.Fmt.new(arena)
+        fmt.char('.')
+        self.format_field(&fmt, field_id, native_name)
+        fmt.str(" = ").str(val_str).as_str()
     }
 
     expr_struct_init :: fn(self &Self, arena &Arena, struct_name, fields_body Str) Str {

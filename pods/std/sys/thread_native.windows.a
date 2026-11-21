@@ -1,0 +1,73 @@
+mem :: @import("std/mem")
+sys :: @import("./sys")
+job_entry :: @import("./thread_entry")
+
+Void :: job_entry.Void
+Handle :: &Void
+Lock :: extern ["synchapi.h"] "SRWLOCK" struct {}
+
+create :: extern ["process.h"] "_beginthreadex" fn(&Void, u32, fn(&Void) u32, &Void, u32, &u32) u64
+wait :: extern ["synchapi.h"] "WaitForSingleObject" fn(Handle, u32) u32
+last_error :: extern ["errhandlingapi.h"] "GetLastError" fn() u32
+sleep_native :: extern ["synchapi.h"] "Sleep" fn(u32)
+mutex_init :: extern ["synchapi.h"] "InitializeSRWLock" fn(&Lock)
+mutex_acquire :: extern ["synchapi.h"] "AcquireSRWLockExclusive" fn(&Lock)
+mutex_try :: extern ["synchapi.h"] "TryAcquireSRWLockExclusive" fn(&Lock) u8
+mutex_release :: extern ["synchapi.h"] "ReleaseSRWLockExclusive" fn(&Lock)
+
+entry :: fn(job &Void) u32 {
+    job_entry.run(job)
+    0
+}
+
+start :: fn(handle &Handle, job &u8, detached bool) i32 {
+    started := create(0 as &Void, 0, entry, job as &Void, 0, 0 as &u32) as Handle
+    if started == (0 as Handle) { ret @c_value("errno.h", "errno", i32) }
+    if detached { sys.close_native(started as &u8) } else { *handle = started }
+    0
+}
+
+join :: fn(handle Handle) i32 {
+    if wait(handle, @c_value("stdint.h", "UINT32_MAX", u32)) != 0 { ret last_error() as i32 }
+    if not sys.close_native(handle as &u8) { ret last_error() as i32 }
+    0
+}
+
+yield :: fn() { sleep_native(0) }
+
+sleep :: fn(milliseconds u64) i32 {
+    max_delay := (@c_value("stdint.h", "UINT32_MAX", u32) as u64) - 1
+    while milliseconds > max_delay {
+        sleep_native(max_delay as u32)
+        milliseconds = milliseconds - max_delay
+    }
+    if milliseconds != 0 { sleep_native(milliseconds as u32) }
+    0
+}
+
+mutex_new :: fn(out &&Lock) i32 {
+    lock := mem.malloc(@sizeof(Lock)) as &Lock
+    if lock == (0 as &Lock) { ret @c_value("errno.h", "ENOMEM", i32) }
+    mutex_init(lock)
+    *out = lock
+    0
+}
+
+mutex_lock :: fn(lock &Lock) i32 {
+    mutex_acquire(lock)
+    0
+}
+
+mutex_try_lock :: fn(lock &Lock) bool { mutex_try(lock) != 0 }
+
+mutex_unlock :: fn(lock &Lock) i32 {
+    mutex_release(lock)
+    0
+}
+
+mutex_destroy :: fn(lock &Lock) i32 {
+    if not mutex_try_lock(lock) { ret @c_value("errno.h", "EBUSY", i32) }
+    mutex_release(lock)
+    mem.free(lock as &u8)
+    0
+}

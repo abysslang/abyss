@@ -24,3 +24,13 @@ c_type_unsigned	1	unknown type 'unsigned'; did you mean 'u32'?	bad :: extern fn(
 c_type_size_t	2	unknown type 'size_t'; did you mean 'u64'?	Bad :: extern struct {|    x size_t|}|main :: fn() {}
 c_type_void	1	unknown type 'void'; did you mean '()'?	bad :: extern fn() void|main :: fn() {}
 reserved_export	1	the C symbol 'main' is reserved for the program entry point	entry :: extern "main" fn() {}|main :: fn() {}
+header_path	1	expected a relative C header path	bad :: extern ["sys/../stdio.h"] fn()|main :: fn() { bad() }
+header_absolute_path	1	expected a relative C header path	bad :: extern ["/stdio.h"] fn()|main :: fn() { bad() }
+header_export	1	header imports cannot have a function body	bad :: extern ["stdio.h"] "bad" fn() {}|main :: fn() { bad() }
+header_type_name	1	expected a C identifier for the external symbol	Bad :: extern ["stdio.h"] "struct invalid name" struct {}|main :: fn() { value: Bad }
+header_local_type	2	header types require a native name and a top-level binding	main :: fn() {|    Bad :: extern ["stdio.h"] "FILE" struct {}|}
+header_value_symbol	1	expected a C identifier for the external symbol	main :: fn() { print(@c_value("errno.h", "errno + 1", i32)) }
+header_value_type	1	@c_value requires a fixed-width integer type	main :: fn() { print(@c_value("errno.h", "errno", bool)) }
+header_value_literal	2	expected a C binding string literal	header :: "errno.h"|main :: fn() { print(@c_value(header, "errno", i32)) }
+header_value_comptime	1	C headers require a hosted native target	main :: fn() { print(cmpt @c_value("limits.h", "CHAR_BIT", i32)) }
+header_size_comptime	2	C headers require a hosted native target	T :: extern ["stdio.h"] "FILE" struct {}|main :: fn() { print(cmpt @sizeof(T)) }

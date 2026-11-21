@@ -470,6 +470,29 @@ apply :: fn(cb Callback, val i32) bool {
 - **No Variadics (`...`)**: C-style variadic arguments (`...`) are strictly prohibited in function declarations: `variadic parameters are not supported; use tuples for type-safe formatting`.
 - **Fixed-Width Primitives**: Abyss uses explicit fixed-width types (`i8`..`i128`, `u8`..`u128`, `f32`, `f64`, `bool`, `&u8`). Using C type names (`int`, `char`, `short`, `long`, `float`, `double`, `unsigned`, `void`, `size_t`) triggers helpful diagnostic suggestions (e.g. `unknown type 'int'; did you mean 'i32'?`).
 
+### 7.7 Native C Headers
+
+Bind functions and native types to the target header that declares them:
+
+```abyss
+File :: extern ["stdio.h"] "FILE" struct {}
+tmpfile :: extern ["stdio.h"] fn() &File
+fclose :: extern ["stdio.h"] fn(&File) i32
+
+Division :: extern ["stdlib.h"] "div_t" struct {
+    quot i32
+    rem  i32
+}
+
+divide :: extern ["stdlib.h"] "div" fn(i32, i32) Division
+end_of_file :: fn() i32 { @c_value("stdio.h", "EOF", i32) }
+```
+
+- Use a quoted relative header path inside brackets. Functions may omit the C name when it matches the binding. Header imports have no body.
+- Native type declarations need a C typedef name or a tag such as `"struct timespec"`. An empty body keeps the type opaque. Declared fields use their actual C names, and the target C compiler supplies the complete layout. Reflection identifies the view as `TypeKind.c_type`.
+- `@c_value("header.h", "NAME", T)` reads a target header's macro, enum constant, or declared value as a fixed-width integer. Use a native function when naming a value for reuse. Header values and native type layouts require hosted native output and cannot be evaluated by `cmpt`.
+- Use `Void :: @typeof({})` and `&Void` for a C `void *`. Prefer header declarations over hand-maintained signatures or sizes when writing a new native binding.
+
 ---
 
 ## 8. Extended References

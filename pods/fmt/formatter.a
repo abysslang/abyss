@@ -32,14 +32,16 @@ Formatter :: struct {
             }
             extern_decl {
                 self.layout.push_str("extern ")
-                if node.text.len > 0 {
-                    self.layout.push_str(node.text)
-                    self.layout.spaces(1)
-                }
                 for part in node.children {
                     self.format_node(part, level)
-                    if part.kind == CstKind.lit_str { self.layout.spaces(1) }
+                    if part.kind == CstKind.lit_str or part.kind == CstKind.lit_raw_str or
+                        part.kind == CstKind.extern_header { self.layout.spaces(1) }
                 }
+            }
+            extern_header {
+                self.layout.push_str("[")
+                self.layout.push_str(node.text)
+                self.layout.push_str("]")
             }
             fn_def { self.format_fn(node, level) }
             fn_param { self.format_typed_names(node, level, 0) }

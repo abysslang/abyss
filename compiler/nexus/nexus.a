@@ -151,6 +151,7 @@ Nexus :: struct {
     for_sources               HashMap(u32, u32)
     extern_fns                HashMap(u32, u32)
     extern_modules            HashMap(u32, u32)
+    extern_headers            HashMap(u32, u32)
     extern_structs            HashMap(u32, u32)
     str_type                  u32
     const_status              pool.PoolU32
@@ -186,6 +187,7 @@ Nexus :: struct {
             file_symbols: HashMap(u64, u32).new()
             extern_fns: HashMap(u32, u32).new()
             extern_modules: HashMap(u32, u32).new()
+            extern_headers: HashMap(u32, u32).new()
             extern_structs: HashMap(u32, u32).new()
             core_prelude: pool.id_none()
             std_prelude: pool.id_none()
@@ -222,6 +224,7 @@ Nexus :: struct {
         self.file_symbols.destroy()
         self.extern_fns.destroy()
         self.extern_modules.destroy()
+        self.extern_headers.destroy()
         self.extern_structs.destroy()
     }
 
@@ -595,12 +598,39 @@ Nexus :: struct {
         *p
     }
 
-    set_extern_struct :: fn(self &Self, hir_id u32) {
-        self.extern_structs.insert(hir_id, 1)
+    set_extern_struct :: fn(self &Self, hir_id, native_name u32) {
+        self.extern_structs.insert(hir_id, native_name)
     }
 
     is_extern_struct :: fn(self &Self, hir_id u32) bool {
         self.extern_structs.contains_key(hir_id)
+    }
+
+    extern_header :: fn(self &Self, node u32) Str {
+        header := self.extern_headers.get(node)
+        if header == (0 as &u32) { ret Str.empty() }
+        self.interner.get(*header)
+    }
+
+    native_type_node :: fn(self &Self, ty u32) u32 {
+        current := ty
+        while self.types.kind(current) == type_defs.TyKind.ptr {
+            current = self.types.payload(current)
+        }
+        if self.types.kind(current) == type_defs.TyKind.nominal {
+            node := self.types.nominal_origin(current)
+            if self.extern_headers.contains_key(node) and self.is_extern_struct(node) { ret node }
+        }
+        pool.id_none()
+    }
+
+    native_type_name :: fn(self &Self, node u32) Str {
+        self.interner.get(*self.extern_structs.get(node))
+    }
+
+    native_field_name :: fn(self &Self, ty, field u32) Str {
+        if self.native_type_node(ty) == pool.id_none() { ret Str.empty() }
+        self.interner.get(field)
     }
 
     get_node_type :: fn(self &Self, id u32) u32 {

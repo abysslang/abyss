@@ -1,0 +1,39 @@
+Void :: @typeof({})
+File :: extern ["stdio.h"] "FILE" struct {}
+Division :: extern ["stdlib.h"] "div_t" struct {
+    rem  i32
+    quot i32
+}
+
+divide :: extern ["stdlib.h"] "div" fn(i32, i32) Division
+tmpfile :: extern ["stdio.h"] fn() &File
+fputc :: extern ["stdio.h"] fn(i32, &File) i32
+rewind :: extern ["stdio.h"] fn(&File)
+fgetc :: extern ["stdio.h"] fn(&File) i32
+fclose :: extern ["stdio.h"] fn(&File) i32
+never_called :: extern ["unused_abyss_test.h"] fn()
+
+main :: fn() i32 {
+    calculate: fn(i32, i32) Division = divide
+    result := calculate(-17, 5)
+    if result.quot != -3 or result.rem != -2 { ret 1 }
+
+    value: Division = .{ quot: 5, rem: 3 }
+    ptr := &value
+    ptr.quot = result.quot
+    if value.quot != -3 or value.rem != 3 or @sizeof(Division) < 8 { ret 2 }
+    if @type_info(Division).kind != TypeKind.c_type { ret 6 }
+
+    stream := tmpfile()
+    if (stream as &Void) == (0 as &Void) { ret 3 }
+    byte := @c_value("limits.h", "CHAR_BIT", i32)
+    if byte < 8 or (byte as u32) > @c_value("limits.h", "UCHAR_MAX", u32) { ret 7 }
+    if fputc(byte, stream) != byte { ret 4 }
+    rewind(stream)
+    result_byte := fgetc(stream)
+    end := fgetc(stream)
+    if fclose(stream) != 0 or result_byte != byte or end != @c_value("stdio.h", "EOF", i32) {
+        ret 5
+    }
+    0
+}

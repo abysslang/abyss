@@ -8,6 +8,10 @@ STRICT=(-Werror=implicit-function-declaration -Werror=incompatible-pointer-types
 mkdir -p "${WORK_DIR}"
 
 "${COMPILER}" b tests/native/thread.a "${WORK_DIR}/thread.c"
+if rg -q 'abyss_native_thread_' "${WORK_DIR}/thread.c"; then
+    printf 'A compiler thread shim was emitted\n' >&2
+    exit 1
+fi
 if [[ "${HOST}" == MINGW* || "${HOST}" == MSYS* ]]; then
     "${CC}" -std=gnu99 -O2 "${STRICT[@]}" "${WORK_DIR}/thread.c" -o "${WORK_DIR}/thread"
 elif [[ "${CC}" == *tcc* ]]; then
@@ -31,6 +35,10 @@ fi
 
 if command -v x86_64-w64-mingw32-gcc >/dev/null; then
     "${COMPILER}" b --target windows --arch x86_64 tests/native/thread.a "${WORK_DIR}/windows.c"
+    if rg -q 'abyss_native_thread_' "${WORK_DIR}/windows.c"; then
+        printf 'A Windows compiler thread shim was emitted\n' >&2
+        exit 1
+    fi
     x86_64-w64-mingw32-gcc -std=gnu99 -O2 "${STRICT[@]}" "${WORK_DIR}/windows.c" -o "${WORK_DIR}/thread.exe"
 fi
 
@@ -44,7 +52,7 @@ ABYSS
 reject() {
     local status=0
     timeout 15s "${COMPILER}" "$@" > "${WORK_DIR}/unsupported.log" 2>&1 || status=$?
-    if [[ "${status}" != 1 ]] || ! rg -qF "threads require a hosted native target" "${WORK_DIR}/unsupported.log"; then
+    if [[ "${status}" != 1 ]] || ! rg -qF "C headers require a hosted native target" "${WORK_DIR}/unsupported.log"; then
         cat "${WORK_DIR}/unsupported.log" >&2
         return 1
     fi
@@ -61,6 +69,14 @@ main :: fn() { thread.sleep(1).unwrap() }
 ABYSS
 
 reject r "${WORK_DIR}/sleep.a"
+if [[ "${HOST}" == Linux ]]; then
+    "${COMPILER}" b "${WORK_DIR}/sleep.a" "${WORK_DIR}/sleep.c"
+    rg -q '^#include <time.h>$' "${WORK_DIR}/sleep.c"
+    if rg -q 'pthread.h|pthread_create' "${WORK_DIR}/sleep.c"; then
+        printf 'Sleep pulled in the POSIX thread runtime\n' >&2
+        exit 1
+    fi
+fi
 
 cat > "${WORK_DIR}/availability.a" <<'ABYSS'
 thread :: @import("std/thread")

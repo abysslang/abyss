@@ -3,7 +3,6 @@ fall :: @import("std/sys").fall
 Os :: @import("core/target").Os
 
 hir :: @import("./hir")
-native_thread :: @import("./native_thread")
 decode_char_lit :: @import("./lexer").decode_char_lit
 Nexus :: @import("./nexus/nexus").Nexus
 id_none :: @import("./nexus/pool").id_none
@@ -301,11 +300,19 @@ lower_array_iter_call :: fn(
 
     struct_name := ccg.type_str(&db.types, arena, iter_ty)
     fields_fmt := builder.new_list(arena)
-    builder.append_list_item(&fields_fmt, ccg.expr_struct_init_field(arena, ptr_id, ptr_val), true)
-    builder.append_list_item(&fields_fmt, ccg.expr_struct_init_field(arena, len_id, len_val), false)
     builder.append_list_item(
         &fields_fmt
-        ccg.expr_struct_init_field(arena, index_id, index_val)
+        ccg.expr_struct_init_field(arena, ptr_id, ptr_val, "")
+        true
+    )
+    builder.append_list_item(
+        &fields_fmt
+        ccg.expr_struct_init_field(arena, len_id, len_val, "")
+        false
+    )
+    builder.append_list_item(
+        &fields_fmt
+        ccg.expr_struct_init_field(arena, index_id, index_val, "")
         false
     )
     ccg.expr_struct_init(arena, struct_name, builder.finish_list(&fields_fmt))
@@ -332,6 +339,13 @@ lower_builtin_call :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32)
     }
     if name.eq("trap") {
         ret ccg.intrinsic_trap()
+    }
+    if name.eq("c_value") {
+        require_c_headers(db, id, ccg.is_vm())
+        header := db.interner.get(db.hir.lhs(args.ptr[0])).trim_quotes()
+        symbol := db.interner.get(db.hir.lhs(args.ptr[1])).trim_quotes()
+        ty := ccg.type_str(&db.types, arena, db.get_node_type(id))
+        ret ccg.expr_c_value(arena, header, symbol, ty)
     }
     if name.eq("memcpy") {
         values := ctx.builder.new_list(arena)
@@ -959,7 +973,12 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
                 v_str := lower_expr(ctx, v_node)
                 builder.append_list_item(
                     &fields_fmt
-                    ccg.expr_struct_init_field(arena, f_name_id, v_str)
+                    ccg.expr_struct_init_field(
+                        arena
+                        f_name_id
+                        v_str
+                        db.native_field_name(ty_id, f_name_id)
+                    )
                     i == 0
                 )
                 i = i + 1
@@ -1076,7 +1095,14 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
                 arr_len := db.types.get_array_len(base_lhs_ty)
                 ret ccg.expr_u64(arena, arr_len as u64)
             }
-            ret ccg.expr_typed_member(arena, lhs_str, depth, field_name_id, lhs_ty)
+            ret ccg.expr_typed_member(
+                arena
+                lhs_str
+                depth
+                field_name_id
+                lhs_ty
+                db.native_field_name(lhs_ty, field_name_id)
+            )
         }
         array_init {
             ty_id := db.get_node_type(id)
@@ -1382,6 +1408,9 @@ eval_const :: fn(db &Nexus, id u32) u64 {
         if visited.insert(q_sym) {
             lower_one_function(&ctx, q_sym)
         }
+    }
+    for ty in type_queue.as_slice() {
+        if db.native_type_node(ty) != id_none() { require_c_headers(db, id, true) }
     }
     visited.destroy()
     queue.destroy()
@@ -1777,7 +1806,7 @@ lower_const_record :: fn(
         }
         ctx.builder.append_list_item(
             &items
-            ccg.expr_struct_init_field(arena, field, item)
+            ccg.expr_struct_init_field(arena, field, item, db.native_field_name(ty, field))
             index == 0
         )
         index = index + 1
@@ -1864,7 +1893,12 @@ lower_global_constant :: fn(
             )
             ctx.builder.append_list_item(
                 &items
-                cg.expr_struct_init_field(arena, fields.ptr[i * 2], value)
+                cg.expr_struct_init_field(
+                    arena
+                    fields.ptr[i * 2]
+                    value
+                    db.native_field_name(ty, fields.ptr[i * 2])
+                )
                 i == 0
             )
             i = i + 1
@@ -2054,6 +2088,12 @@ FuncSignature :: fn(V type) type {
     }
 }
 
+require_c_headers :: fn(db &Nexus, node u32, vm bool) {
+    if vm or db.target_os == Os.wasi or db.target_os == Os.freestanding {
+        db.type_error(node, "C headers require a hosted native target")
+    }
+}
+
 lower_function_name :: fn(
     B type
     L type
@@ -2067,12 +2107,9 @@ lower_function_name :: fn(
     ccg := ctx.ccg
     if node != id_none() and db.is_extern_fn(node) and
         (not ccg.is_vm() or db.hir.extra(node) == hir.hir_none()) {
+        if db.extern_header(node).len > 0 { require_c_headers(db, node, ccg.is_vm()) }
         name := db.interner.get(db.extern_link_name(sym, node))
         module := db.extern_module(node)
-        if module.len == 0 and native_thread.is_symbol(name) and
-            (ccg.is_vm() or db.target_os == Os.wasi or db.target_os == Os.freestanding) {
-            db.type_error(node, "threads require a hosted native target")
-        }
         if not ccg.is_vm() and module.len > 0 {
             ret ccg.sym_name(ctx.arena, sym)
         }
@@ -2228,9 +2265,13 @@ lower_one_function :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), sym_id 
     }
     body_id := db.hir.extra(func_id)
     is_extern := db.is_extern_fn(func_id)
+    header := db.extern_header(func_id)
     if body_id == hir.hir_none() {
         if not is_extern or ccg.is_vm() or
-            is_libc_fn(db.interner.get(db.extern_link_name(real_sym, func_id))) {
+            (
+                header.len == 0 and
+                    is_libc_fn(db.interner.get(db.extern_link_name(real_sym, func_id)))
+            ) {
             ret
         }
     }
@@ -2252,6 +2293,11 @@ lower_one_function :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), sym_id 
     }
     ret_str := ccg.type_str(&db.types, arena, ret_ty)
     if body_id == hir.hir_none() {
+        if header.len > 0 {
+            require_c_headers(db, func_id, false)
+            ccg.include_header(header)
+            ret
+        }
         ccg.declare_foreign(
             sig.fn_name
             ret_str
@@ -2370,7 +2416,13 @@ lower_function :: fn(
     sorted := topo_sort(db, &type_queue)
 
     for ty in sorted {
-        ccg.define_type(&db.types, arena, ty)
+        node := db.native_type_node(ty)
+        if node == id_none() {
+            ccg.define_type(&db.types, arena, ty)
+        } else {
+            require_c_headers(db, node, ccg.is_vm())
+            ccg.declare_header_type(arena, ty, db.extern_header(node), db.native_type_name(node))
+        }
     }
 
     sorted.destroy()

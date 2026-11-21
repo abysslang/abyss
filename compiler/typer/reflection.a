@@ -6,6 +6,7 @@ Engine :: @import("compiler/engine").Engine
 hir :: @import("compiler/hir")
 eval_const :: @import("compiler/lower").eval_const
 Nexus :: @import("compiler/nexus/nexus").Nexus
+id_none :: @import("compiler/nexus/pool").id_none
 type_defs :: @import("compiler/types")
 tyck :: @import("./tyck")
 synth_type_node :: @import("./var").synth_type_node
@@ -363,6 +364,9 @@ reflection_build :: fn(db &Nexus, ty u32, info_ty u32, field_ty u32, seen &Vec(u
     }
     if ty == db.str_type {
         reflected_kind = TypeKind.string as u64
+    }
+    if kind == type_defs.TyKind.nominal and db.native_type_node(ty) != id_none() {
+        reflected_kind = TypeKind.c_type as u64
     }
     reflection_set(db, ptr, info_ty, "id", ty as u64)
     reflection_set(db, ptr, info_ty, "kind", reflected_kind)

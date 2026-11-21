@@ -1,6 +1,7 @@
 fall :: @import("std/sys").fall
 
 Engine :: @import("compiler/engine").Engine
+c_abi :: @import("compiler/c_abi")
 hir :: @import("compiler/hir")
 decode_char_lit :: @import("compiler/lexer").decode_char_lit
 eval_const :: @import("compiler/lower").eval_const
@@ -551,6 +552,24 @@ synth_builtin_call :: fn(eng &Engine, id u32) {
         synth_import(eng, id, slot, args)
         ret
     }
+    if name.eq("c_value") {
+        if args.len != 3 { db.type_error(id, "@c_value expects a header, name and integer type") }
+        header := c_literal(db, args.ptr[0])
+        symbol := c_literal(db, args.ptr[1])
+        if not c_abi.header_path(header) {
+            db.type_error(args.ptr[0], "expected a relative C header path")
+        }
+        if not c_abi.identifier(symbol) {
+            db.type_error(args.ptr[1], "expected a C identifier for the external symbol")
+        }
+        ty := synth_type_node(eng, args.ptr[2])
+        kind := db.types.kind(ty)
+        if kind != type_defs.TyKind.int and kind != type_defs.TyKind.uint {
+            db.type_error(args.ptr[2], "@c_value requires a fixed-width integer type")
+        }
+        db.bind_type(slot, ty)
+        ret
+    }
     if name.eq("source_location") {
         if args.len != 0 { db.type_error(id, "@source_location expects no arguments") }
         synth_source_location(eng, id, slot)
@@ -681,6 +700,13 @@ synth_builtin_call :: fn(eng &Engine, id u32) {
     db.print_loc(id)
     print("")
     #fall
+}
+
+c_literal :: fn(db &Nexus, node u32) Str {
+    if db.hir.kind(node) != hir.hir_kind.lit_str {
+        db.type_error(node, "expected a C binding string literal")
+    }
+    db.interner.get(db.hir.lhs(node)).trim_quotes()
 }
 
 synth_array_type_node :: fn(eng &Engine, id u32) u32 {

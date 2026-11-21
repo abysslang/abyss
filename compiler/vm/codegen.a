@@ -670,6 +670,9 @@ VmCodeGen :: struct {
         module Str
         name Str
     ) {}
+    include_header :: fn(self &Self, header Str) {}
+    declare_header_type :: fn(self &Self, arena &Arena, id u32, header, name Str) {}
+    expr_c_value :: fn(self &Self, arena &Arena, header, name Str, ty VmVal) VmVal { VmVal.empty() }
     begin_inline_scope :: fn(self &Self) {}
     end_inline_scope :: fn(self &Self) {}
 
@@ -1658,7 +1661,7 @@ VmCodeGen :: struct {
         if (lhs.kind == VmValKind.local) or (lhs.kind == VmValKind.deref) {
             struct_ty = self.get_local_type(lhs.id)
         }
-        self.expr_typed_member(arena, lhs, depth, field_id, struct_ty)
+        self.expr_typed_member(arena, lhs, depth, field_id, struct_ty, "")
     }
 
     expr_typed_member :: fn(
@@ -1668,6 +1671,7 @@ VmCodeGen :: struct {
         depth u32
         field_id u32
         struct_ty u32
+        native_name Str
     ) VmVal {
         value := lhs
         if (value.kind == VmValKind.deref) and self.is_struct_type(struct_ty) {
@@ -1733,7 +1737,13 @@ VmCodeGen :: struct {
         .{ kind: VmValKind.member_local, elem_size: elem_sz, id: address, raw: offset as u64 }
     }
 
-    expr_struct_init_field :: fn(self &Self, arena &Arena, field_id u32, val_str VmVal) VmVal {
+    expr_struct_init_field :: fn(
+        self &Self
+        arena &Arena
+        field_id u32
+        val_str VmVal
+        native_name Str
+    ) VmVal {
         self.ensure_on_stack(val_str)
         self.init_field_ids.push(field_id)
         VmVal.stack()

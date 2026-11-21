@@ -1,0 +1,8 @@
+Void :: @typeof({})
+Work :: fn(&u8)
+
+run :: fn(job &Void) {
+    work: Work
+    @memcpy(&work as &u8, job as &u8, @sizeof(Work))
+    work(job as &u8)
+}

@@ -191,6 +191,11 @@ count i32
 ) bool
 reset::extern fn()
 fd_close::extern "wasi_snapshot_preview1" "fd_close" fn(u32) u32
+seek::extern[ "stdio.h" ] "fseek" fn(&u8,i64,i32)i32
+Timespec::extern["time.h"] "struct timespec" struct{
+tv_sec i64
+tv_nsec i64
+}
 Callback::fn(i32) i32
 adjust::extern fn(x i32) i32{
 x+1
@@ -209,6 +214,11 @@ send :: extern "send_packet" fn(
 ) bool
 reset :: extern fn()
 fd_close :: extern "wasi_snapshot_preview1" "fd_close" fn(u32) u32
+seek :: extern ["stdio.h"] "fseek" fn(&u8, i64, i32) i32
+Timespec :: extern ["time.h"] "struct timespec" struct {
+    tv_sec  i64
+    tv_nsec i64
+}
 Callback :: fn(i32) i32
 adjust :: extern fn(x i32) i32 {
     x + 1

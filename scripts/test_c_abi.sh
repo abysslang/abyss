@@ -20,6 +20,34 @@ printf 'extern ABI verified\n' > "${WORK_DIR}/expected"
 timeout 10s "${WORK_DIR}/interop" > "${WORK_DIR}/native.out"
 diff -u "${WORK_DIR}/expected" "${WORK_DIR}/native.out"
 
+timeout 30s "${COMPILER}" b "${FIXTURES}/headers.a" "${WORK_DIR}/headers.c"
+[[ $(grep -c '^#include <limits.h>$' "${WORK_DIR}/headers.c") -eq 1 ]]
+if grep -Fq 'unused_abyss_test.h' "${WORK_DIR}/headers.c"; then
+    printf 'Unused C header was emitted\n' >&2
+    exit 1
+fi
+"${CC}" -std=c99 -D_POSIX_C_SOURCE=200809L -Werror=implicit-function-declaration -Werror=incompatible-pointer-types \
+    "${WORK_DIR}/headers.c" -o "${WORK_DIR}/headers"
+timeout 10s "${WORK_DIR}/headers"
+
+for mode in r wasi freestanding; do
+    args=(b --target "${mode}")
+    if [[ "${mode}" == r ]]; then args=(r); fi
+    for source in \
+        'f :: extern ["stdlib.h"] "abs" fn(i32) i32|probe :: extern fn() u64 { f(1) as u64 }' \
+        'T :: extern ["stdio.h"] "FILE" struct {}|probe :: extern fn() u64 { @sizeof(T) }' \
+        'probe :: extern fn() u64 { @c_value("limits.h", "CHAR_BIT", u64) }'; do
+        source+="|main :: fn() { probe() }"
+        printf '%s\n' "${source//|/$'\n'}" > "${WORK_DIR}/unsupported.a"
+        if "${COMPILER}" "${args[@]}" "${WORK_DIR}/unsupported.a" "${WORK_DIR}/unsupported.c" > "${WORK_DIR}/unsupported.log" 2>&1 ||
+            ! grep -Fq 'C headers require a hosted native target' "${WORK_DIR}/unsupported.log"; then
+            cat "${WORK_DIR}/unsupported.log" >&2
+            exit 1
+        fi
+        [[ ! -e "${WORK_DIR}/unsupported.c" ]]
+    done
+done
+
 if [[ "${ABYSS_TEST_WINE:-false}" != true ]]; then
     timeout 30s "${COMPILER}" b --library "${FIXTURES}/interop.a" "${WORK_DIR}/exports.c"
     "${CC}" -std=c99 -D_POSIX_C_SOURCE=200809L -fPIC -shared "${WORK_DIR}/exports.c" -o "${WORK_DIR}/exports.so"
