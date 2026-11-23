@@ -33,7 +33,7 @@ Abyss includes **two coordinated execution engines** in a single binary:
 
 1. **The Bytecode VM:**
    The compiler can translate source directly into compact bytecode instructions and execute them instantly in-memory. This powers:
-   - Zero-latency test runs (`./abyss r main.a`).
+   - Zero-latency test runs (`abyssc r main.a`).
    - Compile-time evaluation (`cmpt { ... }`).
    - Interactive developer workflows.
 

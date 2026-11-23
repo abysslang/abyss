@@ -1,93 +1,163 @@
-# Tooling & Workflow
+# Tooling & Workflow: `abyssc`, `sonar`, and `abyssfmt`
 
-Abyss comes with a developer driver script in the repository root: `./abyss`. It handles everything from zero-latency script-like execution to native cross-compilation.
+Abyss provides a streamlined, three-tool ecosystem installed directly into your environment:
+1. **`abyssc`**: The core Abyss compiler, featuring an instant-execution Bytecode VM and an optimizing C99 native emitter.
+2. **`sonar`**: The official package manager and build system for managing dependencies, compiling pods, and running tests.
+3. **`abyssfmt`**: The canonical source code formatter enforcing clean, readable Abyss style.
 
 ---
 
-## The Fast Loop: Run with the VM
+## 1. Installation
 
-During active development, waiting for a C compiler to link binaries adds unnecessary friction. Use the Bytecode VM for instantaneous turnaround:
+You can install the complete Abyss toolchain with a single command:
+
+### Linux & macOS (Bash)
 
 ```sh
-./abyss r main.a
+curl -fsSL https://raw.githubusercontent.com/abysslang/abyss/main/scripts/install.sh | bash
 ```
 
-The compiler parses your code, checks types, translates it to bytecode, and executes it immediately in memory. Zero disk clutter, zero linker latency.
+The installer downloads the latest pre-built toolchain, extracts `abyssc`, `sonar`, and `abyssfmt` to `~/.abyss/bin`, and automatically adds them to your shell's `PATH`.
 
----
+### Windows (PowerShell)
 
-## The Native Loop: Optimized C99 Binaries
+Open PowerShell and run:
 
-When you need peak execution performance:
-
-```sh
-# Compile to an optimized native binary (-O3)
-./abyss b main.a
-
-# Or compile and run in a single command
-./abyss br main.a
+```powershell
+irm https://raw.githubusercontent.com/abysslang/abyss/main/scripts/install.ps1 | iex
 ```
 
-This passes the emitted C99 code to your native C compiler (`gcc` or `clang`) with maximum optimization flags enabled.
+### Verifying the Installation
 
----
-
-## Windows Cross-Compilation
-
-Writing code on Linux and deploying to Windows? Abyss supports one-command standalone Windows cross-compilation via MinGW:
+Open a new terminal session and verify that the tools are available:
 
 ```sh
-./abyss b-win main.a
+abyssc --version
+sonar help
+abyssfmt --help
 ```
 
-The resulting `.exe` binary is completely standalone—it links directly to standard Windows system libraries (`KERNEL32.dll` and `msvcrt.dll`) with zero third-party dependencies or runtime bloat.
+---
+
+## 2. The Fast Loop: Run Instantly with `abyssc`
+
+During active development, waiting for a native C compiler and linker adds unnecessary friction. Use the Bytecode VM for instantaneous turnaround:
+
+```sh
+abyssc r main.a
+```
+
+The compiler parses your code, verifies types, translates AST nodes into compact bytecode instructions, and executes them immediately in memory. Zero disk clutter, zero linker latency.
 
 ---
 
-## Target Selection
+## 3. The Native Loop: Optimized C99 Binaries
 
-The compiler defaults to the host OS and architecture. Use `--target linux|windows|darwin|wasi|freestanding` and, if needed, `--arch x86_64|aarch64|wasm32` to select a different profile. WASI defaults to `wasm32`. The flags select the ABI and module sources; use a C toolchain for the same target when linking.
+When you need peak execution performance, use `abyssc` to emit portable ISO C99:
 
 ```sh
-./abyss emit b --target wasi main.a program.c
+# Emit optimized C99 source code
+abyssc b main.a out.c
+
+# Compile with your C compiler of choice (GCC or Clang)
+gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 out.c -o my_program
+./my_program
+```
+
+### Cross-Compilation Targets
+
+`abyssc` includes built-in multi-target support. Use `--target` and `--arch` to select the target platform:
+
+```sh
+# Cross-compile to WebAssembly (WASI)
+abyssc b --target wasi --arch wasm32 main.a program.c
 clang --target=wasm32-wasi -ffreestanding -nostdlib program.c -o program.wasm
+
+# Cross-compile for Windows from Linux
+abyssc b --target windows --arch x86_64 main.a program.c
+x86_64-w64-mingw32-gcc -O3 program.c -o program.exe
 ```
 
-`@import("platform")` selects `platform.<os>.<arch>.a`, then `platform.<os>.a`, then `platform.a`. Folder modules use the same suffixes on their entry file. Use `@import("core/target")` to inspect the selected profile through `target`, `Os`, and `Arch`. Use `--library` to emit C exports without an executable entry point. A freestanding target also omits the entry point.
-
-`./abyss wasm` produces a standalone `dist/abyssc.wasm` with `core` and `std` embedded directly into the binary. For a browser playground, add the user's source file to a `browser_wasi_shim` `PreopenDirectory` at `/` without needing any external standard library bundles, and pass arguments such as `["abyssc", "r", "main.a"]` to the shim. Instantiate the module with the shim's `wasi_snapshot_preview1` imports and call `wasi.start(instance)`. To emit C, use `["abyssc", "b", "main.a", "out.c"]` and read `out.c` from the same directory.
+Supported operating systems: `linux`, `windows`, `darwin`, `wasi`, `freestanding`.  
+Supported architectures: `x86_64`, `aarch64`, `wasm32`.
 
 ---
 
-## Testing & Quality Assurance
+## 4. Project & Package Management with `sonar`
 
-Abyss has an automated test suite verifying both execution backends:
+For multi-file applications and packages (called **Pods** in Abyss), use `sonar`:
+
+### Initializing a New Pod
 
 ```sh
-# Run all tests against both the C99 and VM backends
-./abyss test
-
-# Or run tests on Windows binaries using Wine
-./abyss test-win
+sonar init my-app
+cd my-app
 ```
 
-Every language feature is cross-tested to guarantee that VM execution and native C execution produce identical output.
+This creates a `pod.json` manifest specifying the pod name, version, entry point, dependencies, and native C build options:
+
+```json
+{
+  "name": "my-app",
+  "version": "0.1.0",
+  "entry": "main.a",
+  "dependencies": {},
+  "c_build": {
+    "sources": [],
+    "include_dirs": [],
+    "c_flags": [],
+    "ld_flags": []
+  }
+}
+```
+
+### Building and Running Projects
+
+```sh
+# Build and run the project binary in one command
+sonar run
+
+# Build the release binary into the current directory
+sonar build
+```
+
+### Managing Dependencies
+
+```sh
+# Add a dependency from the central index
+sonar add json
+
+# Update local index and download dependencies into .vendor/
+sonar update
+sonar vendor
+```
+
+### Running Unit Tests
+
+Sonar automatically discovers and executes all test suites defined within the pod:
+
+```sh
+sonar test
+```
 
 ---
 
-## Release Packaging & Bootstrap Verification
+## 5. Canonical Formatting with `abyssfmt`
 
-To verify self-hosting determinism and generate standalone release packages:
+Code formatting in Abyss is canonical. Rather than arguing over style, run `abyssfmt` to format files in-place:
 
 ```sh
-# Run multi-round fixed-point bootstrap verification
-./abyss bootstrap
+# Format a single file
+abyssfmt main.a
 
-# Generate distribution artifacts into dist/
-./abyss release
+# Format an entire source directory
+abyssfmt src/
 ```
 
-This verifies bit-for-bit generational equality ($G_2 \equiv G_3$) and updates `dist/bootstrap.c` for distribution.
+### Formatting Rules Enforced:
+- 4-space indentation (tabs are rejected).
+- Statement separation via clean newlines (no trailing semicolons).
+- Clean vertical layout for multiline struct and array literals.
 
 ---
 
