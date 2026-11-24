@@ -1,228 +1,392 @@
-# Control Flow: Branching, Loops, and Pattern Matching
+# Control Flow: Branching, Loops, and Matching
 
-Programs make decisions, repeat operations, and decompose data structures. Abyss provides clean, expression-oriented control flow constructs that map directly to predictable machine instructions.
+Abyss has three control-flow forms: `if`, `while`, and `for`, plus `match` for exhaustive decomposition of enums and tagged unions. All of them are expressions, so they can produce values where a value is expected.
 
-Let's look at a quick example combining branching, looping, and pattern matching:
+```abyss
+Color :: enum { red, green, blue }
+
+main :: fn() {
+    i := 0
+    while i < 3 {
+        i = i + 1
+        print(if i == 2 { "two" } else { "other" })
+    }
+
+    for n in Range.new(0, 3) {
+        print(n)
+    }
+
+    match Color.green {
+        red { print("red") }
+        green, blue { print("cool") }
+    }
+}
+```
+
+---
+
+## 1. `if` and `else`
+
+Conditions do not need parentheses, and the body must be a block:
 
 ```abyss
 main :: fn() {
-    status_code := 200
-
-    -- 1. If-else as an expression
-    status := if status_code == 200 { "OK" } else { "Error" }
-    print(status)
-
-    -- 2. Clean while loop
-    count := 3
-    while count > 0 {
-        print(count)
-        count = count - 1
-    }
-
-    -- 3. Pattern matching
-    match status_code {
-        200 => print("Success")
-        404 => print("Not Found")
-        500 => print("Internal Server Error")
-        _   => print("Unknown Status")
+    temperature := 85
+    if temperature > 100 {
+        print("boiling")
+    } else if temperature > 60 {
+        print("warm")
+    } else {
+        print("cool")
     }
 }
 ```
 
----
+### Using `if` as an Expression
 
-## 1. Branching with `if` and `else`
-
-In Abyss, conditions do not require surrounding parentheses, but the body block must always be enclosed in curly braces `{ ... }`:
+When an `if` produces a value, both branches must have compatible types:
 
 ```abyss
-temperature := 85
-
-if temperature > 100 {
-    print("Boiling point exceeded")
-} else if temperature > 60 {
-    print("Warm operation")
-} else {
-    print("Optimal temperature")
+main :: fn() {
+    threshold := 10
+    priority := if threshold > 5 { "high" } else { "normal" }
+    print(priority)
 }
 ```
 
-### `if` as an Expression
+An `if` without an `else` produces no value and can only be used as a statement.
 
-Because Abyss is expression-oriented, `if/else` can yield a value directly. This replaces the ternary operator found in other languages with a clean, readable syntax:
+### Block Conditions
 
-```abyss
-threshold := 10
-priority := if threshold > 5 { "High" } else { "Normal" }
-```
-
-When used as an expression, both the `if` and `else` branches must evaluate to compatible types.
-
----
-
-## 2. Looping with `while`
-
-The `while` loop executes its body repeatedly as long as its condition remains `true`:
+A condition may be a block. Its last expression is the boolean test, and the block runs before the branch:
 
 ```abyss
-i := 0
-while i < 5 {
-    print(i)
-    i = i + 1
-}
-```
-
-### Loop Control: `break` and `cont`
-
-You can control loop execution using:
-- `break`: Halts the loop immediately and resumes execution after the closing brace.
-- `cont`: Skips the remainder of the current iteration and starts the next one immediately. *(Note: Abyss uses `cont`, not `continue`.)*
-
-```abyss
-n := 0
-while n < 10 {
-    n = n + 1
-    if n % 2 == 0 {
-        cont            -- Skip even numbers
+main :: fn() {
+    probe := 42
+    threshold := 10
+    if {
+        reading := probe
+        reading > threshold
+    } {
+        print("over threshold")
     }
-    if n > 7 {
-        break           -- Stop once n exceeds 7
+}
+```
+
+## 2. `while` Loops
+
+```abyss
+main :: fn() {
+    i := 0
+    while i < 5 {
+        print(i)
+        i = i + 1
     }
-    print(n)            -- Outputs: 1, 3, 5, 7
 }
 ```
 
----
-
-## 3. High-Level Iteration with `for`
-
-Abyss provides a high-level `for in` construct that iterates over any collection, slice, or type implementing the standard structural iterator protocol:
+The condition can be a block, which lets a loop compute its test before deciding whether to continue:
 
 ```abyss
--- Iterating over an array or slice
-numbers := .[10, 20, 30, 40]
-for num in numbers {
-    print(num)
+main :: fn() {
+    checked := 0
+    limit := 3
+
+    while {
+        checked = checked + 1
+        checked < limit
+    } {
+        print(checked)
+    }
 }
 ```
 
-### How `for` Works Under the Hood
+### `break` and `cont`
 
-The `for` loop is completely zero-cost. It desugars into an iterator inspection loop. Any type that exposes a `next(self &Self) Maybe(T)` method can be looped over with `for`:
+`break` exits the nearest loop, and `cont` starts its next iteration. Both work inside a block condition as well, where they apply to the loop being tested:
 
 ```abyss
-MyRange :: struct {
-    curr i32
-    max  i32
+main :: fn() {
+    n := 0
+    while n < 10 {
+        n = n + 1
+        if n % 2 == 0 { cont }
+        if n > 7 { break }
+        print(n)
+    }
+}
+```
+
+There is no `continue` keyword. Use `cont`.
+
+## 3. `for` Loops
+
+`for` iterates any value that provides a `next()` method or an `iter()` method. Arrays, slices, `Range`, and the standard collections all work:
+
+```abyss
+main :: fn() {
+    values: [3]i32 = .[10, 20, 30]
+    for value in values {
+        print(value)
+    }
+
+    for n in Range.new(0, 4) {
+        print(n)
+    }
+
+    names := Vec(Str).new()
+    names.push("alice")
+    names.push("bob")
+    for name in names {
+        print(name)
+    }
+    names.destroy()
+}
+```
+
+### Iteration Protocol
+
+A type is iterable directly when it has a `next()` method returning `Maybe(T)`:
+
+```abyss
+Countdown :: struct {
+    current i32
 
     next :: fn(self &Self) Maybe(i32) {
-        if self.curr < self.max {
-            val := self.curr
-            self.curr = self.curr + 1
-            ret Maybe(i32).some(val)
-        }
-        Maybe(i32).none()
+        if self.current == 0 { ret Maybe(i32).none() }
+        value := self.current
+        self.current = self.current - 1
+        Maybe(i32).some(value)
+    }
+}
+
+main :: fn() {
+    counter: Countdown = .{ current: 3 }
+    for value in counter {
+        print(value)
     }
 }
 ```
 
-When you write `for item in my_range`, the compiler repeatedly calls `next()`, unwraps `Maybe(T).some(val)`, and exits cleanly when `Maybe(T).none()` is returned.
-
----
-
-## 4. Pattern Matching with `match`
-
-Pattern matching allows you to branch based on the shape and value of data. Match arms are separated by commas or newlines:
+Alternatively, a type may expose `iter()` returning an iterator. Arrays provide `iter()` and `iter_ref()` automatically:
 
 ```abyss
-level := 2
+main :: fn() {
+    values: [3]i32 = .[7, 8, 9]
 
-match level {
-    0 => print("Junior")
-    1 => print("Mid-Level")
-    2 => print("Senior")
-    _ => print("Principal")
-}
-```
-
-### Multiple Patterns in a Single Arm
-
-You can group multiple patterns on a single arm using commas `,`:
-
-```abyss
-digit := '7'
-
-match digit {
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' => {
-        print("Digit recognized")
+    for value in values.iter() {
+        print(value)
     }
-    _ => {
-        print("Not a digit")
+
+    for pointer in values.iter_ref() {
+        *pointer = *pointer * 2
     }
 }
 ```
 
-### The Wildcard Pattern `_`
-
-The underscore `_` acts as a default catch-all pattern. If no preceding arm matches, the wildcard arm is executed.
-
-### Matching on Enums and Unions
-
-Pattern matching is particularly powerful when working with tagged unions and enumerations:
+Iterating `&value` uses `iter_ref()` and yields pointers, which is the compact form:
 
 ```abyss
-Color :: enum {
-    Red
-    Green
-    Blue
-}
-
-c := Color.Green
-
-match c {
-    Color.Red   => print("Hex: #FF0000")
-    Color.Green => print("Hex: #00FF00")
-    Color.Blue  => print("Hex: #0000FF")
+main :: fn() {
+    values: [3]i32 = .[7, 8, 9]
+    for pointer in &values {
+        *pointer = *pointer + 1
+    }
+    print(values[0] + values[1] + values[2])
 }
 ```
 
----
+### Several Iterators at Once
 
-## 5. Source Locations and Fatal Errors (`#fall`)
-
-Abyss gives you built-in compile-time introspection into source locations. `@source_location()` returns a compile-time record with the current file path, line, and column:
+One `for` can drive several iterators. Each loop variable pairs with one source, and the counts must match:
 
 ```abyss
-loc := @source_location()
--- loc.file is Str, loc.line is u32, loc.column is u32
+main :: fn() {
+    for a, b in Range.new(0, 3), Range.new(10, 13) {
+        print(a + b)
+    }
+}
 ```
 
-### Unrecoverable Errors with `#fall`
+The loop ends when any iterator is exhausted. It does not rely on `len()`; the iterator protocol decides when iteration is complete.
 
-When an unrecoverable invariant is violated, use `#fall` (from `std/sys`) to print the exact call site location to `stderr` and abort the program:
+## 4. `match`
+
+`match` is exhaustive pattern matching over **enums and tagged unions**. It is not a C-style switch: integers, floats, and strings cannot be matched.
+
+```abyss
+Color :: enum { red, green, blue }
+
+describe :: fn(color Color) Str {
+    match color {
+        red { "red" }
+        green, blue { "cool" }
+    }
+}
+
+main :: fn() {
+    print(describe(Color.red))
+    print(describe(Color.blue))
+}
+```
+
+Patterns are variants and may be qualified:
+
+```abyss
+Color :: enum { red, green, blue }
+
+label :: fn(color Color) Str {
+    match color {
+        Color.red { "stop" }
+        Color.green, Color.blue { "go" }
+    }
+}
+
+main :: fn() {
+    print(label(Color.green))
+}
+```
+
+Every variant must be covered, or the match needs an `else` arm:
+
+```abyss
+Color :: enum { red, green, blue }
+
+label :: fn(color Color) Str {
+    match color {
+        red { "stop" }
+        else { "go" }
+    }
+}
+
+main :: fn() {
+    print(label(Color.blue))
+}
+```
+
+### Matching Tagged Unions
+
+Union patterns are types. The arm body runs when the value currently holds that member:
+
+```abyss
+area :: fn(shape i32 | f64) f64 {
+    match shape {
+        i32 { 0.0 }
+        f64 { 1.0 }
+    }
+}
+
+main :: fn() {
+    print(area(7))
+    print(area(1.5))
+}
+```
+
+Use `match name in value` to bind the payload to `name`. The pattern determines the binding's type, so no cast is needed:
+
+```abyss
+describe :: fn(value i32 | bool) Str {
+    match payload in value {
+        i32 { "an integer" }
+        bool { "a boolean" }
+    }
+}
+
+main :: fn() {
+    print(describe(7))
+    print(describe(true))
+}
+```
+
+A binding arm may name only one pattern, because two patterns would have different payload types. Use `else` for a catch-all:
+
+```abyss
+kind :: fn(value i32 | bool | Str) Str {
+    match payload in value {
+        i32 { "number" }
+        else { "text or flag" }
+    }
+}
+
+main :: fn() {
+    print(kind(1))
+    print(kind("s"))
+}
+```
+
+### Match Result Types
+
+All arms must produce compatible values when the match is used as an expression. An `else` arm is optional once the patterns cover every variant; omitting a variant without `else` is a compile error:
+
+```
+[type error] non-exhaustive match; add the missing cases or else
+```
+
+## 5. Early Return
+
+`ret` leaves the enclosing function immediately. With a value it returns that value; bare `ret` returns nothing:
+
+```abyss
+find_first_negative :: fn(values []i32) Maybe(i32) {
+    for value in values {
+        if value < 0 { ret Maybe(i32).some(value) }
+    }
+    Maybe(i32).none()
+}
+
+dump :: fn(label Str) {
+    if label.len == 0 { ret }
+    print(label)
+}
+
+main :: fn() {
+    values: [3]i32 = .[4, -2, 9]
+    print(find_first_negative(Slice(i32).new(&values[0], 3)).unwrap())
+    dump("")
+    dump("done")
+}
+```
+
+## 6. Source Locations and Fatal Errors
+
+`@source_location()` is a compile-time `SourceLocation` with the current file, line, and one-based byte column:
+
+```abyss
+main :: fn() {
+    location := @source_location()
+    print(location.file.ends_with(".a"))
+    print(location.line)
+    print(location.column)
+}
+```
+
+`std/sys` exports a `fall` splice and a `fall_at` function. Splice `#fall` to abort at the call site:
 
 ```abyss
 fall :: @import("std/sys").fall
 
-verify_pointer :: fn(ptr &u8) {
-    if ptr == 0 {
-        #fall           -- Prints file, line, and column then exits with code 1
-    }
+check_depth :: fn(depth i32) {
+    if depth < 0 { #fall }
+}
+
+main :: fn() {
+    check_depth(10)
+    print("inside range")
 }
 ```
 
----
+`#fall` writes to standard error and exits with status 1. `fall_at(location)` performs the same abort when you already hold a `SourceLocation`.
 
 ## Idiomatic Summary
 
-| Control Flow | Idiomatic Abyss | Anti-Pattern |
+| Control Flow | Idiomatic Abyss | Avoid |
 | :--- | :--- | :--- |
-| **Ternary Choice** | `val := if cond { a } else { b }` | Nested flags or assignments |
-| **Loop Continue** | `cont` | `continue` |
-| **Iteration** | `for x in collection { ... }` | Manual `while i < len` indexing |
-| **Match Separator** | Newlines or `,` between arms | Semicolons `;` in match arms |
-| **Default Pattern** | `_ => ...` | `default:` |
+| **Choice as value** | `val := if cond { a } else { b }` | Predeclaring and assigning in branches |
+| **Loop continuation** | `cont` | `continue` |
+| **Iteration** | `for item in collection` | Manual index loops |
+| **Matching** | `match` on enums and unions | `match` on integers or strings |
+| **Catch-all arm** | `else { ... }` | `_` or `default` |
 
 ---
 
-[← Previous: Basics](01-basics.md) | [Next: Functions & Methods →](03-functions-and-methods.md)
+[Previous: Basics](01-basics.md) | [Next: Functions & Methods →](03-functions-and-methods.md)

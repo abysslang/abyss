@@ -1,42 +1,31 @@
-# Structs & Types: Data Layout, Constructors, and Generics
+# Structs & Data Types
 
-In Abyss, data is king. Abyss rejects bloated object models, hidden vtables, and inheritance chains in favor of clean, transparent structures whose layout directly matches physical memory.
-
-Here is a quick look at struct definition, instantiation, and generics:
+Structs, tuples, enums, and tagged unions are the four ways an Abyss program describes data. Each is a plain value with an explicit layout, and each maps directly onto a C99 type in the backend.
 
 ```abyss
--- 1. Struct with clean field definitions and constructor
 Point :: struct {
-    x, y i32
-
-    new :: fn(x i32, y i32) Self {
-        .{ x: x, y: y }
-    }
+    x i32
+    y i32
 }
 
--- 2. Generic container struct
-Box :: struct(T type) {
-    value T
-
-    new :: fn(val T) Self {
-        .{ value: val }
-    }
-}
+Shape :: enum { circle, square, triangle }
 
 main :: fn() {
-    p := Point.new(10, 20)
-    b := Box().new("Wrapped text")      -- Type inferred automatically
+    origin: Point = .{ x: 0, y: 0 }
+    print(origin.x)
 
-    print(p.x)
-    print(b.value)
+    shape := Shape.square
+    print(shape as u32)
 }
 ```
 
+Everything here is a value: it is copied when assigned, passed, or returned, and the compiler lays it out with natural alignment and no hidden bookkeeping.
+
 ---
 
-## 1. Struct Declaration and Field Syntax
+## 1. Structs
 
-Structs are declared using `struct { ... }`. Fields are declared using the clean `name Type` syntax without colons:
+A struct lists its fields with `name Type` pairs. Fields sharing a type may be grouped:
 
 ```abyss
 User :: struct {
@@ -44,169 +33,250 @@ User :: struct {
     name      Str
     is_active bool
 }
-```
 
-### Grouped Fields
-
-Fields sharing the same type can be declared together on a single line:
-
-```abyss
-ColorRGBA :: struct {
-    r, g, b, a u8
+Rect :: struct {
+    x, y, w, h i32
 }
 ```
 
-### Memory Layout Guarantees
+There are no colons between a field name and its type, and fields are separated by newlines or commas. `x: i32` and `x i32;` are both errors.
 
-Abyss structs contain **only** the data fields you explicitly declare:
-- **No hidden pointers** (no vtables or class metadata).
-- **No implicit padding bytes** beyond standard natural alignment for the target architecture.
-- Passing or storing a struct is as cheap and predictable as in pure C.
-
----
-
-## 2. Instantiation with Struct Literals (`.{ ... }`)
-
-Struct instances are created using anonymous literal syntax `.{ ... }`:
+Functions declared inside the braces are namespaced to the struct and become methods or constructors. See [Functions & Methods](03-functions-and-methods.md) for the `self` receiver rules and `Self`.
 
 ```abyss
--- Explicit type annotation with inferred literal:
-p: Point = .{ x: 10, y: 20 }
+Circle :: struct {
+    radius f64
 
--- Field values can be expressions or variables:
-origin := Point.new(0, 0)
+    new :: fn(radius f64) Self {
+        .{ radius: radius }
+    }
+
+    area :: fn(self &Self) f64 {
+        3.141592653589793 * self.radius * self.radius
+    }
+}
+
+main :: fn() {
+    c := Circle.new(2.0)
+    print(c.area())
+}
 ```
+
+### Layout
+
+A struct contains exactly the fields you declare, in the order you declare them, with the target's natural alignment and padding. There is no vtable, no reference count, and no padding beyond what alignment requires. An empty struct becomes a single dummy byte in the emitted C so that it has a non-zero size, as C requires.
+
+## 2. Constructing Structs
+
+Struct values use an anonymous literal `.{ field: value, ... }`. The type comes from the context: an explicit annotation, a parameter type, or a return type.
+
+```abyss
+User :: struct {
+    id        u64
+    name      Str
+    is_active bool
+}
+
+main :: fn() {
+    user: User = .{
+        id: 101
+        name: "Alex"
+        is_active: true
+    }
+    print(user.name)
+}
+```
+
+A struct literal must supply **every** field. A missing field is a compile error, which keeps values fully initialized and removes the classic C footgun of partially filled structs:
+
+```abyss
+-- ERROR: struct literal has wrong number of fields
+partial: User = .{ id: 1 }
+```
+
+Fields can be listed on one line or one per line; newlines replace commas, so a vertical layout needs no trailing commas.
 
 ### Anonymous Structs
 
-You can also create ad-hoc anonymous structs on the fly without a preceding nominal declaration:
+When no named type is needed, an unannotated literal infers a fresh anonymous struct type:
 
 ```abyss
-config := .{
-    host: "127.0.0.1",
-    port: 8080,
-    timeout_ms: 5000
-}
-
-print(config.host)
-print(config.port)
-```
-
----
-
-## 3. The `Self` Alias
-
-Within any struct declaration, `Self` serves as a convenient alias for the enclosing type. This avoids repeating lengthy type names in constructors and methods:
-
-```abyss
-Counter :: struct {
-    value i32
-
-    new :: fn() Self {
-        .{ value: 0 }
+main :: fn() {
+    config := .{
+        host: "127.0.0.1"
+        port: 8080
     }
+    print(config.host)
+    print(config.port)
+}
+```
 
-    increment :: fn(self &Self) {
-        self.value = self.value + 1
+The literal is a value like any other, so it can be copied, returned, and stored:
+
+```abyss
+main :: fn() {
+    a := .{ x: 1, y: 2 }
+    b := a
+    print(b.x + b.y)
+}
+```
+
+## 3. Tuples
+
+A tuple is an anonymous struct with unnamed fields, written `struct { T1, T2 }`:
+
+```abyss
+min_max :: fn(a i32, b i32) struct { i32, i32 } {
+    if a < b { .{ a, b } } else { .{ b, a } }
+}
+
+main :: fn() {
+    low, high := min_max(7, 3)
+    print(low)
+    print(high)
+
+    pair := .{ 100, "text" }
+    print(pair.0)
+    print(pair.1)
+}
+```
+
+- Build a tuple with `.{ v1, v2 }` (no field names).
+- Read fields by position: `.0`, `.1`, `.2`, ….
+- Destructure with a matching binding count: `a, b := pair`. Tuples are ordinary values, so you can name one with a constant and use it as a parameter or return type.
+
+A named struct with the same field types is layout-compatible and converts by assignment:
+
+```abyss
+Pair :: struct { i32, Str }
+
+main :: fn() {
+    t: struct { i32, Str } = .{ 1, "a" }
+    p: Pair = t
+    print(p.0)
+}
+```
+
+## 4. Enums
+
+An enum is a closed set of named integral constants. The backing integer type defaults to `u32` and can be chosen explicitly:
+
+```abyss
+Color :: enum { red, green, blue }
+
+HttpStatus :: enum u16 {
+    ok = 200
+    not_found = 404
+}
+
+main :: fn() {
+    print(Color.green as u32)
+    print(HttpStatus.ok as u32)
+}
+```
+
+- Variants are referenced as `EnumName.variant`.
+- A variant without an explicit value takes the next integer; an explicit value sets the sequence from that point.
+- Convert between an enum and its backing integer with `as` in either direction. Matching on an enum value is covered in [Control Flow](02-control-flow.md).
+
+Enums can hold methods, which is how to attach behavior to a variant:
+
+```abyss
+Color :: enum {
+    red, green, blue
+
+    label :: fn(self &Self) Str {
+        match *self {
+            red { "red" }
+            green { "green" }
+            blue { "blue" }
+        }
     }
 }
+
+main :: fn() {
+    print(Color.blue.label())
+}
 ```
 
----
+## 5. Tagged Unions
 
-## 4. Enums and Tagged Unions
-
-Abyss supports both simple enumerations and tagged unions with data payloads.
-
-### Enums
-
-Enums represent a closed set of named integral constants:
+A tagged union is written as the set of types it may hold, joined with `|`. The value carries a hidden `u32` tag alongside the payload:
 
 ```abyss
-Direction :: enum {
-    North
-    East
-    South
-    West
+Number :: i32 | bool
+
+describe :: fn(value i32 | bool) Str {
+    if @is(value, i32) { "int" } else { "bool" }
 }
 
-heading := Direction.North
+main :: fn() {
+    n: Number = 42
+    print(describe(n))
+    print(describe(true))
+}
 ```
 
-### Tagged Unions
+There is no `union` keyword; the `|` type form is the tagged union. An unannotated value coerces into the union automatically, and every payload shares the same aligned storage.
 
-Unions hold one of several possible data payloads accompanied by an internal discriminant tag:
+Introspect a union value with three builtins:
+
+| Builtin | Returns | Use |
+| :--- | :--- | :--- |
+| `@is(value, T)` | `bool` | Does this value currently hold `T`? |
+| `@tag(value)` | `u32` | Numeric discriminant (the member index). |
+| `value as T` | `T` | Read the payload as `T` after a successful check. |
 
 ```abyss
-Result :: union {
-    Ok: i32
-    Err: Str
+main :: fn() {
+    value: i32 | bool = true
+    print(@is(value, i32))
+    print(@is(value, bool))
+    print(@tag(value))
+    print(value as bool)
 }
+```
 
-handle_result :: fn(r Result) {
-    match r {
-        Result.Ok  => print("Success!")
-        Result.Err => print("Failed!")
+`match` reads a union more directly, optionally binding the unwrapped payload. See [Control Flow](02-control-flow.md) for the full pattern syntax:
+
+```abyss
+print_value :: fn(value i32 | bool) {
+    match inner in value {
+        i32  { print(inner) }
+        bool { print(inner) }
     }
 }
-```
 
----
-
-## 5. Generics: Type Parameters and Deferred Inference
-
-Types are first-class citizens in Abyss. Structs can be parameterized by types:
-
-```abyss
-Pair :: struct(T type) {
-    first  T
-    second T
-
-    new :: fn(a T, b T) Self {
-        .{ first: a, second: b }
-    }
+main :: fn() {
+    print_value(7)
+    print_value(true)
 }
 ```
 
-### Deferred Inference
+## 6. Type Introspection
 
-Abyss features bidirectional type inference. When calling generic constructors, you can omit the type argument:
-
-```abyss
--- The compiler infers T as i32 automatically:
-int_pair := Pair().new(10, 20)
-
--- The compiler infers T as Str automatically:
-str_pair := Pair().new("left", "right")
-```
-
-The compiler specializes a concrete native C struct for each distinct type argument used in your code.
-
----
-
-## 6. Compile-Time Type Introspection (`@typeof`, `@type_name`)
-
-Abyss provides built-in compile-time intrinsics to inspect types:
-
-- `@typeof(expr)`: Evaluates to the compile-time type of an expression.
-- `@type_name(T)`: Evaluates to a compile-time `Str` representing the human-readable name of type `T`.
+Two builtins report types without running anything:
 
 ```abyss
-x := 42
-print(@type_name(@typeof(x)))   -- Prints: "i32"
+main :: fn() {
+    value := 42
+    print(@type_name(@typeof(value)))   -- "i32"
+    print(@sizeof(u64))                 -- 8
+}
 ```
 
----
+`@typeof(expr)` is the static type of `expr`, and `@type_name(T)` is its canonical name as a compile-time `Str`. Both are zero-cost. The full reflection surface — `@type_info`, `@field_type`, `@element_type`, and the `TypeInfo` record — is covered in [Comptime & Metaprogramming](07-comptime-and-metaprogramming.md).
 
 ## Idiomatic Summary
 
-| Struct Feature | Idiomatic Abyss | Anti-Pattern |
+| Concept | Idiomatic Abyss | Avoid |
 | :--- | :--- | :--- |
-| **Field Syntax** | `x i32` | `x: i32;` |
-| **Instantiation** | `.{ x: 10, y: 20 }` | `new Point(10, 20)` |
-| **Enclosing Type** | `Self` | Manually repeating struct name |
-| **Generic Call** | `Vec().new()` | `Vec(i32).new()` (when inferrable) |
+| **Fields** | `x i32` | `x: i32;` |
+| **Literals** | `.{ x: 1, y: 2 }` | Named-argument constructors |
+| **Enclosing type** | `Self` | Repeating the struct name |
+| **Optional variants** | Tagged unions with `@is`/`match` | Untagged `void *` payloads |
+| **Type name** | `@type_name(T)` | Hand-written name strings |
 
 ---
 
-[← Previous: Functions & Methods](03-functions-and-methods.md) | [Next: Pointers & Memory →](05-pointers-and-memory.md)
+[Previous: Functions & Methods](03-functions-and-methods.md) | [Next: Pointers, Arrays & Memory →](05-pointers-and-memory.md)

@@ -1,12 +1,10 @@
 # Whirlwind Tour
 
-This tour will get you comfortable with Abyss syntax in less than ten minutes.
+This tour gets you comfortable with Abyss syntax in about ten minutes. Every snippet is a complete program: save it as `tour.a` and run `abyssc r tour.a`, or build a native binary with `abyssc b tour.a out.c` followed by your C compiler.
 
 ---
 
 ## 1. Hello, World!
-
-Every Abyss program starts at `main`:
 
 ```abyss
 main :: fn() {
@@ -14,210 +12,313 @@ main :: fn() {
 }
 ```
 
-Notice anything missing? There is no `void` or `unit` keyword. If a function doesn't return anything, you simply don't write a return type. `print` automatically appends a newline (`\n`). For custom compile-time formatted strings, `printf` is also available. 
+There is no `void` keyword and no `return` keyword. A function without a return type returns nothing, and the last expression in a block is its value.
 
----
+`print` writes its formatted argument followed by a newline. `printf` writes a template with no automatic newline. Both come from the prelude, so no import is needed.
 
-## 2. Variables & Comments
+## 2. Bindings and Comments
 
-Comments start with `--`. Use `:=` for type inference, or specify types explicitly:
-
-```abyss
--- This is a single-line comment
-x := 42                -- Inferred integer
-pi: f32 = 3.14159      -- Explicit 32-bit float
-name := "Abyss"        -- Inferred string
-active := true         -- Boolean
-
--- Variables can be updated with '='
-x = x + 10
-```
-
-Mutable variables can also be declared at module scope. Use `:=` with a compile-time constant initializer, or declare a type without an initializer to start at zero.
+Comments start with `--` and run to the end of the line. `:=` introduces a binding and infers its type. `::` declares a compile-time constant:
 
 ```abyss
-initial :: 10
-requests := initial * 2
-failures: u64
+-- this is a comment
+x := 42
+pi: f32 = 3.14159
+name := "Abyss"
+active := true
 
-record_failure :: fn() {
-    failures = failures + 1
+LIMIT :: 4096
+
+main :: fn() {
+    x = x + 10
+    print(name)
+    print(active)
+    print(pi)
+    print(LIMIT)
 }
 ```
 
-Each module has one instance of each global. Functions can read and update it, including through imports. A global's current value is a runtime value, so it cannot initialize another global or be read during compile-time evaluation. Taking the address of a global is allowed in an initializer because its storage is fixed.
+Values bound with `:=` are mutable; assign to them with `=`. Constants bound with `::` are compile-time values and cannot be assigned. Statements are separated by newlines; a comma also works when you want several on one line:
 
----
+```abyss
+main :: fn() {
+    a := 1, b := 2
+    print(a + b)
+}
+```
+
+There are no semicolons. A `;` is a syntax error.
 
 ## 3. Control Flow
 
-### `if` / `else`
-Parentheses around conditions are optional, but braces around blocks are required:
+Parentheses around conditions are optional; braces are required:
 
 ```abyss
-depth := 500
-
-if depth > 1000 {
-    print("Crushing pressure!")
-} else if depth > 200 {
-    print("The twilight zone.")
-} else {
-    print("Near the surface.")
-}
-```
-
-### Source locations and fatal errors
-
-`@source_location()` gives you a compile-time value with a file path, a line, and a byte column. Lines and columns start at 1. Use `#fall` to print the location of a fatal error to stderr and exit with status 1.
-
-```abyss
-fall :: @import("std/sys").fall
-
-check_depth :: fn(depth i32) {
-    if depth < 0 { #fall }
-}
-```
-
-### `while`
-Straightforward loops without surprises. For formatted, newline-free printing, use `printf`:
-
-```abyss
-printf :: @import("std/io").printf
-print :: @import("std/io").print
-
-i := 0
-while i < 5 {
-    printf("{} ", .{i})
-    i = i + 1
-}
-print("")
--- Outputs: 0 1 2 3 4
-```
-
----
-
-## 4. Functions & Methods
-
-Functions are declared with `:: fn(...) [ReturnType]`:
-
-```abyss
-printf :: @import("std/io").printf
-
-add :: fn(a i32, b i32) i32 {
-    a + b
+depth :: fn(meters i32) Str {
+    if meters > 1000 {
+        "crushing pressure"
+    } else if meters > 200 {
+        "twilight zone"
+    } else {
+        "near the surface"
+    }
 }
 
-log_depth :: fn(meters i32) {
-    printf("Current depth: {}m\n", .{meters})
-}
-```
+main :: fn() {
+    print(depth(500))
 
-The last expression in a block automatically acts as the return value—no explicit `return` keyword needed for simple expressions (though `ret` is available when you want an early exit).
-
----
-
-## 5. Structs & Data Layout
-
-Structs define custom data types. Field definitions use `name Type` syntax (no colons between name and type):
-
-```abyss
-Point :: struct {
-    x, y i32
-
-    -- Methods take 'self &Self' to access instance data
-    dist_sq :: fn(self &Self) i32 {
-        self.x * self.x + self.y * self.y
+    i := 0
+    while i < 5 {
+        i = i + 1
+        if i == 2 { cont }
+        if i > 4 { break }
+        print(i)
     }
 }
 ```
 
-Instantiating a struct is clean and expressive with struct literal syntax (`.{ ... }`). Combine with `printf` for zero-cost formatting:
+`if` is an expression, so it can produce a value directly. `while` loops can also take a block condition, which lets you run code before testing:
 
 ```abyss
-p: Point = .{ x: 3, y: 4 }
-printf("Point ({}, {}), dist_sq = {}\n", .{p.x, p.y, p.dist_sq()})
--- Outputs: Point (3, 4), dist_sq = 25
+main :: fn() {
+    n := 0
+    while {
+        n = n + 1
+        n < 4
+    } {
+        print(n)
+    }
+}
 ```
 
----
-
-## 6. Tuples & Arrays
-
-Abyss supports structural tuples, destructuring, and fixed-size arrays with minimal syntax:
+`for` iterates anything with a `next()` method or an `iter()` method, and arrays and slices are iterable directly:
 
 ```abyss
--- Structural tuples and destructuring:
-origin := .{10, 20}
-x, y := origin
+main :: fn() {
+    for n in Range.new(0, 3) {
+        print(n)
+    }
 
--- Fixed-size arrays:
-numbers: [3]i32 = .[1, 2, 3]
-printf("Item: {}, origin: ({}, {})\n", .{numbers[0], x, y})
+    values: [3]i32 = .[10, 20, 30]
+    for v in values {
+        print(v)
+    }
+
+    for a, b in Range.new(0, 2), Range.new(10, 12) {
+        print(a + b)
+    }
+}
 ```
 
----
-
-## 7. Compile-Time Execution (`cmpt`)
-
-Why calculate something at runtime when your CPU can do it once during compilation? 
-
-The `cmpt` block executes arbitrary code at compile time using the internal bytecode VM:
+`match` works on enums and tagged unions, must be exhaustive unless it has an `else` arm, and uses no arrow:
 
 ```abyss
-TABLE_SIZE := cmpt {
+Color :: enum { red, green, blue }
+
+main :: fn() {
+    c := Color.green
+    match c {
+        red { print("warm") }
+        green, blue { print("cool") }
+    }
+}
+```
+
+## 4. Functions and Methods
+
+Parameters are written `name Type`, and consecutive parameters can share a type:
+
+```abyss
+add :: fn(a, b i32) i32 {
+    a + b
+}
+
+Rectangle :: struct {
+    width i32
+    height i32
+
+    new :: fn(width i32, height i32) Self {
+        .{ width: width, height: height }
+    }
+
+    area :: fn(self &Self) i32 {
+        self.width * self.height
+    }
+}
+
+main :: fn() {
+    rect := Rectangle.new(5, 10)
+    print(add(2, 3))
+    print(rect.area())
+}
+```
+
+The last expression in a block is the return value. Use `ret` to leave early:
+
+```abyss
+clamp :: fn(value i32, low i32, high i32) i32 {
+    if value < low { ret low }
+    if value > high { ret high }
+    value
+}
+```
+
+## 5. Structs, Tuples, Enums, and Unions
+
+Struct fields use `name Type` with no colon. Instances are built with `.{}`:
+
+```abyss
+Point :: struct {
+    x i32
+    y i32
+}
+
+main :: fn() {
+    p: Point = .{ x: 3, y: 4 }
+    print(p.x)
+
+    pair := .{ 10, "ten" }
+    first, second := pair
+    print(first)
+    print(second)
+}
+```
+
+Enums can carry methods and an explicit backing type. Tagged unions are written `A | B`, and you check, tag, match, or cast them:
+
+```abyss
+Status :: enum u8 { ok = 200, not_found = 404 }
+
+describe :: fn(value i32 | bool) Str {
+    match payload in value {
+        i32 { "an integer" }
+        bool { "a boolean" }
+    }
+}
+
+main :: fn() {
+    print(Status.ok as u32)
+    print(describe(7))
+    print(describe(true))
+}
+```
+
+## 6. Pointers, Arrays, and Memory
+
+`&T` is a pointer, `&value` takes an address, and `.` dereferences pointers automatically, however deep the chain:
+
+```abyss
+Arena :: @import("std/allocator").Arena
+
+Node :: struct {
+    value i32
+    next &Node
+}
+
+main :: fn() {
+    arena := Arena.new(4096)
+
+    first := arena.alloc(@sizeof(Node)) as &Node
+    first.value = 1
+    second := arena.alloc(@sizeof(Node)) as &Node
+    second.value = 2
+    first.next = second
+
+    print(first.next.value)
+    arena.destroy()
+}
+```
+
+`Arena` is not in the prelude, so the import at the top is required. Arrays use `[N]T` and `.[ ... ]`, and slices use `[]T` or `Slice(T)`:
+
+```abyss
+main :: fn() {
+    values: [4]i32 = .[10, 20, 30, 40]
+    print(values[0])
+    values[1] = 99
+
+    view: []i32 = Slice(i32).new(&values[0], 4)
+    print(view.len)
+}
+```
+
+## 7. Compile-Time Execution
+
+`cmpt` evaluates an expression on the compiler's VM before the program runs:
+
+```abyss
+TABLE :: cmpt {
     base := 64
     factor := 4
     base * factor + 12
 }
 
-print(TABLE_SIZE)
--- TABLE_SIZE is baked into the binary as an exact constant (268)
+main :: fn() {
+    print(TABLE)
+}
 ```
 
----
-
-## 8. First-Class Types
-
-In Abyss, types are first-class values. You can pass them as arguments, return them from functions, and choose them conditionally:
+`#` splices compile-time text into the program. A splice can supply a type, or generate members inside a struct or enum body:
 
 ```abyss
-PrecisionType :: fn(high_precision bool) type {
-    if high_precision { f64 } else { f32 }
+make_point_type :: fn() Str {
+    "struct { x i32, y i32 }"
 }
 
--- Computes the type at compile-time without complex template metaprogramming
-coordinate: PrecisionType(true) = 142.857
-print(coordinate)
+Point :: #make_point_type()
+
+main :: fn() {
+    p: Point = .{ x: 3, y: 4 }
+    print(p.x + p.y)
+}
 ```
 
-No template error messages stretching across five terminal screens. Types are just code.
+## 8. Types Are Values
+
+A function can return a type, and bindings, parameters, and return types can all use it:
+
+```abyss
+precision :: fn(wide bool) type {
+    if wide { f64 } else { f32 }
+}
+
+main :: fn() {
+    coordinate: precision(true) = 142.857
+    print(coordinate)
+    print(@type_name(precision(false)))
+}
+```
 
 ## 9. Modules
 
-Use `@import` anywhere an expression is allowed. It takes a compile-time `Str`
-and returns a namespace struct for the file. Top-level bindings are available as
-members, including types, functions, constants, and mutable globals.
+`@import` is an expression that produces a namespace value. Bind it once and reach everything through it:
 
 ```abyss
 std :: @import("std")
 Arena :: @import("std/allocator").Arena
 
 main :: fn() {
-    fs := @import("std/fs")
-    print(@type_name(fs.File))
     print(std.ascii.is_digit('7'))
+    print(@type_name(Arena))
 }
 ```
 
-Use `./` or `../` for paths relative to the importing file. Other paths resolve
-from the working directory and configured module search paths. The compiler
-tries `name.a` before `name/name.a`. Use an explicit `.a` to select a specific file.
+Paths without a leading `./` or `../` resolve against the working directory and configured import directories. An extensionless path tries `name.a` first, then `name/name.a`. See [Modules & Imports](../03-the-guide/08-modules-and-imports.md) for cycles, caching, and re-exports.
 
-Each resolved file has one module identity per compilation. You can pass, store,
-or return its namespace value using `@typeof(@import("path"))` as the type. Aliases
-share the same definitions and mutable globals. Files can import each other and
-use forward references; a binding whose value depends on itself is an error.
+## 10. Running It
+
+```sh
+# run instantly on the bytecode VM
+abyssc r tour.a
+
+# emit C99 and build a native binary
+abyssc b tour.a tour.c
+gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 tour.c -o tour
+./tour
+```
+
+That is enough to read most Abyss code. The rest of the book fills in each area in depth.
 
 ---
 
-[Next: Tooling & Workflow &rarr;](workflow.md)
+[Previous: Architecture](../01-overview/architecture.md) | [Next: Tooling & Workflow →](workflow.md)

@@ -1,6 +1,6 @@
-# Filesystem & Paths Reference: `std/fs` and `std/path`
+# Filesystem & Paths
 
-The `std/fs` and `std/path` modules provide clean, cross-platform file system operations. They operate natively on Abyss's allocation-free `Str` type and integrate seamlessly with `Arena` memory management.
+`std/fs` and `std/path` read, write, and inspect files and directories with `Str` paths and arena-scoped reads. Path handling is portable across Linux, macOS, and Windows.
 
 ```abyss
 File :: @import("std/fs").File
@@ -9,17 +9,11 @@ Arena :: @import("std/allocator").Arena
 
 main :: fn() {
     arena := Arena.new(65536)
-
-    -- 1. Combine paths portably
     log_path := Path.join(&arena, "logs", "app.log")
 
-    -- 2. Write content directly
-    File.write_string(log_path, "Application started\n")
-
-    -- 3. Read content into an arena
-    opt := File.read_to_string(&arena, log_path)
-    if opt.is_some() {
-        print(opt.unwrap())
+    File.write_string(log_path, "application started\n")
+    if File.exists(log_path) {
+        print(File.size(log_path))
     }
 
     arena.destroy()
@@ -28,84 +22,121 @@ main :: fn() {
 
 ---
 
-## 1. High-Level File Operations (`File`)
+## 1. `File`
 
-The static `File` struct provides convenient single-call functions for reading, writing, and inspecting files:
+`File` is a namespace of static helpers for whole-file operations. Paths are `Str`.
 
-### Reading Files
-
-- `File.read_to_string(arena &Arena, path Str) Maybe(Str)`:  
-  Reads the entire contents of a file into memory allocated within `arena`. Returns `none()` if the file does not exist or cannot be read.
+| Function | Signature | Notes |
+| :--- | :--- | :--- |
+| `open` | `fn(path Str, mode &u8) Maybe(FileStream)` | Open with a C mode string such as `c"rb"`. |
+| `open_read` | `fn(path Str) Maybe(FileStream)` | Read-only. |
+| `create` | `fn(path Str) Maybe(FileStream)` | Create or truncate for writing. |
+| `open_append` | `fn(path Str) Maybe(FileStream)` | Open for appending. |
+| `read_to_string` | `fn(a &Arena, path Str) Maybe(Str)` | Read the whole file into `a`. |
+| `write_string` | `fn(path Str, content Str) bool` | Create or overwrite. |
+| `append_string` | `fn(path Str, content Str) bool` | Append, creating if needed. |
+| `exists` | `fn(path Str) bool` | Existence test. |
+| `size` | `fn(path Str) u64` | Length in bytes (`0` if unreadable). |
 
 ```abyss
-opt := File.read_to_string(&scratch, "config.json")
-if opt.is_some() {
-    content := opt.unwrap()
-    print(content)
+File :: @import("std/fs").File
+Arena :: @import("std/allocator").Arena
+
+main :: fn() {
+    arena := Arena.new(65536)
+    content := File.read_to_string(&arena, "config.json")
+    if content.is_some() {
+        print(content.unwrap())
+    }
+    arena.destroy()
 }
 ```
 
-### Writing & Appending
+Module-level conveniences wrap the same operations with `&u8` paths and a fatal error path:
 
-- `File.write_string(path Str, content Str) bool`:  
-  Creates or overwrites `path` with `content`. Returns `true` on success.
-- `File.append_string(path Str, content Str) bool`:  
-  Appends `content` to the end of `path`. Creates the file if it does not exist.
+| Function | Signature | Notes |
+| :--- | :--- | :--- |
+| `read_file` | `fn(a &Arena, path &u8) Str` | Read or `#fall` with a message. |
+| `try_read_file` | `fn(a &Arena, path &u8) Str` | Read or return an empty `Str`. |
+| `write_file` | `fn(path &u8, content Str) bool` | Write or `#fall`. |
+| `append_file` | `fn(path &u8, content Str) bool` | Append or `#fall`. |
+| `file_exists` | `fn(path &u8) bool` | Existence test. |
 
-### Metadata & Manipulation
+## 2. `FileStream`
 
-- `File.exists(path Str) bool`: Returns `true` if the path exists on disk.
-- `File.size(path Str) u64`: Returns the size of the file in bytes.
-- `File.delete(path Str) bool`: Removes the file from the filesystem.
+`FileStream` is an open handle for streaming reads and writes. It carries a `handle i64` and an `opened bool`.
 
----
+| Function | Signature | Notes |
+| :--- | :--- | :--- |
+| `open` | `fn(path &u8, mode &u8) Maybe(Self)` | Mode strings such as `c"rb"`. |
+| `open_read` / `create` / `open_append` | `fn(path &u8) Maybe(Self)` | Convenience modes. |
+| `is_open` | `fn(self &Self) bool` | Handle state. |
+| `close` | `fn(self &Self) bool` | Close the handle. |
+| `read` | `fn(self &Self, buf &u8, count u64) u64` | Read up to `count` bytes. |
+| `read_all` | `fn(self &Self, a &Arena) Str` | Read the whole file into `a`. |
+| `write` | `fn(self &Self, buf &u8, count u64) u64` | Write bytes. |
+| `write_str` | `fn(self &Self, s Str) bool` | Write a `Str`. |
+| `seek` | `fn(self &Self, offset i64, whence i32) bool` | Reposition. |
+| `seek_to_start` / `seek_to_end` | `fn(self &Self) bool` | Jump to a boundary. |
+| `tell` | `fn(self &Self) i64` | Current offset. |
+| `size` | `fn(self &Self) u64` | File length. |
 
-## 2. Stream-Based I/O (`FileStream`)
-
-For large files that cannot or should not be loaded into memory all at once, use `FileStream`:
+`SEEK_SET()`, `SEEK_CUR()`, and `SEEK_END()` name the `whence` values.
 
 ```abyss
 File :: @import("std/fs").File
 
-process_large_file :: fn(path Str) {
-    stream_opt := File.open_read(path)
-    if stream_opt.is_none() {
-        ret
-    }
-
-    stream := stream_opt.unwrap()
-
-    -- Inspect size and position
-    total_size := stream.size()
-    print(total_size)
-
-    -- Close the OS handle when finished
+main :: fn() {
+    stream := File.create("out.txt").unwrap()
+    stream.write_str("first line\n")
+    stream.write_str("second line\n")
     stream.close()
 }
 ```
 
-### Complete `FileStream` API
+## 3. `Dir` and `DirStream`
 
-- **Constructors**:
-  - `File.open_read(path Str) Maybe(FileStream)`: Opens in read-only mode (`"rb"`).
-  - `File.create(path Str) Maybe(FileStream)`: Creates or truncates for writing (`"wb"`).
-  - `File.open_append(path Str) Maybe(FileStream)`: Opens for appending (`"ab"`).
-- **Methods**:
-  - `self.read(buf &u8, count u64) u64`: Reads up to `count` bytes into `buf`.
-  - `self.write(buf &u8, count u64) u64`: Writes `count` bytes from `buf`.
-  - `self.write_str(s Str) bool`: Writes a string slice to the stream.
-  - `self.seek(offset i64, whence i32) bool`: Moves file position cursor.
-  - `self.seek_to_start() bool`: Rewinds to byte offset 0.
-  - `self.seek_to_end() bool`: Seeks to the end of the file.
-  - `self.tell() i64`: Returns current byte cursor offset.
-  - `self.size() u64`: Computes file size.
-  - `self.close()`: Closes the underlying operating system file descriptor.
+`Dir` lists directories and walks trees; paths are `&u8` at this level.
 
----
+| Function | Signature | Notes |
+| :--- | :--- | :--- |
+| `create` | `fn(path &u8) bool` | Make a directory. |
+| `open` | `fn(path &u8) Maybe(DirStream)` | Open for iteration. |
+| `exists` | `fn(path &u8) bool` | Directory exists. |
+| `is_directory` | `fn(path &u8) bool` | Same as `exists`. |
+| `walk` | `fn(a &Arena, root Str, ext Str) Vec(Str)` | Recursively collect files with extension `ext` (or all when empty). |
 
-## 3. Path Manipulation (`Path`)
+`DirStream` has `open(path &u8) Maybe(Self)`, `close() bool`, and `next() Maybe(DirEntry)`. A `DirEntry` holds `name Str` and `kind DirEntryKind`, with `is_file()` and `is_dir()`; `DirEntryKind` is `enum u8 { unknown, file, directory }`. `.` and `..` are skipped for you.
 
-The `Path` module handles file path parsing, component extraction, and path joining across Windows, Linux, and macOS:
+```abyss
+Dir :: @import("std/fs").Dir
+Arena :: @import("std/allocator").Arena
+
+main :: fn() {
+    arena := Arena.new(65536)
+    for path in Dir.walk(&arena, "src", ".a") {
+        print(path)
+    }
+    arena.destroy()
+}
+```
+
+`Dir.walk` returns a `Vec(Str)` whose backing storage you still own; `for path in ...` iterates it directly.
+
+## 4. `Path`
+
+`Path` joins, splits, and normalizes paths. There is no `dirname`, `basename`, or `extension`; use `dir` and `base`, and test with `ends_with`.
+
+| Function | Signature | Notes |
+| :--- | :--- | :--- |
+| `join` | `fn(arena &Arena, base Str, rel Str) Str` | Join with a separator. |
+| `dir` | `fn(path Str) Str` | Everything before the last separator. |
+| `base` | `fn(path Str) Str` | Everything after the last separator. |
+| `is_absolute` | `fn(path Str) bool` | POSIX or drive-letter absolute. |
+| `normalize` | `fn(arena &Arena, path Str) Str` | Collapse `.`, `..`, and separators. |
+| `resolve` | `fn(arena &Arena, base Str, rel Str) Str` | Resolve `rel` against `base`. |
+| `ensure_ext` | `fn(arena &Arena, path Str, ext Str) Str` | Append `ext` unless already present. |
+| `to_cstr` | `fn(arena &Arena, path Str) &u8` | Null-terminated copy. |
 
 ```abyss
 Path :: @import("std/path").Path
@@ -113,32 +144,51 @@ Arena :: @import("std/allocator").Arena
 
 main :: fn() {
     arena := Arena.new(4096)
-
-    -- Joining components
-    full_path := Path.join(&arena, "src", "compiler", "main.a")
-    print(full_path)            -- "src/compiler/main.a"
-
-    -- Decomposing paths
-    dir := Path.dirname(full_path)
-    base := Path.basename(full_path)
-    ext := Path.extension(full_path)
-
-    print(dir)                  -- "src/compiler"
-    print(base)                 -- "main.a"
-    print(ext)                  -- ".a"
-
+    full := Path.join(&arena, "src", "compiler/main.a")
+    print(Path.dir(full))
+    print(Path.base(full))
+    print(Path.is_absolute(full))
+    print(Path.normalize(&arena, "./a/../b"))
     arena.destroy()
 }
 ```
 
-### Complete `Path` API
+## 5. Environment and Arguments
 
-- `Path.join(arena &Arena, a Str, b Str) Str`: Joins two path components using the appropriate path separator.
-- `Path.dirname(path Str) Str`: Extracts the directory containing the file.
-- `Path.basename(path Str) Str`: Extracts the file name and extension.
-- `Path.extension(path Str) Str`: Returns the file extension including the leading dot (`.`).
-- `Path.is_absolute(path Str) bool`: Checks if the path is an absolute root path.
+`std/env.Env` exposes process arguments and environment variables:
+
+| Function | Signature | Notes |
+| :--- | :--- | :--- |
+| `args_len` | `fn() i32` | Argument count. |
+| `arg` | `fn(idx i32) &u8` | Argument at `idx`, or null. |
+| `get` | `fn(name &u8) &u8` | Environment value, or null. |
+| `get_or` | `fn(name &u8, default_val &u8) &u8` | Value or a fallback. |
+| `has` | `fn(name &u8) bool` | Variable is set. |
+| `shift_args` | `fn(index i32)` | Drop the first `index` arguments. |
+| `home_dir` | `fn(arena &Arena) Str` | User home directory. |
+| `abyss_home` | `fn(arena &Arena) Str` | Abyss install/data directory. |
+
+```abyss
+Env :: @import("std/env").Env
+
+main :: fn() {
+    print(Env.args_len())
+    print(Env.get_or(c"PATH", c""))
+}
+```
+
+## 6. Embedding Files at Compile Time
+
+`std/fs.Embed` produces source strings that bake file contents into the program:
+
+| Function | Signature | Notes |
+| :--- | :--- | :--- |
+| `file` | `fn(a &Arena, path Str) Str` | Code that returns one file's `Str`. |
+| `tree` | `fn(a &Arena, root Str, ext Str) Str` | Code that returns the content for a path under `root`. |
+| `sources` | `fn(a &Arena) Str` | Code embedding the core and std pods. |
+
+The result is fed into a splice (`#Embed.file(...)`), so the file bytes become a compile-time constant and incur no runtime file access.
 
 ---
 
-[← Previous: I/O & Formatting](03-io-and-fmt.md) | [Next: Allocators & Memory Reference →](05-allocators-and-mem.md)
+[Previous: I/O & Formatting](03-io-and-fmt.md) | [Next: Allocators & Memory →](05-allocators-and-mem.md)

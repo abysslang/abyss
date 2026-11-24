@@ -1,151 +1,244 @@
-# System & Threading Reference: `std/sys` and `std/thread`
+# System & Threading
 
-The `std/sys` and `std/thread` modules give Abyss direct access to host operating system facilities, process control, and native 1:1 kernel threads.
+`std/sys` exposes host process and stream primitives, and `std/thread` layers native 1:1 threads on top. There is no scheduler, green-thread runtime, or hidden thread pool: a spawn maps directly onto an OS thread through the target's threading API.
 
-Abyss has no runtime scheduler, green thread machinery, or hidden thread pools. When you spawn a thread, it maps directly to a lightweight native OS thread (POSIX `pthread` on Linux/macOS, Win32 threads on Windows).
+Every example in this chapter targets a **native build**. The bytecode VM has no thread, mutex, or host-stream runtime, so emit C with `abyssc b` and link the result with `-pthread`; `abyssc r` cannot run them.
 
 ```abyss
 thread :: @import("std/thread")
 
-Job :: struct {
-    start u64
-    count u64
+Bounds :: struct {
+    low  i32
+    high i32
 }
 
-sum_range :: fn(job Job) u64 {
-    total: u64 = 0
-    i := job.start
-    while i < job.start + job.count {
-        total = total + i
-        i = i + 1
+width :: fn(bounds Bounds) i32 {
+    bounds.high - bounds.low
+}
+
+main :: fn() {
+    bounds: Bounds = .{ low: 2, high: 44 }
+    worker := thread.spawn_with(width, bounds).unwrap()
+    print(worker.join().unwrap())
+}
+```
+
+---
+
+## 1. Process and Streams (`std/sys`)
+
+| Symbol | Notes |
+| :--- | :--- |
+| `STDIN`, `STDOUT`, `STDERR` | `0`, `1`, `2`. |
+| `write_console(text Str)` | Write to standard output. |
+| `write_stderr(text Str)` | Write to standard error. |
+| `write_all(handle i64, buf &u8, count u64) u64` | Write all bytes, looping on partial writes. |
+| `exit_process(code i32)` | Terminate with a status. |
+| `last_error()` | The platform's last error code. |
+| `environment(name &u8) &u8` | Environment variable lookup. |
+| `host_call(...)` | Opaque host dispatch used by bindings. |
+| `format_float(buf &u8, cap u64, value f64) u64` | Float text used by `Convert`. |
+| `open_handle`, `read_handle`, `write_handle`, `seek_handle`, `close_handle` | Raw handle I/O. |
+| `make_directory(path &u8) bool`, `Directory` | Directory creation and listing. |
+| `OpenMode` | Parsed file mode (`read`, `write`, `create`, `truncate`, `append`). |
+
+### `fall` and `fall_at`
+
+`sys.fall` is a splice that reports the current `@source_location()` to standard error and exits with status `1`; `fall_at(location)` does the same for a location you hold. Use them for invariants that cannot be recovered from:
+
+```abyss
+sys :: @import("std/sys")
+
+expect :: fn(ok bool) {
+    if not ok {
+        sys.fall_at(@source_location())
     }
-    total
 }
 
 main :: fn() {
-    job: Job = .{ start: 1, count: 1000 }
-
-    -- Spawn worker with value capture
-    handle := thread.spawn_with(sum_range, job).unwrap()
-
-    -- Wait and collect typed result
-    result := handle.join().unwrap()
-    print(result)
+    expect(2 + 2 == 4)
+    print("invariant held")
 }
 ```
 
----
+Write `#sys.fall` on its own line to report the current location and exit `1` from anywhere in a block.
 
-## 1. System Primitives (`std/sys`)
+## 2. Native Threads
 
-The `std/sys` module provides low-level process controls and standard I/O streams:
+Import `std/thread` directly, or reach it through `@import("std").thread`.
 
-### Process Control
-- `sys.exit_process(code i32)`: Immediately terminates the current process with an exit status code.
-- `sys.fall`: Macro that prints the current `@source_location()` to `stderr` and terminates the process with status 1.
+### Capabilities
 
-### Standard Stream Descriptors
-- `sys.STDIN`: Standard input descriptor (`0`).
-- `sys.STDOUT`: Standard output descriptor (`1`).
-- `sys.STDERR`: Standard error descriptor (`2`).
-- `sys.write_console(text Str)`: Writes directly to standard output.
-- `sys.write_stderr(text Str)`: Writes directly to standard error.
-
----
-
-## 2. Spawning Native Threads (`std/thread`)
-
-Worker callbacks in Abyss are ordinary typed functions. Spawning functions check captures and return types recursively at compile time to guarantee thread safety.
-
-### Spawning Variants
-
-1. **`thread.spawn(work fn() R) Result(Thread(R))`**:  
-   Runs a function with zero arguments.
-2. **`thread.spawn_with(work fn(T) R, capture T) Result(Thread(R))`**:  
-   Copies `capture` by value into the thread job. The capture must be **pointer-free** (scalars, arrays, and value structs; pointers, slices, and `Str` are rejected at compile time).
-3. **`thread.spawn_shared(work fn(&T) R, state &T) Result(Thread(R))`**:  
-   Explicitly permits passing borrowed state across threads. The programmer is responsible for ensuring `state` outlives the worker.
-4. **`thread.spawn_detached(work fn(T), capture T) Result(Unit)`**:  
-   Spawns a background task that runs independently. The worker frees its own job upon completion without needing a `join()`.
-
----
-
-## 3. Joining and Thread Lifecycle
-
-A `Thread(R)` handle represents a single-owner capability to wait on a worker:
-
-```abyss
-handle := thread.spawn_with(compute, data).unwrap()
-
--- Block until worker completes and retrieve typed return value:
-res := handle.join()
-if res.is_success() {
-    print(res.unwrap())
-}
-```
-
-### Thread Control
-
-- `thread.sleep(milliseconds u32) Result(Unit)`:  
-  Suspends execution of the calling thread for the specified duration without busy-waiting.
-- `thread.yield()`:  
-  Relinquishes the current thread's remaining timeslice to the OS scheduler.
-
----
-
-## 4. Mutex Synchronization (`Mutex(T)`)
-
-`Mutex(T)` encapsulates a typed value protected by a native operating system mutual exclusion lock:
+| Symbol | Notes |
+| :--- | :--- |
+| `supported` | Compile-time `bool`. `true` on native Linux, macOS, and Windows. |
+| `Unit` | `struct {}`, the empty result of a task. |
+| `yield()` | Offer the current thread's turn to the scheduler. |
+| `sleep(milliseconds u64) Result(Unit)` | Pause without busy waiting. |
 
 ```abyss
 thread :: @import("std/thread")
-Mutex :: @import("std/thread").Mutex
-
-Counter :: struct {
-    value i32
-}
 
 main :: fn() {
-    -- Create a mutex protecting a Counter
-    lock := Mutex(Counter).new(.{ value: 0 })
-
-    -- Acquire reference to protected data
-    ptr := lock.lock()
-    ptr.value = ptr.value + 1
-    lock.unlock()
-
-    -- Or safely execute a block with automatic unlock:
-    lock.with_lock(fn(c &Counter) {
-        c.value = c.value + 10
-    })
-
-    -- Release native lock when completely done
-    lock.destroy()
+    thread.sleep(250).unwrap()
+    thread.yield()
 }
 ```
 
-### Complete `Mutex(T)` API
+### Spawning
 
-- `Mutex(T).new(initial_val T) Mutex(T)`: Allocates a new native mutex lock protecting `initial_val`.
-- `self.lock() &T`: Blocks until the lock is acquired and returns a mutable pointer to the inner data.
-- `self.unlock()`: Releases the lock.
-- `self.try_lock() Maybe(&T)`: Non-blocking attempt; returns `some(&T)` if acquired immediately, or `none()` if contested.
-- `self.with_lock(work fn(&T) R) R`: Acquires lock, passes `&T` to `work`, and unlocks automatically upon return.
-- `self.destroy()`: Destroys the underlying OS mutex lock.
+Worker callbacks are ordinary typed functions, and the capture is passed as a value so the compiler can check its type.
+
+| Function | Signature | Notes |
+| :--- | :--- | :--- |
+| `spawn` | `fn(work fn() R) Result(Thread(R))` | No capture. |
+| `spawn_with` | `fn(work fn(C) R, capture C) Result(Thread(R))` | Copy a pointer-free capture into the job. |
+| `spawn_shared` | `fn(work fn(C) R, capture C) Result(Thread(R))` | Allow borrowed state; the caller keeps it alive. |
+| `spawn_task` | `fn(work fn(C), capture C) Result(Thread(Unit))` | Fire a function with no result. |
+| `spawn_shared_task` | `fn(work fn(C), capture C) Result(Thread(Unit))` | Task with borrowed state. |
+| `spawn_detached` | `fn(work fn(C), capture C) Result(Unit)` | Start and forget; the worker frees its own job. |
+
+`spawn_with` and `spawn_detached` require a **pointer-free** capture and result: scalars, arrays, and value structs. Pointers, `Str`, slices, native header types, and anything containing them are rejected at compile time with `captures must be pointer-free; use spawn_shared for borrowed state`. `spawn_shared` and `spawn_shared_task` waive that check so you can pass a `&T`, with the responsibility of keeping the memory alive and synchronized falling on you.
+
+```abyss
+thread :: @import("std/thread")
+
+Capture :: struct {
+    nums [3]i32
+    pair struct { i32, i32 }
+}
+
+sum :: fn(capture Capture) i32 {
+    capture.nums[0] + capture.nums[2] + capture.pair.0
+}
+
+main :: fn() {
+    capture: Capture = .{ nums: .[10, 90, 12], pair: .{ 20, 0 } }
+    worker := thread.spawn_with(sum, capture).unwrap()
+    print(worker.join().unwrap())
+}
+```
+
+### Results and Joining
+
+`Result(T)` carries either a value or an `Error`:
+
+| Member | Signature | Notes |
+| :--- | :--- | :--- |
+| `ok(value T)` / `err(error Error)` | constructors | Build a result. |
+| `is_success()` / `is_error()` | `bool` | Which side is present. |
+| `unwrap()` | `T` | The value, or fail with a thread error. |
+| `unwrap_error()` | `Error` | The error, or fail if there was none. |
+
+`Error` has `kind ErrorKind` and `code i32`; kinds are `allocation`, `system`, and `closed`.
+
+A `Thread(R)` is a single-owner handle. One job allocation holds the callback, the capture, and the result:
+
+| Member | Signature | Notes |
+| :--- | :--- | :--- |
+| `join` | `fn(self &Self) Result(R)` | Wait, read the result, and free the job. |
+
+```abyss
+thread :: @import("std/thread")
+
+answer :: fn() i32 { 42 }
+
+main :: fn() {
+    worker := thread.spawn(answer).unwrap()
+    print(worker.join().unwrap())
+    print(worker.join().unwrap_error().kind == thread.ErrorKind.closed)
+}
+```
+
+Joining twice is an error, not undefined behavior: the second `join` returns `ErrorKind.closed`. A failed OS join leaves the handle available to retry.
+
+### Detached Work
+
+```abyss
+thread :: @import("std/thread")
+
+Lock :: thread.Mutex(u64)
+
+completions: Lock
+
+finish :: fn(amount u64) {
+    count := completions.lock()
+    *count = *count + amount
+    completions.unlock()
+}
+
+main :: fn() {
+    completions = Lock.new(0 as u64).unwrap()
+    thread.spawn_detached(finish, 1 as u64).unwrap()
+    while true {
+        count := *completions.lock()
+        completions.unlock()
+        if count == 1 { break }
+        thread.yield()
+    }
+    completions.destroy().unwrap()
+}
+```
+
+## 3. `Mutex(T)`
+
+`Mutex(T)` protects a value with a native lock. It owns a separate native lock, so keep it at a stable address and do not copy it once shared.
+
+| Member | Signature | Notes |
+| :--- | :--- | :--- |
+| `new` | `fn(value T) Result(Self)` | Create the lock and store the value. |
+| `lock` | `fn(self &Self) &T` | Block until locked; returns a mutable pointer. |
+| `try_lock` | `fn(self &Self) Maybe(&T)` | Non-blocking attempt. |
+| `unlock` | `fn(self &Self)` | Release. |
+| `with_lock` | `fn(self &Self, work fn(&T) R) R` | Lock, call, unlock; `R` must be pointer-free. |
+| `destroy` | `fn(self &Self) Result(Unit)` | Release the native lock. |
+
+```abyss
+thread :: @import("std/thread")
+
+Lock :: thread.Mutex(u64)
+
+increment :: fn(lock &Lock) u64 {
+    value := lock.lock()
+    *value = *value + 1
+    lock.unlock()
+    *value
+}
+
+read_and_clear :: fn(value &u64) u64 {
+    count := *value
+    *value = 0
+    count
+}
+
+main :: fn() {
+    lock := Lock.new(0 as u64).unwrap()
+
+    worker := thread.spawn_shared(increment, &lock).unwrap()
+    print(worker.join().unwrap())
+    print(lock.with_lock(read_and_clear))
+
+    lock.destroy().unwrap()
+}
+```
+
+`Mutex.new` and `destroy` return `Result`, so unwrap them. `try_lock` returns `Maybe(&T)`; only unlock when it succeeds. `with_lock` releases the mutex even though the callback returns a value.
+
+## 4. Platform Support and Linking
+
+`thread.supported` is a compile-time constant. Threads run on native Linux, macOS, and Windows builds. The VM, WASI, and freestanding targets do not run them, so guard thread-using code with `if thread.supported` or keep it in a native-only target.
+
+When linking generated C yourself on POSIX, pass `-pthread`:
+
+```sh
+abyssc b main.a out.c
+gcc -pthread -std=gnu99 -O3 out.c -o app
+```
+
+With `sonar build`, `-pthread` is added automatically on supported platforms.
+
+The runtime lives in `std/sys`: thread creation, locking, and `sleep` call the platform through `extern` declarations, and using `sleep` alone does not pull in thread creation or mutex bindings.
 
 ---
 
-## 5. Platform Support & Linking
-
-- `thread.supported` is a compile-time boolean constant. Threads are fully supported on **Linux**, **macOS**, and **Windows**.
-- WASI and freestanding targets do not support native threads.
-- When compiling native C output manually on POSIX targets, ensure `-pthread` is passed to the C compiler/linker:
-  ```sh
-  abyssc b main.a out.c
-  gcc -pthread -O3 out.c -o main
-  ```
-  *(When compiling via `sonar build`, `-pthread` is linked automatically on supported platforms.)*
-
----
-
-[← Previous: Allocators & Memory](05-allocators-and-mem.md) | [Back to Table of Contents →](../README.md)
+[Previous: Allocators & Memory](05-allocators-and-mem.md) | [Next: Language Intrinsics →](07-language-intrinsics.md)

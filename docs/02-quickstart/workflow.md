@@ -1,35 +1,32 @@
 # Tooling & Workflow: `abyssc`, `sonar`, and `abyssfmt`
 
-Abyss provides a streamlined, three-tool ecosystem installed directly into your environment:
-1. **`abyssc`**: The core Abyss compiler, featuring an instant-execution Bytecode VM and an optimizing C99 native emitter.
-2. **`sonar`**: The official package manager and build system for managing dependencies, compiling pods, and running tests.
-3. **`abyssfmt`**: The canonical source code formatter enforcing clean, readable Abyss style.
+The Abyss toolchain is three programs:
+
+1. **`abyssc`** — the compiler. It runs programs immediately on its bytecode VM or emits C99 for native builds.
+2. **`sonar`** — the package manager and build driver for pods.
+3. **`abyssfmt`** — the canonical source formatter.
 
 ---
 
 ## 1. Installation
 
-You can install the complete Abyss toolchain with a single command:
-
-### Linux & macOS (Bash)
+### Linux (x86_64)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/abysslang/abyss/main/scripts/install.sh | bash
 ```
 
-The installer downloads the latest pre-built toolchain, extracts `abyssc`, `sonar`, and `abyssfmt` to `~/.abyss/bin`, and automatically adds them to your shell's `PATH`.
+The installer downloads the latest release archive, extracts `abyssc`, `sonar`, and `abyssfmt` into `~/.abyss/bin`, and adds that directory to your shell's `PATH`. Set `ABYSS_INSTALL_DIR` to install elsewhere and `ABYSS_VERSION` to pin a release. The script currently checks for Linux `x86_64`; on other hosts build the toolchain from source (see [Architecture](../01-overview/architecture.md)).
 
 ### Windows (PowerShell)
-
-Open PowerShell and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/abysslang/abyss/main/scripts/install.ps1 | iex
 ```
 
-### Verifying the Installation
+### Verifying the installation
 
-Open a new terminal session and verify that the tools are available:
+Open a new terminal session and check that the tools respond:
 
 ```sh
 abyssc --version
@@ -37,64 +34,71 @@ sonar help
 abyssfmt --help
 ```
 
----
+## 2. The Fast Loop: Run on the VM
 
-## 2. The Fast Loop: Run Instantly with `abyssc`
-
-During active development, waiting for a native C compiler and linker adds unnecessary friction. Use the Bytecode VM for instantaneous turnaround:
+During development, run source directly:
 
 ```sh
 abyssc r main.a
 ```
 
-The compiler parses your code, verifies types, translates AST nodes into compact bytecode instructions, and executes them immediately in memory. Zero disk clutter, zero linker latency.
+The compiler parses, type-checks, lowers to bytecode, and executes in one process. Nothing is written to disk, so there is no linker latency. The VM also evaluates `cmpt` blocks and `#` splices while type-checking.
 
----
+`abyssc r` is the right loop for tests, prototypes, and tools. Switch to a native build when you need peak throughput.
 
-## 3. The Native Loop: Optimized C99 Binaries
+The VM is not a full native target. `std/thread` and `std/sys` thread primitives need a native build, C header bindings (`extern ["header.h"]`, `@c_value`) require a hosted native target, SIMD lane operations lower to native vector instructions, and `u128`/`i128` are modeled as 64-bit. `\xNN` and `\u{...}` escapes are decoded by native builds; the VM decodes only `\n`, `\t`, `\r`, `\0`, `\\`, `\"`, and `\'`. Emit C with `abyssc b` for those features.
 
-When you need peak execution performance, use `abyssc` to emit portable ISO C99:
+## 3. The Native Loop: Emit C99
 
 ```sh
-# Emit optimized C99 source code
+# emit a translation unit
 abyssc b main.a out.c
 
-# Compile with your C compiler of choice (GCC or Clang)
+# build it with your system C compiler
 gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 out.c -o my_program
 ./my_program
 ```
 
-### Cross-Compilation Targets
+If you omit the output path, `abyssc` writes `out.c`. Use `--library` to emit a library-shaped translation unit instead of an executable entry point.
 
-`abyssc` includes built-in multi-target support. Use `--target` and `--arch` to select the target platform:
+### Cross-compilation
+
+`--target` and `--arch` select the output platform, and the flags may appear anywhere on the command line:
 
 ```sh
-# Cross-compile to WebAssembly (WASI)
+# WASI
 abyssc b --target wasi --arch wasm32 main.a program.c
 clang --target=wasm32-wasi -ffreestanding -nostdlib program.c -o program.wasm
 
-# Cross-compile for Windows from Linux
+# Windows from Linux
 abyssc b --target windows --arch x86_64 main.a program.c
 x86_64-w64-mingw32-gcc -O3 program.c -o program.exe
+
+# Freestanding
+abyssc b --target freestanding --arch x86_64 main.a program.c
 ```
 
-Supported operating systems: `linux`, `windows`, `darwin`, `wasi`, `freestanding`.  
-Supported architectures: `x86_64`, `aarch64`, `wasm32`.
+Supported targets are `linux`, `windows`, `darwin`, `wasi`, and `freestanding`; supported architectures are `x86_64`, `aarch64`, and `wasm32`.
 
----
+### Module search paths
 
-## 4. Project & Package Management with `sonar`
+- `-I <dir>` (or `-I<dir>`) adds a directory to the module search path.
+- `--map <prefix>=<path>` rewrites module names before resolution, which is how pods are mounted: `--map json=/abs/path/to/pods/json`.
 
-For multi-file applications and packages (called **Pods** in Abyss), use `sonar`:
+Both are described in [Modules & Imports](../03-the-guide/08-modules-and-imports.md).
 
-### Initializing a New Pod
+## 4. Packages and Builds with `sonar`
+
+A package is called a **pod** and is described by a `pod.json` manifest.
+
+### Creating a pod
 
 ```sh
 sonar init my-app
 cd my-app
 ```
 
-This creates a `pod.json` manifest specifying the pod name, version, entry point, dependencies, and native C build options:
+This writes a manifest:
 
 ```json
 {
@@ -111,54 +115,48 @@ This creates a `pod.json` manifest specifying the pod name, version, entry point
 }
 ```
 
-### Building and Running Projects
+`entry` names the source file built by default. A dependency may use `path` for a local pod or `version` and `git` (plus an optional `subdir`) for a remote one. `c_build` describes native sources and linker flags for pods that wrap C libraries.
+
+### Building and running
 
 ```sh
-# Build and run the project binary in one command
-sonar run
-
-# Build the release binary into the current directory
 sonar build
+sonar run
 ```
 
-### Managing Dependencies
+`sonar build` compiles the entry file (and any native sources), applying module maps for dependencies. `sonar run` does the same and then executes the binary.
+
+### Dependencies
 
 ```sh
-# Add a dependency from the central index
-sonar add json
-
-# Update local index and download dependencies into .vendor/
-sonar update
-sonar vendor
+sonar add json        # add a pod from the central index
+sonar update          # refresh the local index
+sonar vendor          # resolve and vendor dependencies into .vendor/
 ```
 
-### Running Unit Tests
+Resolution keeps one entry per pod and prefers the highest version seen while every requirement stays satisfied; an unsatisfiable requirement is a version mismatch, and conflicting majors are rejected instead of silently unified. Dependency cycles are detected during traversal and resolved once.
 
-Sonar automatically discovers and executes all test suites defined within the pod:
+### Tests
 
 ```sh
-sonar test
+sonar test            # discover and run the pod's test suites
+sonar test <target>   # run a specific test target
 ```
 
----
+## 5. Formatting with `abyssfmt`
 
-## 5. Canonical Formatting with `abyssfmt`
-
-Code formatting in Abyss is canonical. Rather than arguing over style, run `abyssfmt` to format files in-place:
+Formatting is canonical, so there is nothing to debate:
 
 ```sh
-# Format a single file
 abyssfmt main.a
-
-# Format an entire source directory
 abyssfmt src/
+abyssfmt --width 80 src/
 ```
 
-### Formatting Rules Enforced:
-- 4-space indentation (tabs are rejected).
-- Statement separation via clean newlines (no trailing semicolons).
-- Clean vertical layout for multiline struct and array literals.
+The formatter indents with four spaces, separates statements with newlines, and lays out multiline struct and array literals vertically. The default line width is `100`; `--width N` accepts `1`–`1000`. Comments are single-line and start with `--`; the formatter keeps them attached to the line they document. `abyssfmt --help` prints usage.
+
+Run the formatter before committing. A file that is already formatted is left unchanged, so a second run with no diff is a good check.
 
 ---
 
-[Next Part: The Guide &rarr;](../03-the-guide/01-basics.md)
+[Previous: Whirlwind Tour](whirlwind-tour.md) | [Next: Basics →](../03-the-guide/01-basics.md)

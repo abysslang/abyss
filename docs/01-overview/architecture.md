@@ -1,82 +1,85 @@
 # Architecture
 
-Under the hood, Abyss is designed as a fast, deterministic pipeline with zero bloat. It rejects the modern trend of multi-gigabyte compiler toolchains that turn every build into an excuse to go grab coffee.
+Abyss is a self-hosted compiler with two execution engines: a bytecode VM for instant runs and compile-time evaluation, and a C99 backend for native output. Both consume the same typed program, so a feature works the same way in either engine.
 
 ---
 
-## The Dual-Engine Model
-
-Traditional compilers force a painful compromise: either you use a sluggish interpreter with instant startup, or an optimizing native compiler where you wait seconds (or minutes) for intermediate representations to optimize.
-
-Abyss includes **two coordinated execution engines** in a single binary:
+## 1. From Source to Program
 
 ```
-                  ┌──────────────────────┐
-                  │  Abyss Source (.a)   │
-                  └──────────┬───────────┘
-                             │
-                  ┌──────────▼───────────┐
-                  │     DOP Compiler     │
-                  │ (Lex, Parse, Types)  │
-                  └──────────┬───────────┘
-                             │
-             ┌───────────────┴───────────────┐
-             │                               │
-    ┌────────▼────────┐             ┌────────▼────────┐
-    │   Bytecode VM   │             │   C99 Emitter   │
-    ├─────────────────┤             ├─────────────────┤
-    │ • Zero latency  │             │ • Portable C99  │
-    │ • Tests & dev   │             │ • Maximum -O3   │
-    │ • 'cmpt' blocks │             │ • GCC / Clang   │
-    └─────────────────┘             └─────────────────┘
+   main.a + imported modules
+              │
+              ▼
+        lexer → parser
+              │
+              ▼
+   HIR tables (u32 ids, flat arrays)
+              │
+              ▼
+   modules + symbols + type unification
+              │
+      ┌───────┴────────┐
+      ▼                ▼
+  Bytecode VM      C99 codegen
+  (immediate run)  (gcc / clang)
 ```
 
-1. **The Bytecode VM:**
-   The compiler can translate source directly into compact bytecode instructions and execute them instantly in-memory. This powers:
-   - Zero-latency test runs (`abyssc r main.a`).
-   - Compile-time evaluation (`cmpt { ... }`).
-   - Interactive developer workflows.
+1. **Lex and parse.** Each resolved file is tokenized and parsed into HIR nodes. Modules are parsed on demand, so a program only pays for what it imports.
+2. **Resolve modules and symbols.** `@import` resolves a compile-time path to a file, which gets one module identity per compilation. Top-level declarations become members of a namespace value. Preludes (`core/prelude`, `std/prelude`) are loaded first so their names are available everywhere.
+3. **Type-check.** Bidirectional unification infers types, resolves generics, and monomorphizes concrete instantiations. Errors point at the offending source location.
+4. **Execute or emit.** The VM executes the typed program immediately, or the C99 backend emits a translation unit that a system C compiler builds natively.
 
-2. **The C99 Emitter:**
-   When you need maximum throughput, Abyss emits pure ISO C99. This output contains no compiler-specific extensions (no GNU statement expressions or nested labels) and compiles cleanly with GCC, Clang, or MSVC. You get industry-standard native code optimization without carrying the weight of a heavy backend inside the language itself.
+The runtime entry point is emitted by the compiler, not written by hand: hosted native builds route through `std/sys/process`, standalone WASI builds through `std/sys/start`, and both are ordinary Abyss source in `pods/std`.
 
----
+## 2. Data-Oriented Compiler Core
 
-## Data-Oriented Compiler Core (DOP)
+Classic compilers represent code as deeply nested, pointer-heavy trees. Every traversal chases pointers across the heap and stalls the CPU on cache misses.
 
-Most classic compilers represent code as deeply nested, pointer-heavy Abstract Syntax Trees (ASTs). When traversing an AST, the CPU constantly stalls on cache misses, jumping randomly across the heap.
+The Abyss compiler stores the program differently:
 
-The Abyss compiler is architected around **Data-Oriented Programming (DOP)**:
-- Code nodes, types, and symbols are stored in **dense, linear tables**.
-- References are compact 32-bit integer IDs (`HirId`, `TyId`, `SymbolId`) rather than 64-bit heap pointers.
-- Traversal sweeps sequentially across contiguous memory, keeping CPU caches warm and parsing blazing fast.
+- Nodes, types, and symbols live in dense arrays.
+- References are compact 32-bit integer IDs (`HirId`, `TyId`, `SymbolId`) instead of 64-bit pointers.
+- Passes sweep those arrays linearly, keeping caches warm.
 
----
+The payoff is a compiler that parses and type-checks fast enough to be invisible in the edit/run loop.
 
-## Self-Hosting & Fixed-Point Determinism
+## 3. The Bytecode VM
 
-Abyss is **100% self-hosted**. The compiler compiles itself:
+`abyssc r main.a` parses, type-checks, compiles to bytecode, and runs in one process. No object files, no linker, no temporary files. The same VM executes `cmpt` blocks and splices during type-checking, which is why compile-time code is written in ordinary Abyss rather than a separate macro language.
 
-$$\text{abyssc}_{G_1}(\text{main.a}) \rightarrow \text{stage2.c} \rightarrow \text{abyssc}_{G_2}$$
-$$\text{abyssc}_{G_2}(\text{main.a}) \rightarrow \text{stage3.c} \rightarrow \text{abyssc}_{G_3}$$
+Native calls from the VM go through a runtime binding layer built on the platform's foreign-function interface, so `extern` declarations work under `abyssc r` as well as in emitted binaries.
 
-The output of Generation 2 and Generation 3 is mathematically verified to be **bit-for-bit identical** ($G_2 \equiv G_3$). There is no undefined behavior, no memory corruption, and no environmental noise leaking into the build.
+## 4. The C99 Backend
 
----
+`abyssc b main.a out.c` emits one portable C99 translation unit. Compile it with any supported C compiler:
 
-## Zero-Dependency Bootstrap
-
-How do you build a self-hosted compiler on a machine that doesn't have the compiler yet?
-
-Abyss solves the "chicken-and-egg" bootstrap problem cleanly. Every release packages `dist/bootstrap.c`—a single, standalone C99 source file containing the entire compiler.
-
-On any machine with a basic C compiler:
 ```sh
-cc -std=c99 -O3 -rdynamic dist/bootstrap.c -o abyssc
+abyssc b main.a out.c
+gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 out.c -o program
 ```
 
-Done. No package managers, no downloading toolchains, no external libraries.
+Hosted targets use standard C99 declarations and standard library calls. WASI import declarations use compiler attributes (`__attribute__((import_module(...), import_name(...)))`), which is exactly how `clang` marks wasm imports.
+
+## 5. Self-Hosting and Fixed-Point Determinism
+
+The compiler compiles itself:
+
+$$\text{abyssc}_{G_1}(\text{main.a}) \rightarrow G_2 \qquad \text{abyssc}_{G_2}(\text{main.a}) \rightarrow G_3$$
+
+Multi-generation bootstrap verification checks that generation two and generation three produce byte-identical C source. There is no randomness, timestamp, or environment leakage in the emitted output, which makes the build reproducible across machines. Release and maintainer workflows gate on this fixed point before shipping.
+
+## 6. Zero-Dependency Bootstrap
+
+How do you build a self-hosted compiler on a machine that does not have the compiler yet?
+
+Every release ships standalone C sources in an `abyss-bootstrap-c` bundle. On any machine with a basic C compiler:
+
+```sh
+gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 -fomit-frame-pointer bootstrap-linux-x86_64.c -o abyssc
+```
+
+That binary is then used to build the real compiler from source. No package manager, no external libraries, no prebuilt binaries required.
 
 ---
 
-[Next: Whirlwind Tour &rarr;](../02-quickstart/whirlwind-tour.md)
+[Next: Whirlwind Tour →](../02-quickstart/whirlwind-tour.md)
