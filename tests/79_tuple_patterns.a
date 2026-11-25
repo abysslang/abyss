@@ -1,0 +1,98 @@
+Pair :: struct(i32, Str)
+Nested :: ((i32, bool), Pair, i32)
+Single :: (u8,)
+Empty :: ()
+UnitNom :: struct()
+Link :: struct(i32, &Link)
+
+TaggedPair :: fn(A type, B type) type {
+    struct(A, B)
+}
+
+Boxed :: fn(T type) type {
+    struct(T)
+}
+
+Wrapped :: fn(T type) type {
+    struct(T, (T, bool))
+}
+
+Twin :: fn(T type) type {
+    (T, T)
+}
+
+make_nested :: fn(calls &i32) Nested {
+    *calls = *calls + 1
+    .(.(12, true), .(34, "nested"), 56)
+}
+
+mirror :: fn(T type, U type, pair (T, U)) (U, T) {
+    (first, second) := pair
+    .(second, first)
+}
+
+constant: (i32, bool) = .(19, true)
+
+main :: fn() {
+    calls := 0
+    ((number, _), (other, text), _) := make_nested(&calls)
+    print(calls)
+    print(number + other)
+    print(text)
+
+    (number, (_, text), _) := .(number, .(true, text), false)
+    number = number + 1
+    print(number)
+    print(text)
+
+    single: Single = .(7)
+    (byte,) := single
+    print(byte)
+    empty: Empty = .()
+    () := empty
+
+    pair: Pair = .(8, "nominal")
+    (value, label) := pair
+    print(value)
+    print(label)
+    print(@type_name(Pair))
+    print(@type_name((i32, bool)))
+    print(@type_info(Empty).kind == TypeKind.tuple)
+    print(@type_info(Pair).kind == TypeKind.tuple)
+    print(mirror(.(true, 6)).0)
+    print(constant.0)
+    print(cmpt { (x, _) := .(21, false), x })
+
+    gen: TaggedPair(i32, Str) = .(9, "generic")
+    (ga, gb) := gen
+    print(ga)
+    print(gb)
+    print(@type_name(TaggedPair(i32, Str)))
+    print(@type_info(TaggedPair(i32, Str)).kind == TypeKind.tuple)
+
+    wrapped: Wrapped(i32) = .(3, .(4, true))
+    (wx, (wy, wok)) := wrapped
+    print(wx + wy)
+    print(wok)
+
+    boxed: Boxed(u16) = .(55 as u16)
+    (bval,) := boxed
+    print(bval)
+
+    unit: UnitNom = .()
+    () := unit
+    print(@type_name(UnitNom))
+
+    twin: Twin(i32) = .(11, 14)
+    print(twin.0 + twin.1)
+
+    tail: Link = .(2, 0 as &Link)
+    head: Link = .(1, &tail)
+    ptr := &head
+    ptr.0 = 99
+    print(ptr.0 + head.1.0)
+
+    deep := .(1, .(2, .(3, .(4, 5))))
+    print(deep.1.1.1.0)
+    print(deep.1.1.1.1)
+}

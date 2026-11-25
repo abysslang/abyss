@@ -1,0 +1,7 @@
+Meters :: struct(i32)
+Seconds :: struct(i32)
+
+main :: fn() {
+    distance: Meters = .(1)
+    time: Seconds = distance
+}

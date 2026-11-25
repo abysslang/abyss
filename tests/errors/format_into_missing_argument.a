@@ -5,6 +5,6 @@ String :: @import("std/string").String
 main :: fn() {
     arena := Arena.new(64)
     out := String.new(&arena)
-    format.fmt_into(&out, "{} {}", .{ 1 })
+    format.fmt_into(&out, "{} {}", .( 1 ))
     arena.destroy()
 }

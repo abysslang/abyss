@@ -22,15 +22,15 @@ main :: fn() {
 
     for inst in program {
         match inst {
-            halt  { break }
+            halt { break }
 
-            push  { s.push(42) }
-            add   { s.push(s.pop() + s.pop()) }
-            sub   { s.push(s.pop() - s.pop()) }
-            mul   { s.push(s.pop() * s.pop()) }
+            push { s.push(42) }
+            add { s.push(s.pop() + s.pop()) }
+            sub { s.push(s.pop() - s.pop()) }
+            mul { s.push(s.pop() * s.pop()) }
 
-            print { 
-                printf("result = {}\n", .{s.pop()}) 
+            print {
+                printf("result = {}\n", .(s.pop()))
             }
         }
     }

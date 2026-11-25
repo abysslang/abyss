@@ -1,38 +1,38 @@
 emit :: @import("std/io").write
 Str :: @import("std/string").Str
 
-Pair :: struct { i32, Str }
+Pair :: (i32, Str)
 
-make_pair :: fn(x i32, s Str) struct { i32, Str } {
-    .{ x, s }
+make_pair :: fn(x i32, s Str) (i32, Str) {
+    .(x, s)
 }
 
-make_triplet :: fn(a i32, b bool, c Str) struct { i32, bool, Str } {
-    .{ a, b, c }
+make_triplet :: fn(a i32, b bool, c Str) (i32, bool, Str) {
+    .(a, b, c)
 }
 
-swap :: fn(T type, U type, t struct { T, U }) struct { U, T } {
-    .{ t.1, t.0 }
+swap :: fn(T type, U type, t (T, U)) (U, T) {
+    .(t.1, t.0)
 }
 
-project_first :: fn(T type, U type, t struct { T, U }) T {
+project_first :: fn(T type, U type, t (T, U)) T {
     t.0
 }
 
-bump_and_make :: fn(c &i32) struct { i32, i32 } {
+bump_and_make :: fn(c &i32) (i32, i32) {
     *c = *c + 1
-    .{ *c, *c * 10 }
+    .(*c, *c * 10)
 }
 
 main :: fn() {
-    t1 := .{ 100, 200 }
+    t1 := .(100, 200)
     emit(t1.0)
     emit(" ")
     emit(t1.1)
     emit("\n")
 
-    p1: Pair = .{ 42, "hello" }
-    t2: struct { i32, Str } = p1
+    p1: Pair = .(42, "hello")
+    t2: (i32, Str) = p1
     emit(t2.0)
     emit(" ")
     emit(t2.1)
@@ -44,13 +44,13 @@ main :: fn() {
     emit(p2.1)
     emit("\n")
 
-    v1, v2 := make_pair(777, "destructured")
+    (v1, v2) := make_pair(777, "destructured")
     emit(v1)
     emit(" ")
     emit(v2)
     emit("\n")
 
-    d1, d2, d3 := make_triplet(99, true, "triplet")
+    (d1, d2, d3) := make_triplet(99, true, "triplet")
     emit(d1)
     emit(" ")
     emit(d2)
@@ -58,23 +58,23 @@ main :: fn() {
     emit(d3)
     emit("\n")
 
-    x1, x2 := p1
+    (x1, x2) := p1
     emit(x1)
     emit(" ")
     emit(x2)
     emit("\n")
 
-    s_res, i_res := swap(i32, Str, .{ 50, "world" })
+    (s_res, i_res) := swap(i32, Str, .(50, "world"))
     emit(s_res)
     emit(" ")
     emit(i_res)
     emit("\n")
 
-    first_val := project_first(Str, i32, .{ "first_val", 123 })
+    first_val := project_first(Str, i32, .("first_val", 123))
     emit(first_val)
     emit("\n")
 
-    nested := .{ 1, .{ 2, 3 }, 4 }
+    nested := .(1, .(2, 3), 4)
     emit(nested.0)
     emit(" ")
     emit(nested.1.0)
@@ -84,8 +84,8 @@ main :: fn() {
     emit(nested.2)
     emit("\n")
 
-    na, nb, nc := nested
-    nx, ny := nb
+    (na, nb, nc) := nested
+    (nx, ny) := nb
     emit(na)
     emit(" ")
     emit(nx)
@@ -95,14 +95,14 @@ main :: fn() {
     emit(nc)
     emit("\n")
 
-    arr: [2]struct { i32, i32 } = .[ .{ 10, 20 }, .{ 30, 40 } ]
+    arr: [2](i32, i32) = .[ .(10, 20), .(30, 40) ]
     arr_0 := arr[0]
     emit(arr_0.0)
     emit(" ")
     emit(arr_0.1)
     emit("\n")
 
-    elem0, elem1 := arr[1]
+    (elem0, elem1) := arr[1]
     emit(elem0)
     emit(" ")
     emit(elem1)
@@ -111,7 +111,7 @@ main :: fn() {
     counter: i32 = 0
     loop_i: i32 = 0
     while loop_i < 3 {
-        k1, k2 := bump_and_make(&counter)
+        (k1, k2) := bump_and_make(&counter)
         emit(k1)
         emit(":")
         emit(k2)

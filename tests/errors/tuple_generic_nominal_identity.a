@@ -1,0 +1,8 @@
+BoxA :: fn(T type) type { struct(T) }
+BoxB :: fn(T type) type { struct(T) }
+
+main :: fn() {
+    a: BoxA(i32) = .(1)
+    b: BoxB(i32) = a
+    print(b.0)
+}

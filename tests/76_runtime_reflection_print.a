@@ -22,14 +22,14 @@ main :: fn() {
     print(*@type_info([3]u16))
     node := @type_info(Node)
     print(node.fields[0].type_info.element.name)
-    printf("node: {}\n", .{ node })
+    printf("node: {}\n", .(node))
     print(@type_info(Status))
     print(@type_info(make))
     print(@type_info(i32 | bool))
     print(0 as &TypeInfo())
 
     arena := Arena.new(64)
-    print(fmt(&arena, "<{}>", .{ @type_info(Node) }))
+    print(fmt(&arena, "<{}>", .(@type_info(Node))))
     print(String.of(&arena, @type_info(Node)))
     arena.destroy()
 }

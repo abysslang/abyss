@@ -1,0 +1,4 @@
+main :: fn() {
+    x: struct(i32, bool) = .(1, true)
+    print(x.0)
+}

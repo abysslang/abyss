@@ -1,11 +1,11 @@
 print :: @import("std/io").write
 
 Record :: struct {
-    pair struct { i32, bool }
+    pair   (i32, bool)
     values [3]u16
 }
 
 main :: fn() {
-    record: Record = .{ pair: .{ 42, true }, values: .[1, 2, 3] }
+    record: Record = .{ pair: .(42, true), values: .[ 1, 2, 3 ] }
     #print(record)
 }

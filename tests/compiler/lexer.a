@@ -226,5 +226,5 @@ main :: fn() {
     test_operators_and_symbols()
     test_strings_and_chars()
     test_comments_and_newlines()
-    printf("PASS compiler lexer unit tests\n", .{})
+    printf("PASS compiler lexer unit tests\n", .())
 }

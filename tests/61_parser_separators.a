@@ -22,14 +22,14 @@ State :: enum u8 {
     inline :: fn() i32 { 9 }, last :: fn() i32 { 10 },
 }
 
-Pair :: struct {
+Pair :: (
     i32
     i32,
-}
+)
 
-Mixed :: struct { i32,
+Mixed :: ( i32,
     bool
-}
+)
 
 add :: fn(
     a i32
@@ -83,11 +83,11 @@ main :: fn() {
     print(State.inline() + State.last())
     print("\n")
 
-    pair: Pair = .{
+    pair: Pair = .(
         10
         20,
-    }
-    mixed: Mixed = .{ 30, true }
+    )
+    mixed: Mixed = .( 30, true )
     print(pair.0 + pair.1 + mixed.0)
     print("\n")
 

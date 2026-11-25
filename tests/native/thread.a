@@ -7,7 +7,7 @@ expect :: fn(ok bool) {
 
 Capture :: struct {
     nums [3]i32
-    pair struct { i32, i32 }
+    pair (i32, i32)
 }
 
 Sum :: i32 | bool
@@ -74,7 +74,7 @@ detach :: fn(value u64) {
 }
 
 test_values :: fn() {
-    capture: Capture = .{ nums: .[ 10, 90, 12 ], pair: .{ 20, 0 } }
+    capture: Capture = .{ nums: .[ 10, 90, 12 ], pair: .(20, 0) }
     noargs := thread.spawn(answer).unwrap()
     inline := thread.spawn_with(fn(value i32) i32 { value * 2 }, 21 as i32).unwrap()
     copy := thread.spawn_with(copied, capture).unwrap()

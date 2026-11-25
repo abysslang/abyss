@@ -48,10 +48,10 @@ main :: fn() {
             2)
         second: { value := 3, value + 1 },
     }
-    tuple := .{
+    tuple := .(
         record.first
         record.second,
-    }
+    )
     print(tuple.0 + tuple.1), print("\n")
 
     print(add(
@@ -99,6 +99,6 @@ main :: fn() {
     print(fixed[0] + fixed[1]), print("\n")
     print(1 -
         2), print("\n")
-    printf("{} {}\n", .{ add(1, 2), { a := 2, a + 1 } }),
+    printf("{} {}\n", .( add(1, 2), { a := 2, a + 1 } )),
     quiet(),
 }

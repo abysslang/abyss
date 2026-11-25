@@ -3,6 +3,6 @@ Arena :: @import("std/allocator").Arena
 
 main :: fn() {
     arena := Arena.new(64)
-    fmt(&arena, "{:x}", .{1})
+    fmt(&arena, "{:x}", .(1))
     arena.destroy()
 }

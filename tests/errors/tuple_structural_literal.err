@@ -1,0 +1,2 @@
+[type error]
+tuple and struct literals require matching types

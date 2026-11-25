@@ -1,0 +1,3 @@
+main :: fn() {
+    values := .{ one, two }
+}

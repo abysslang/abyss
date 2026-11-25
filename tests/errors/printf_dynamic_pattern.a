@@ -1,5 +1,5 @@
 printf :: @import("std/io").printf
 main :: fn() {
     pattern := "{}"
-    printf(pattern, .{1})
+    printf(pattern, .(1))
 }

@@ -16,10 +16,10 @@ constant :: fn(cmpt number i64, cmpt flag bool) {
 }
 
 main :: fn() {
-    emit("first={}\n", .{10})
-    emit("second={}\n", .{20})
-    emit("first={}\n", .{30})
-    emit(struct { bool }, "explicit={}\n", .{false})
+    emit("first={}\n", .(10))
+    emit("second={}\n", .(20))
+    emit("first={}\n", .(30))
+    emit((bool,), "explicit={}\n", .(false))
     print(copy("hello"))
     print(copy("goodbye"))
     print(copy("hello"))
@@ -27,7 +27,7 @@ main :: fn() {
     constant(4294967295 as i64, true)
     text := cmpt {
         arena := Arena.new(64)
-        fmt(&arena, "{}:{}", .{@type_name(i32), 42}).as_str()
+        fmt(&arena, "{}:{}", .(@type_name(i32), 42)).as_str()
     }
     print(text)
     number := cmpt {

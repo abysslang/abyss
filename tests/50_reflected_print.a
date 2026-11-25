@@ -1,17 +1,32 @@
 emit :: @import("std/io").write
 
-Address :: struct { city Str, zip u32 }
-User :: struct {
-    name Str
-    address Address
-    scores [3]i32
-    pair struct { bool, i32 }
+Address :: struct {
+    city Str
+    zip  u32
 }
-Status :: enum u8 { ready = 7, done = 42 }
+User :: struct {
+    name    Str
+    address Address
+    scores  [3]i32
+    pair    (bool, i32)
+}
+Status :: enum u8 {
+    ready = 7
+    done = 42
+}
 Empty :: struct {}
 
-Box :: fn(T type) type { struct { value T } }
-Node :: fn(T type) type { struct { value T, next &Node(T) } }
+Box :: fn(T type) type {
+    struct {
+        value T
+    }
+}
+Node :: fn(T type) type {
+    struct {
+        value T
+        next  &Node(T)
+    }
+}
 
 forward :: fn(T type, value T) {
     #emit(value)
@@ -21,10 +36,10 @@ forward :: fn(T type, value T) {
 make :: fn(counter &i32) User {
     *counter = *counter + 1
     .{
-        name: "A\"B\\C\nD\tE",
-        address: .{ city: "Tehran", zip: 12345 },
-        scores: .[10, -20, 30],
-        pair: .{ true, *counter }
+        name: "A\"B\\C\nD\tE"
+        address: .{ city: "Tehran", zip: 12345 }
+        scores: .[ 10, -20, 30 ]
+        pair: .(true, *counter)
     }
 }
 
@@ -34,8 +49,8 @@ main :: fn() {
     emit("\n")
     emit(counter)
     emit("\n")
-    forward(.{ 7, .{ false, 9 }, .[1, 2] })
-    #emit(.[ .[1, 2], .[3, 4] ])
+    forward(.(7, .(false, 9), .[ 1, 2 ]))
+    #emit(.[ .[ 1, 2 ], .[ 3, 4 ] ])
     emit("\n")
     box: Box(i32) = .{ value: 55 }
     forward(box)

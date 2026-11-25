@@ -6,6 +6,6 @@ main :: fn() {
     arena := Arena.new(64)
     out := String.new(&arena)
     pattern := "{}"
-    format.fmt_into(&out, pattern, .{ 1 })
+    format.fmt_into(&out, pattern, .( 1 ))
     arena.destroy()
 }
