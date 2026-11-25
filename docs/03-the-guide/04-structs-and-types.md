@@ -123,39 +123,35 @@ main :: fn() {
 
 ## 3. Tuples
 
-A tuple is an anonymous struct with unnamed fields, written `struct { T1, T2 }`:
+A structural tuple type is an ordered list of element types, such as `(i32, Str)`. Two structural tuples have the same type when their element types match in order. Naming one with a binding creates an alias. Use `struct(i32, Str)` to declare a distinct nominal tuple whose name comes from the binding.
 
 ```abyss
-min_max :: fn(a i32, b i32) struct { i32, i32 } {
-    if a < b { .{ a, b } } else { .{ b, a } }
+Pair :: struct(i32, Str)
+IntPair :: (i32, i32)
+
+min_max :: fn(a i32, b i32) IntPair {
+    if a < b { .(a, b) } else { .(b, a) }
 }
 
 main :: fn() {
-    low, high := min_max(7, 3)
+    (low, high) := min_max(7, 3)
     print(low)
     print(high)
 
-    pair := .{ 100, "text" }
+    pair: Pair = .(100, "text")
     print(pair.0)
-    print(pair.1)
+
+    ((number, _), label) := .(pair, "result")
+    print(number)
+    print(label)
 }
 ```
 
-- Build a tuple with `.{ v1, v2 }` (no field names).
-- Read fields by position: `.0`, `.1`, `.2`, ….
-- Destructure with a matching binding count: `a, b := pair`. Tuples are ordinary values, so you can name one with a constant and use it as a parameter or return type.
-
-A named struct with the same field types is layout-compatible and converts by assignment:
-
-```abyss
-Pair :: struct { i32, Str }
-
-main :: fn() {
-    t: struct { i32, Str } = .{ 1, "a" }
-    p: Pair = t
-    print(p.0)
-}
-```
+- Use `.(values)` for tuple literals, `.[values]` for arrays, and `.{ name: value }` for structs.
+- Use `(T,)` for a one-element structural type (`(T)` is ordinary grouping), and `()` for the empty tuple type (literal `.()`). Nominal tuples use `struct(T)` and `struct()` directly without a trailing comma.
+- Access elements by zero-based position: `.0`, `.1`, and so on. Reflection reports both tuple forms as `TypeKind.tuple`, with element types in position order.
+- Destructuring declares local variables and evaluates the source once. Patterns can nest and use `_` to discard an element. Each pattern must have the same arity as the corresponding tuple, and names must be unique within the pattern. Use `(value,)` for a one-element pattern and `()` for the empty tuple.
+- A tuple literal can initialize a nominal tuple where the expected type is known. Once created, a nominal tuple value cannot be assigned to a structural tuple or a different nominal tuple with the same elements.
 
 ## 4. Enums
 
@@ -272,7 +268,9 @@ main :: fn() {
 | Concept | Idiomatic Abyss | Avoid |
 | :--- | :--- | :--- |
 | **Fields** | `x i32` | `x: i32;` |
-| **Literals** | `.{ x: 1, y: 2 }` | Named-argument constructors |
+| **Struct literals** | `.{ x: 1, y: 2 }` | Named-argument constructors |
+| **Tuple types & literals** | `(i32, Str)`, `struct(i32, Str)`, `.(1, "a")` | Mixing positional fields into `.{...}` |
+| **Tuple destructuring** | `(a, (b, _)) := pair` | `a, b := pair` |
 | **Enclosing type** | `Self` | Repeating the struct name |
 | **Optional variants** | Tagged unions with `@is`/`match` | Untagged `void *` payloads |
 | **Type name** | `@type_name(T)` | Hand-written name strings |

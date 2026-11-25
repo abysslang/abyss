@@ -53,7 +53,7 @@ main :: fn() {
 | Keyword | Role |
 | :--- | :--- |
 | `fn` | Function or function type. |
-| `struct` | Struct type. |
+| `struct` | Struct type (`struct { ... }`) or nominal tuple (`struct(...)`). |
 | `enum` | Enum type. |
 | `extern` | Foreign function, export, or C-layout struct or header binding. |
 | `if`, `else` | Conditional expression. |
@@ -157,6 +157,9 @@ multi-line`
 | `"..."` | `Str` | Escapes decoded by the target. |
 | `` `...` `` | `Str` | Raw multi-line; no escape processing. |
 | `c"..."` | `&u8` | Null-terminated C string. |
+| `.{ name: val }` | struct | Contextual struct literal. |
+| `.(v1, v2)`, `.()` | tuple | Structural or contextual nominal tuple literal. |
+| `.[v1, v2]` | array | Contextual fixed-size array literal. |
 
 A null pointer has no literal; write `0 as &T`.
 

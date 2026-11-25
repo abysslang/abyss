@@ -10,7 +10,7 @@ main :: fn() {
     write("[")
     write("OK")
     print("]")
-    printf("position: ({}, {})\n", .{10, 20})
+    printf("position: ({}, {})\n", .(10, 20))
 }
 ```
 
@@ -43,7 +43,7 @@ main :: fn() {
 
     x := 100
     y := 200
-    printf("x={}, y={}\n", .{x, y})
+    printf("x={}, y={}\n", .(x, y))
 }
 ```
 
@@ -73,7 +73,7 @@ Arena :: @import("std/allocator").Arena
 
 main :: fn() {
     arena := Arena.new(64)
-    print(fmt(&arena, "hello {}", .{"Abyss"}).as_str())
+    print(fmt(&arena, "hello {}", .("Abyss")).as_str())
     arena.destroy()
 }
 ```
@@ -95,9 +95,9 @@ write :: @import("std/io").write
 
 main :: fn() {
     arena := Arena.new(4096)
-    report := fmt(&arena, "header: {}\n", .{"start"})
-    fmt_into(&report, "body: {}\n", .{"data"})
-    fmt_into(&report, "footer: {}\n", .{"end"})
+    report := fmt(&arena, "header: {}\n", .("start"))
+    fmt_into(&report, "body: {}\n", .("data"))
+    fmt_into(&report, "footer: {}\n", .("end"))
     write(report.as_str())
     arena.destroy()
 }
@@ -190,7 +190,7 @@ main :: fn() {
     write(esc.reset)
     print("")
 
-    printf("{}{}warning{}{}\n", .{esc.fg_yellow, esc.bold, esc.reset, esc.dim})
+    printf("{}{}warning{}{}\n", .(esc.fg_yellow, esc.bold, esc.reset, esc.dim))
 }
 ```
 

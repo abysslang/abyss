@@ -177,8 +177,8 @@ main :: fn() {
     p: Point = .{ x: 3, y: 4 }
     print(p.x)
 
-    pair := .{ 10, "ten" }
-    first, second := pair
+    pair := .(10, "ten")
+    (first, second) := pair
     print(first)
     print(second)
 }

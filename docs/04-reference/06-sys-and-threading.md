@@ -105,7 +105,7 @@ thread :: @import("std/thread")
 
 Capture :: struct {
     nums [3]i32
-    pair struct { i32, i32 }
+    pair (i32, i32)
 }
 
 sum :: fn(capture Capture) i32 {
@@ -113,7 +113,7 @@ sum :: fn(capture Capture) i32 {
 }
 
 main :: fn() {
-    capture: Capture = .{ nums: .[10, 90, 12], pair: .{ 20, 0 } }
+    capture: Capture = .{ nums: .[10, 90, 12], pair: .(20, 0) }
     worker := thread.spawn_with(sum, capture).unwrap()
     print(worker.join().unwrap())
 }

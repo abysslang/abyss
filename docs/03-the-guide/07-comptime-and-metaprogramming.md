@@ -122,7 +122,7 @@ Arena :: @import("std/allocator").Arena
 
 gen_scale :: fn(factor i32) Str {
     arena := Arena.new(256)
-    fmt(&arena, "fn(v i32) i32 {{ v * {} }}", .{factor}).as_str()
+    fmt(&arena, "fn(v i32) i32 {{ v * {} }}", .(factor)).as_str()
 }
 
 scaled :: #gen_scale(4)
@@ -215,7 +215,7 @@ Read it directly for a concrete type. Inside `cmpt`, it produces values you can 
 
 ```abyss
 Record :: struct {
-    pair   struct { i32, bool }
+    pair   (i32, bool)
     values [3]u16
 }
 
@@ -262,12 +262,12 @@ main :: fn() {
 
 ```abyss
 Record :: struct {
-    pair   struct { i32, bool }
+    pair   (i32, bool)
     values [3]u16
 }
 
 main :: fn() {
-    record: Record = .{ pair: .{ 42, true }, values: .[1, 2, 3] }
+    record: Record = .{ pair: .(42, true), values: .[1, 2, 3] }
     #print(record)
 }
 ```

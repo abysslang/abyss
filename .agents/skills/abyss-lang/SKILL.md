@@ -49,7 +49,7 @@ Abyss is a statically typed, expression-oriented systems programming language fe
      - `print(value)` in `std.io` **automatically outputs a trailing newline (`\n`)** after the formatted value! It behaves like `println` in other languages. Never append `\n` to `print` or wrap it with an extra newline printer, or you will create double blank lines.
      - `write(value)` in `std.io` formats and prints `value` **without** a trailing newline. Use `write` for inline output, concatenations, or progress indicators.
      - `printf(pattern, args)` in `std.io` formats according to `pattern` without an automatic trailing newline.
-   - **Build text with `std/fmt`**: Use `fmt(arena, pattern, args)` for a new `String` and `fmt_into(&buffer, pattern, args)` to append to an existing one. Both specialize the template at compile time. For single fragments, call `String` methods directly; use `Fmt` to chain small writes into a new fragment.
+   - **Build text with `std/fmt`**: Use `fmt(arena, pattern, args)` for a new `String` and `fmt_into(&buffer, pattern, args)` to append to an existing one. Both specialize the template at compile time. Pass arguments as tuples: `.(name, value)`, or `.()` for an empty argument list. For single fragments, call `String` methods directly; use `Fmt` to chain small writes into a new fragment.
    - **Run native threads with `std/thread`**: Pass pointer-free captures by value with `spawn_with`. Use `spawn_shared` for explicit borrows, `Mutex(T)` to synchronize mutable state, and `join()` to collect a typed result.
    - **Prefer High-Level Abstractions**: Never write low-level C-style null checks, ad-hoc arrays, or manual loop copies when standard collections (`Vec`, `HashMap`, `HashSet`) or abstractions (`Maybe`) can make the code clean, concise, and expressive.
    - **Embrace `Maybe` (Abyss's `Option`)**: Use `Maybe` for any optional or fallible value instead of sentinel values (`-1`, null pointers). Use `.is_some()`, `.is_none()`, `.unwrap()`, and `.unwrap_or(default)`.
@@ -115,6 +115,23 @@ x := 42                 -- Mutable binding with inferred type
 count: u64 = 100        -- Explicit type annotation
 PI :: 3.14159           -- Constant binding (evaluated at comptime)
 ```
+
+### Tuples
+
+Use `(i32, Str)` for a structural type, `Pair :: struct(i32, Str)` for a nominal declaration, and `.(12, "label")` for a literal. Nominal types retain binding identity. A literal can initialize a nominal tuple in context.
+
+```abyss
+Pair :: struct(i32, Str)
+
+main :: fn() {
+    pair: Pair = .(12, "label")
+    ((number, _), label) := .(pair, "outer")
+    print(number)
+    print(label)
+}
+```
+
+Access positions with `.0`, `.1` and so on. A tuple pattern binds names locally, accepts nested tuple patterns and `_`, and evaluates its right-hand side once. Tuple arity must match at every level. Use `(T,)` for a single element structural type, `(name,)` for a single element pattern, and `()` for the empty tuple type (`.()` literal). `struct(T)` and `struct()` declare single-element and empty nominal tuples without needing a trailing comma, and type functions such as `fn(A, B type) type { struct(A, B) }` specialize generic nominal tuples cleanly. Reserve `.{ name: value }` for struct literals and `.[values]` for arrays.
 
 ### Functions & Methods
 ```abyss

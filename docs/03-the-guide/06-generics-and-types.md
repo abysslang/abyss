@@ -35,12 +35,12 @@ main :: fn() {
 Consecutive type parameters may be grouped:
 
 ```abyss
-swap :: fn(T, U type, t struct { T, U }) struct { U, T } {
-    .{ t.1, t.0 }
+swap :: fn(T, U type, t (T, U)) (U, T) {
+    .(t.1, t.0)
 }
 
 main :: fn() {
-    a, b := swap(.{ 1, "one" })
+    (a, b) := swap(.(1, "one"))
     print(a)
     print(b)
 }
@@ -93,8 +93,8 @@ When an argument cannot be inferred, the compiler says `cannot infer generic typ
 A parameter can carry a compile-time value, not just a type. Mark it with `cmpt` inside the parameter list:
 
 ```abyss
-repeat :: fn(T type, cmpt count u64, value T) struct { T, u64 } {
-    .{ value, count }
+repeat :: fn(T type, cmpt count u64, value T) (T, u64) {
+    .(value, count)
 }
 ```
 
@@ -125,7 +125,7 @@ Compile-time parameters are limited to integer, `bool`, and `Str` types. A `cmpt
 
 ## 4. Type Functions
 
-A type function is any function whose return type is `type`. It runs at compile time and produces a struct, union, enum, or alias:
+A type function is any function whose return type is `type`. It runs at compile time and produces a struct, nominal tuple, structural tuple, union, enum, or alias:
 
 ```abyss
 Box :: fn(T type) type {
@@ -138,15 +138,17 @@ Box :: fn(T type) type {
 }
 
 Pair :: fn(T, U type) type {
-    struct {
-        first  T
-        second U
-    }
+    struct(T, U)
 }
 
 main :: fn() {
     b := Box().new(42 as u32)
     print(b.get())
+
+    p: Pair(i32, Str) = .(7, "pair")
+    (first, second) := p
+    print(first)
+    print(second)
 }
 ```
 

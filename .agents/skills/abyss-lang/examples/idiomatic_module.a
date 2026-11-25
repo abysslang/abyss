@@ -12,7 +12,7 @@ Record :: struct {
     }
 
     display :: fn(self &Self) {
-        printf("Record(id={}, name={})\n", .{self.id, self.name})
+        printf("Record(id={}, name={})\n", .(self.id, self.name))
     }
 }
 
@@ -22,8 +22,8 @@ Database :: struct {
 
     new :: fn(arena &Arena) Self {
         .{
-            arena:   arena,
-            records: Vec(Record).new(),
+            arena: arena
+            records: Vec(Record).new()
         }
     }
 
@@ -60,7 +60,7 @@ main :: fn() {
         rec := res.unwrap()
         rec.display()
     } else {
-        printf("Record not found\n", .{})
+        printf("Record not found\n", .())
     }
 
     db.destroy()

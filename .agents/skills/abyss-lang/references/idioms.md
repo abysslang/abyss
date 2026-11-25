@@ -19,7 +19,7 @@ Str :: struct {
    ```abyss
    -- IDIOMATIC
    greet :: fn(name Str) {
-       printf("Hello, {}!\n", .{name})
+       printf("Hello, {}!\n", .(name))
    }
 
    -- ANTI-PATTERN (avoid unless interfacing with C runtime)
@@ -41,8 +41,8 @@ Str :: struct {
    Arena :: @import("std/allocator").Arena
 
    declaration :: fn(arena &Arena, name Str, value u32) Str {
-       out := format.fmt(arena, "static u32 {}", .{name})
-       format.fmt_into(&out, " = {};\n", .{value})
+       out := format.fmt(arena, "static u32 {}", .(name))
+       format.fmt_into(&out, " = {};\n", .(value))
        out.as_str()
    }
    ```
@@ -64,7 +64,7 @@ read_and_process :: fn(path Str) {
     opt := File.read_to_string(&arena, path)
     if opt.is_some() {
         content := opt.unwrap()
-        printf("Read {} bytes from {}\n", .{content.len, path})
+        printf("Read {} bytes from {}\n", .(content.len, path))
     }
 
     -- File.write_string accepts Str path and Str content
@@ -114,7 +114,7 @@ list.push(30)
 i: u64 = 0
 while i < list.len {
     val := list.get(i)
-    printf("Item: {}\n", .{val})
+    printf("Item: {}\n", .(val))
     i = i + 1
 }
 
@@ -139,7 +139,7 @@ find_value :: fn(key u32) Maybe(u32) {
 val_opt := find_value(42)
 if val_opt.is_some() {
     v := val_opt.unwrap()
-    printf("Found: {}\n", .{v})
+    printf("Found: {}\n", .(v))
 }
 ```
 
@@ -181,7 +181,7 @@ name := find_user(user_id).unwrap_or("Guest")
 -- Conditional inspection
 opt := find_user(user_id)
 if opt.is_some() {
-    printf("Found: {}\n", .{opt.unwrap()})
+    printf("Found: {}\n", .(opt.unwrap()))
 }
 ```
 Avoid sentinel values like `(0 as &u8)` or special error codes when `Maybe(T)` expresses intent cleanly.

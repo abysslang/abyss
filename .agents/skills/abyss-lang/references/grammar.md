@@ -59,7 +59,7 @@ For hosted native code, use `extern ["header.h"] "symbol" fn(...) T` to use the 
 - Signed integers: `i8`, `i16`, `i32`, `i64`
 - Floating-point: `f32`, `f64`
 - Boolean: `bool`
-- Void: `void`
+- Empty tuple: `()` (literal `.()`, single-element `(T,)`; omit return type on functions that return no value)
 - Untyped constants: untyped int, untyped float, untyped str (coerced during type checking).
   - *Note on characters:* Abyss has **no** `char` primitive type. Character literals like `'x'` are compile-time `untyped int` and coerce to any integer or float.
 
@@ -68,11 +68,11 @@ For hosted native code, use `extern ["header.h"] "symbol" fn(...) T` to use the 
 - **Functions**: `fn(A, B) C`
 - **Fixed Arrays**: `[N]T` (e.g. `[4]i32`, initialized with `.[1, 2, 3, 4]`)
 - **Slices**: `[]T` or `Slice(T)`
-- **Tuples**: `struct { T1, T2 }` (initialized with `.{ v1, v2 }`, indexed with `.0`, `.1`, destructuring `a, b := tuple`)
-- **Structs**: `struct { field1 T1, field2 T2 }` (NO colons in field definitions; grouped fields `x, y i32` supported)
+- **Tuples**: `(T1, T2)` is structural and `struct(T1, T2)` declares a nominal tuple (works in bindings and type functions). Use `.(v1, v2)` or `.()` for values and `.0`, `.1` for projection. Local patterns use `(a, (_, c)) := value`. `(T,)` is a single element type; `(T)` is grouping; `struct(T)` needs no trailing comma.
+- **Structs**: `struct { field1 T1, field2 T2 }` (NO colons in field definitions; grouped fields `x, y i32` supported; initialized with `.{ name: val }`)
 - **Enums**: `enum [ReprType] { A, B, C }`
 - **Tagged Unions (Sum Types)**: `T1 | T2` (checked via `@is(val, T)`, downcast via `val as T`, tag via `@tag(val)`)
-- **Type Functions (Generics)**: `fn(T type) type { struct { ... } }` (instantiated via `TypeFn(T)`)
+- **Type Functions (Generics)**: `fn(T type) type { struct { ... } }` or `fn(T type) type { struct(T, ...) }` (instantiated via `TypeFn(T)`)
 
 ---
 
