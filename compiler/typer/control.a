@@ -12,7 +12,7 @@ type_common :: @import("./common")
 synth_type_node :: @import("./var").synth_type_node
 
 match_error :: fn(db &Nexus, msg &u8, id u32) {
-    printf("\n\033[1;31m[type error]\033[0m {}\n       --> ", .{ msg })
+    printf("\n\033[1;31m[type error]\033[0m {}\n       --> ", .(msg))
     db.print_loc(id)
     print("")
     #fall

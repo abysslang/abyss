@@ -12,7 +12,7 @@ tyck :: @import("./tyck")
 synth_type_node :: @import("./var").synth_type_node
 
 reflection_error :: fn(db &Nexus, id u32, message &u8) {
-    printf("\n[type error] {}\n       --> ", .{ message })
+    printf("\n[type error] {}\n       --> ", .( message ))
     db.print_loc(id)
     print("")
     #fall
@@ -96,19 +96,23 @@ reflection_name :: fn(db &Nexus, ty u32) Str {
         s.push_str(") ")
         s.push_str(reflection_name(db, types.func_return(ty)))
     } else if kind == type_defs.TyKind.struct_ {
-        s.push_str("struct { ")
+        tuple := types.is_tuple(ty)
+        s.push_str(if tuple { "(" } else { "struct { " })
         fields := types.get_struct_fields(ty)
         i: u64 = 0
         while i < fields.len / 2 {
             if i > 0 {
                 s.push_str(", ")
             }
-            s.push_str(db.interner.get(*(fields.ptr + i * 2)))
-            s.push_str(": ")
+            if not tuple {
+                s.push_str(db.interner.get(*(fields.ptr + i * 2)))
+                s.push_str(": ")
+            }
             s.push_str(reflection_name(db, *(fields.ptr + i * 2 + 1)))
             i = i + 1
         }
-        s.push_str(" }")
+        if tuple and fields.len == 2 { s.push_str(",") }
+        s.push_str(if tuple { ")" } else { " }" })
     } else if kind == type_defs.TyKind.union_ {
         members := types.union_members(ty)
         i: u64 = 0
@@ -154,27 +158,6 @@ reflection_fields :: fn(db &Nexus, ty u32) Vec(u32) {
     if result.len != stored.len {
         result.clear()
         result.extend(stored.ptr, stored.len)
-    }
-    if db.types.kind(ty) == type_defs.TyKind.struct_ {
-        ordered := Vec(u32).new()
-        i: u64 = 0
-        while i < stored.len / 2 {
-            name := db.tuple_field_name(i as u32)
-            j: u64 = 0
-            while j < stored.len / 2 {
-                if *(stored.ptr + j * 2) == name {
-                    ordered.push(name)
-                    ordered.push(*(stored.ptr + j * 2 + 1))
-                }
-                j = j + 1
-            }
-            i = i + 1
-        }
-        if ordered.len == stored.len {
-            result.destroy()
-            ret ordered
-        }
-        ordered.destroy()
     }
     result
 }
@@ -350,15 +333,7 @@ reflection_build :: fn(db &Nexus, ty u32, info_ty u32, field_ty u32, seen &Vec(u
     if (kind == type_defs.TyKind.struct_) or (kind == type_defs.TyKind.nominal) {
         fields.destroy()
         fields = reflection_fields(db, ty)
-        is_tuple := fields.len > 0
-        i = 0
-        while i < fields.len / 2 {
-            if fields.get(i * 2) != db.tuple_field_name(i as u32) {
-                is_tuple = false
-            }
-            i = i + 1
-        }
-        if is_tuple {
+        if db.types.is_tuple(ty) {
             reflected_kind = TypeKind.tuple as u64
         }
     }

@@ -78,6 +78,8 @@ HirExprKind :: enum u8 {
     k_cmpt
     splice
     destructure
+    tuple_type
+    nominal_tuple
 }
 
 hir_kind :: HirExprKind
@@ -308,6 +310,9 @@ hir_kind_name :: fn(kind HirExprKind) Str {
         }
         destructure {
             "Destructure"
+        }
+        tuple_type, nominal_tuple {
+            "TupleType"
         }
     }
 }

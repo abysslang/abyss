@@ -661,7 +661,7 @@ Nexus :: struct {
     }
 
     type_error :: fn(self &Self, id u32, msg Str) {
-        printf("\n\033[1;31m[type error]\033[0m {}\n       --> ", .{ msg })
+        printf("\n\033[1;31m[type error]\033[0m {}\n       --> ", .(msg))
         self.print_loc(id)
         print("")
         #fall
@@ -746,18 +746,6 @@ Nexus :: struct {
         }
         s: Str = .{ ptr: buf, len: len }
         self.interner.intern(s)
-    }
-
-    is_tuple_name :: fn(self &Self, name_id u32) bool {
-        if name_id == pool.id_none() {
-            ret false
-        }
-        name := self.interner.get(name_id)
-        if name.len < 2 {
-            ret false
-        }
-        (*(name.ptr) == (95 as u8)) and (*(name.ptr + 1) >= (48 as u8)) and
-            (*(name.ptr + 1) <= (57 as u8))
     }
 
     init_tuple_names :: fn(self &Self) {
@@ -975,7 +963,7 @@ Nexus :: struct {
         fid := self.get_hir_file(hir_id)
         path := self.get_file_path(fid)
         pos := self.get_pos(hir_id)
-        printf("{}:{}:{}", .{ path, pos.line, pos.col })
+        printf("{}:{}:{}", .(path, pos.line, pos.col))
     }
 
     specialize_const_func :: fn(self &Self, base u32, key Slice(u32), values Slice(u32)) u32 {

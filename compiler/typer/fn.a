@@ -97,13 +97,13 @@ synth_func :: fn(eng &Engine, id u32) {
                 }
             }
             if param_ty == types.ty_id_none() {
-                printf("\n[type error] unresolved parameter type\n       --> ", .{})
+                printf("\n[type error] unresolved parameter type\n       --> ", .())
                 db.print_loc(arg_id)
                 print("")
                 #fall
             }
             if param_ty == types.ty_id_unit() {
-                printf("\n[type error] void parameters have no runtime representation\n       --> ", .{})
+                printf("\n[type error] void parameters have no runtime representation\n       --> ", .())
                 db.print_loc(arg_id)
                 print("")
                 #fall
@@ -147,7 +147,7 @@ synth_func :: fn(eng &Engine, id u32) {
                 ident_name := (tbl).lhs(arg_ident)
                 if db.interner.get(ident_name).eq(Str.of("self")) {
                     if i != 0 {
-                        printf("\n[type error] self parameter must be the first parameter\n       --> ", .{})
+                        printf("\n[type error] self parameter must be the first parameter\n       --> ", .())
                         db.print_loc(arg_id)
                         print("")
                         #fall
@@ -162,7 +162,7 @@ synth_func :: fn(eng &Engine, id u32) {
     if ret_hir_id != hir.hir_none() {
         val := synth_type_node(eng, ret_hir_id)
         if val == types.ty_id_none() {
-            printf("\n[type error] unresolved return type\n       --> ", .{})
+            printf("\n[type error] unresolved return type\n       --> ", .())
             db.print_loc(ret_hir_id)
             print("")
             #fall
@@ -272,7 +272,7 @@ synth_return :: fn(db &Nexus, tbl &hir.HirTable, id u32) {
         }
     } else {
         if ret_ty != types.ty_id_unit() {
-            printf("\n\033[1;31m[type error]\033[0m return with no value in function returning a value\n       --> ", .{})
+            printf("\n\033[1;31m[type error]\033[0m return with no value in function returning a value\n       --> ", .())
             db.print_loc(id)
             print("")
             #fall
@@ -290,15 +290,15 @@ report_arg_count_error :: fn(db &Nexus, id u32, callee u32, params_len u64, args
     if (type_params_count == 0) and ((tbl).kind(callee) == hir.hir_kind.member) {
         name_node := (tbl).rhs(callee)
         name_id := (tbl).lhs(name_node)
-        printf("\n\033[1;31m[type error]\033[0m method '{}' expected ", .{ db.interner.get(name_id) })
+        printf("\n\033[1;31m[type error]\033[0m method '{}' expected ", .( db.interner.get(name_id) ))
     } else {
-        printf("\n\033[1;31m[type error]\033[0m function expected ", .{})
+        printf("\n\033[1;31m[type error]\033[0m function expected ", .())
     }
-    printf("{}", .{ expected as u32 })
+    printf("{}", .( expected as u32 ))
     if type_params_count > 0 {
-        printf(" (or {})", .{ (expected - (type_params_count as u64)) as u32 })
+        printf(" (or {})", .( (expected - (type_params_count as u64)) as u32 ))
     }
-    printf(" arguments, but got {}\n       --> ", .{ actual as u32 })
+    printf(" arguments, but got {}\n       --> ", .( actual as u32 ))
     db.print_loc(id)
     print("\n")
     #fall
@@ -333,7 +333,7 @@ unify_call_arg :: fn(eng &Engine, arg_node u32, expected_ty u32) {
         unify_ptr.union(&(*db).types, arg_slot, p_tmp)
     }
     if arg_slot == slot_none() {
-        printf("\n[type error] cannot resolve argument\n       --> ", .{})
+        printf("\n[type error] cannot resolve argument\n       --> ", .())
         db.print_loc(arg_node)
         print("")
         #fall
@@ -406,7 +406,7 @@ synth_type_func_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot 
     leading_types := (&(*types_ptr)).func_leading_type_params(callee_ty)
     omitted_types := (leading_types > 0) and (args_len == params.len - (leading_types as u64))
     if (args_len != params.len) and (not omitted_types) {
-        printf("\n[type error] type function expected {} arguments, but got {}\n       --> ", .{ params.len as u32, args_len as u32 })
+        printf("\n[type error] type function expected {} arguments, but got {}\n       --> ", .( params.len as u32, args_len as u32 ))
         db.print_loc(id)
         print("")
         #fall
@@ -433,13 +433,13 @@ synth_type_func_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot 
             }
             if expected_p_ty == types.ty_id_type() {
                 if (arg_ty == types.ty_id_none()) or (arg_slot == slot_none()) {
-                    printf("\n[type error] type function argument must be a type\n       --> ", .{})
+                    printf("\n[type error] type function argument must be a type\n       --> ", .())
                     db.print_loc(arg_node)
                     print("")
                     #fall
                 }
                 if (unify_ptr.resolve_type(arg_slot) != types.ty_id_type()) and (types_ptr.kind(arg_ty) != types.TyKind.infer) {
-                    printf("\n[type error] type function argument must be a type\n       --> ", .{})
+                    printf("\n[type error] type function argument must be a type\n       --> ", .())
                     db.print_loc(arg_node)
                     print("")
                     #fall
@@ -457,7 +457,7 @@ synth_type_func_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot 
                     val := eval_const(db, arg_node) as u32
                     concrete_args.push(val)
                 } else {
-                    printf("\n[type error] type function argument must be a compile-time constant\n       --> ", .{})
+                    printf("\n[type error] type function argument must be a compile-time constant\n       --> ", .())
                     db.print_loc(arg_node)
                     print("")
                     #fall
@@ -487,7 +487,7 @@ synth_type_func_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot 
     spec_ty := specialize.specialize_nominal_from_creator(eng, callee_sym, &concrete_args)
     concrete_args.destroy()
     if spec_ty == types.ty_id_none() {
-        printf("\n[type error] type function did not produce a type\n       --> ", .{})
+        printf("\n[type error] type function did not produce a type\n       --> ", .())
         db.print_loc(id)
         print("")
         #fall
@@ -598,13 +598,13 @@ synth_generic_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot u3
                 arg_val := db.get_const_type(arg_node)
                 type_slot := unify_ptr.get_slot(arg_node)
                 if (arg_val == types.ty_id_none()) or (type_slot == slot_none()) {
-                    printf("\n[type error] generic type argument must be a type\n       --> ", .{})
+                    printf("\n[type error] generic type argument must be a type\n       --> ", .())
                     db.print_loc(arg_node)
                     print("")
                     #fall
                 }
                 if unify_ptr.resolve_type(type_slot) != types.ty_id_type() {
-                    printf("\n[type error] generic type argument must be a type\n       --> ", .{})
+                    printf("\n[type error] generic type argument must be a type\n       --> ", .())
                     db.print_loc(arg_node)
                     print("")
                     #fall
@@ -673,7 +673,7 @@ synth_generic_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot u3
                         arg_node := *(args.ptr + dep_i)
                         c_val := eval_const(db, arg_node)
                         if (c_val == 0) and (tbl.kind(arg_node) != hir.hir_kind.lit_int) {
-                            printf("\n[type error] expected compile-time constant argument\n       --> ", .{})
+                            printf("\n[type error] expected compile-time constant argument\n       --> ", .())
                             db.print_loc(arg_node)
                             print("")
                             #fall
@@ -799,7 +799,7 @@ synth_call :: fn(eng &Engine, id u32) {
         callee_slot = unify_ptr.get_slot(callee)
     }
     if callee_slot == slot_none() {
-        printf("\n[type error] cannot resolve call target\n       --> ", .{})
+        printf("\n[type error] cannot resolve call target\n       --> ", .())
         db.print_loc(callee)
         print("")
         #fall
@@ -809,9 +809,9 @@ synth_call :: fn(eng &Engine, id u32) {
         callee_ty = db.get_const_type(callee)
     }
     if types_ptr.kind(callee_ty) != types.TyKind.func {
-        printf("\n\033[1;31m[type error]\033[0m cannot call non-function type '", .{})
+        printf("\n\033[1;31m[type error]\033[0m cannot call non-function type '", .())
         types_ptr.print_type(callee_ty)
-        printf("'\n       --> ", .{})
+        printf("'\n       --> ", .())
         db.print_loc(callee)
         print("\n")
         #fall

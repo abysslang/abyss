@@ -407,6 +407,32 @@ lower_builtin_call :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32)
     empty
 }
 
+lower_pattern_items :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), list u32, source V) {
+    db := ctx.db
+    count := db.get_list(list).len
+    index: u64 = 0
+    while index < count {
+        pattern := db.get_list(list).get(index)
+        name := db.tuple_field_name(index as u32)
+        sym := db.get_hir_symbol(pattern)
+        if db.hir.kind(pattern) == hir.hir_kind.empty {
+            field := ctx.ccg.expr_member(ctx.arena, source, 0, name)
+            lower_pattern_items(ctx, db.hir.lhs(pattern), field)
+        } else if sym != id_none() {
+            ty := db.get_node_type(pattern)
+            add_type_to_queue(db, ty, ctx.type_queue)
+            field := ctx.ccg.expr_member(ctx.arena, source, 0, name)
+            ctx.ccg.create_variable(
+                ctx.ccg.sym_name(ctx.arena, sym)
+                ctx.ccg.type_str(&db.types, ctx.arena, ty)
+                field
+                true
+            )
+        }
+        index = index + 1
+    }
+}
+
 lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V {
     db := ctx.db
     ccg := ctx.ccg
@@ -546,7 +572,7 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
                 }
                 ret ccg.sym_name(arena, sym_id)
             }
-            printf("\n[codegen error] undefined identifier\n       --> ", .{})
+            printf("\n[codegen error] undefined identifier\n       --> ", .())
             db.print_loc(id)
             print("")
             #fall
@@ -561,7 +587,7 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
                 ret empty
             }
             if db.types.kind(var_ty) == type_defs.TyKind.unit {
-                printf("\n[type error] variable cannot have void type\n       --> ", .{})
+                printf("\n[type error] variable cannot have void type\n       --> ", .())
                 db.print_loc(id)
                 print("")
                 #fall
@@ -573,7 +599,7 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
                 if not ccg.has_value(val_str) {
                     printf(
                         "\n[codegen error] initializer does not produce a value\n       --> "
-                        .{}
+                        .()
                     )
                     db.print_loc(id)
                     print("")
@@ -590,7 +616,7 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
             rhs_node := db.hir.extra(id)
             rhs_val := lower_expr(ctx, rhs_node)
             if not ccg.has_value(rhs_val) {
-                printf("\n[codegen error] initializer does not produce a value\n       --> ", .{})
+                printf("\n[codegen error] initializer does not produce a value\n       --> ", .())
                 db.print_loc(id)
                 print("")
                 #fall
@@ -602,32 +628,7 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
             temp_tup := ccg.new_temp(arena, rhs_ty_str)
             ccg.expr(ccg.expr_assign(arena, temp_tup, rhs_val))
 
-            idents_list := db.hir.lhs(id)
-            idents := db.get_list(idents_list)
-            i: u64 = 0
-            while i < idents.len {
-                ident_node := *(idents.ptr + i)
-                sym_id := db.get_hir_symbol(ident_node)
-                var_ty := db.get_node_type(ident_node)
-                if (var_ty == type_defs.ty_id_type()) or db.types.func_has_type_param(var_ty) {
-                    i = i + 1
-                    cont
-                }
-                if db.types.kind(var_ty) == type_defs.TyKind.unit {
-                    printf("\n[type error] variable cannot have void type\n       --> ", .{})
-                    db.print_loc(id)
-                    print("")
-                    #fall
-                }
-                add_type_to_queue(db, var_ty, type_queue)
-                ty_str := ccg.type_str(&db.types, arena, var_ty)
-                var_name := ccg.sym_name(arena, sym_id)
-
-                f_name_id := db.tuple_field_name(i as u32)
-                f_val := ccg.expr_member(arena, temp_tup, 0, f_name_id)
-                ccg.create_variable(var_name, ty_str, f_val, true)
-                i = i + 1
-            }
+            lower_pattern_items(ctx, db.hir.lhs(db.hir.lhs(id)), temp_tup)
             ret empty
         }
         binary_assign {
@@ -1056,7 +1057,7 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
                 }
                 printf(
                     "\n[type error] methods must be called directly; method values are not supported\n       --> "
-                    .{}
+                    .()
                 )
                 db.print_loc(id)
                 print("")
@@ -1183,7 +1184,7 @@ lower_expr_node :: fn(B type, L type, V type, ctx &LowerCtx(B, L, V), id u32) V 
             ret ccg.expr_ptr_index(arena, lhs_val, rhs_val, elem_ty)
         }
         else {
-            printf("\n[codegen error] unsupported expression\n       --> ", .{})
+            printf("\n[codegen error] unsupported expression\n       --> ", .())
             db.print_loc(id)
             print("")
             #fall

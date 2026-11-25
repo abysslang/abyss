@@ -68,43 +68,6 @@ parse_expr :: fn(p &parse.Parser, min_bp u8) u32 {
     lhs
 }
 
-is_destructure_start :: fn(p &parse.Parser) bool {
-    t := Token
-    c := p.cursor
-    if p.tokens.kind(c) != t.ident {
-        ret false
-    }
-    if c + 1 >= p.end {
-        ret false
-    }
-    if p.tokens.kind(c + 1) != t.comma {
-        ret false
-    }
-    scan := c + 2
-    while scan < p.end {
-        if p.tokens.kind(scan) != t.ident {
-            ret false
-        }
-        scan = scan + 1
-        if scan >= p.end {
-            ret false
-        }
-        k := p.tokens.kind(scan)
-        if k == t.comma {
-            scan = scan + 1
-            cont
-        }
-        if k == t.colon {
-            if (scan + 1 < p.end) and (p.tokens.kind(scan + 1) == t.eq) {
-                ret true
-            }
-            ret false
-        }
-        ret false
-    }
-    false
-}
-
 dispatch_prefix :: fn(p &parse.Parser, min_bp u8) u32 {
     t := Token
     tk := parse.peek(p)
@@ -134,9 +97,6 @@ dispatch_prefix :: fn(p &parse.Parser, min_bp u8) u32 {
         ret expressions.parse_false(p)
     }
     if tk == t.ident {
-        if is_destructure_start(p) {
-            ret decl.parse_destructure(p)
-        }
         ret expressions.parse_ident(p)
     }
     if tk == t.o_paren {
@@ -167,6 +127,9 @@ dispatch_prefix :: fn(p &parse.Parser, min_bp u8) u32 {
         ret stmt.parse_match(p)
     }
     if tk == t.kw_struct {
+        if parse.peek_n(p, 1) == t.o_paren {
+            ret decl.parse_tuple(p, hir.hir_kind.nominal_tuple)
+        }
         ret decl.parse_struct(p)
     }
     if tk == t.kw_enum {
@@ -180,6 +143,9 @@ dispatch_prefix :: fn(p &parse.Parser, min_bp u8) u32 {
     }
     if tk == t.at {
         ret expressions.parse_builtin(p)
+    }
+    if (tk == t.dot) and (parse.peek_n(p, 1) == t.o_paren) {
+        ret decl.parse_tuple(p, hir.hir_kind.struct_init)
     }
     if (tk == t.dot) and (parse.peek_n(p, 1) == t.o_brace) {
         ret decl.parse_struct_init(p)
@@ -264,6 +230,9 @@ dispatch_infix :: fn(p &parse.Parser, op Token, lhs u32, right_bp u8) u32 {
         ret decl.parse_binding(p, lhs, right_bp)
     }
     if op == t.colon {
+        if p.hir.kind(lhs) == hir.hir_kind.tuple_type and parse.peek(p) == t.eq {
+            ret decl.parse_tuple_binding(p, lhs)
+        }
         ret decl.parse_var_decl(p, lhs, right_bp)
     }
     if op == t.eq {

@@ -23,16 +23,16 @@ topo_dfs :: fn(
     }
     st := states.get(ty_id as u64)
     if st == (1 as u8) {
-        printf("\n[type error] recursive value type has infinite size: '", .{})
+        printf("\n[type error] recursive value type has infinite size: '", .())
         types.print_type(ty_id)
-        printf("'; use a pointer for the recursive field\n", .{})
+        printf("'; use a pointer for the recursive field\n", .())
         if types.kind(ty_id) == type_defs.TyKind.nominal {
             origin := types.nominal_origin(ty_id)
             node := origin
             if (origin & 2147483648) != 0 {
                 node = types.get_nominal_struct_node(origin)
             }
-            printf("       --> ", .{})
+            printf("       --> ", .())
             db.print_loc(node)
             print("")
         }

@@ -27,7 +27,7 @@ import_error :: fn(db &nexus.Nexus, fid u32, offset u32, message, detail Str) {
     pos := nexus.calc_pos(db.get_file_source(fid), offset)
     printf(
         "\n[import error] {}: {}\n       --> {}:{}:{}\n\n"
-        .{ message, detail, db.get_file_path(fid), pos.line, pos.col }
+        .(message, detail, db.get_file_path(fid), pos.line, pos.col)
     )
     #fall
 }
@@ -170,7 +170,7 @@ resolve_module :: fn(db &nexus.Nexus, arena &Arena, fid u32, offset u32, base, r
     if request.len == 0 {
         import_error(db, fid, offset, "empty module path", request)
     }
-    
+
     for byte in request {
         if byte == 0 {
             import_error(db, fid, offset, "module path contains a NUL byte", request)

@@ -35,8 +35,14 @@ fi
 
 printf '%s\n' 'main :: fn() i32 { @import("core/target").target.ptr_bits as i32 }' > "${WORK_DIR}/probe.a"
 if "${COMPILER}" "${WORK_DIR}/probe.a" "${WORK_DIR}/probe.c" > "${WORK_DIR}/probe.log" 2>&1; then
-    "${COMPILER}" "${ROOT_DIR}/compiler/main.a" "${OUTPUT}"
-    exit
+    legacy_imports=false
+    printf '%s\n' 'main :: fn() i32 { .(1, 2).0 }' > "${WORK_DIR}/probe.a"
+    if "${COMPILER}" "${WORK_DIR}/probe.a" "${WORK_DIR}/probe.c" > "${WORK_DIR}/probe.log" 2>&1; then
+        "${COMPILER}" "${ROOT_DIR}/compiler/main.a" "${OUTPUT}"
+        exit
+    fi
+else
+    legacy_imports=true
 fi
 
 STAGE="${WORK_DIR}/legacy"
@@ -44,12 +50,17 @@ mkdir -p "${STAGE}/pods"
 cp -R compiler "${STAGE}/compiler"
 cp -R pods/core pods/std "${STAGE}/pods/"
 while IFS= read -r -d '' source; do
-    awk -f "${ROOT_DIR}/scripts/seed_imports.awk" "${source}" > "${source}.seed"
+    awk -f "${ROOT_DIR}/scripts/seed_tuples.awk" "${source}" > "${source}.seed"
+    if "${legacy_imports}"; then
+        awk -f "${ROOT_DIR}/scripts/seed_imports.awk" "${source}.seed" > "${source}.imports"
+        mv "${source}.imports" "${source}.seed"
+    fi
     mv "${source}.seed" "${source}"
 done < <(find "${STAGE}/compiler" "${STAGE}/pods" -name '*.a' -print0)
 
 printf '%s\n' 'main :: fn() i32 { @source_location().line as i32 }' > "${WORK_DIR}/probe.a"
-if ! (cd "${STAGE}" && ABYSS_DEV="${STAGE}" "${COMPILER}" "${WORK_DIR}/probe.a" "${WORK_DIR}/probe.c") > "${WORK_DIR}/probe.log" 2>&1 &&
+if "${legacy_imports}" &&
+    ! (cd "${STAGE}" && ABYSS_DEV="${STAGE}" "${COMPILER}" "${WORK_DIR}/probe.a" "${WORK_DIR}/probe.c") > "${WORK_DIR}/probe.log" 2>&1 &&
     grep -aFq "unknown builtin function '@source_location'" "${WORK_DIR}/probe.log"; then
     build_bridge 1c10ec868b91068e42dad421c9fccfbc7f0cb0ed source-location
 fi

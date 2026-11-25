@@ -101,21 +101,9 @@ Engine :: struct {
             ret
         }
         value_node := db.hir.extra(root)
-        if (value_node == id_none()) or (db.hir.kind(value_node) != hir.hir_kind.struct_) {
+        kind := db.hir.kind(value_node)
+        if kind != hir.hir_kind.struct_ and kind != hir.hir_kind.nominal_tuple {
             ret
-        }
-        names_list := db.hir.lhs(value_node)
-        if names_list != id_none() {
-            names := db.get_list(names_list)
-            if names.len > 0 {
-                first_ident := *(names.ptr)
-                if (first_ident != id_none()) and (db.hir.kind(first_ident) == hir.hir_kind.ident) {
-                    first_name_id := db.hir.lhs(first_ident)
-                    if db.is_tuple_name(first_name_id) {
-                        ret
-                    }
-                }
-            }
         }
         existing := db.get_const_type(decl_hir)
         if existing != type_defs.ty_id_none() {

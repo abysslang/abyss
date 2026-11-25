@@ -124,7 +124,7 @@ default_global_type :: fn(db &Nexus, ty u32) u32 {
                 fields.push(default_global_type(db, source.ptr[i + 1]))
                 i = i + 2
             }
-            result := types.alloc_struct(fields.as_slice())
+            result := types.alloc_record(fields.as_slice(), types.record_flags(ty))
             fields.destroy()
             ret result
         }

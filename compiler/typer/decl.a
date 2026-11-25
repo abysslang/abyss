@@ -169,19 +169,9 @@ synth_struct :: fn(eng &Engine, id u32) {
     names := db.get_list(names_list)
     types := db.get_list(types_list)
 
-    is_tuple := false
-    if names.len > 0 {
-        first_ident := *(names.ptr)
-        if tbl.kind(first_ident) == hir.hir_kind.ident {
-            first_name_id := tbl.lhs(first_ident)
-            if db.is_tuple_name(first_name_id) {
-                is_tuple = true
-            }
-        }
-    }
     sym_id := db.get_hir_symbol(id)
     named := db.get_const_type(id)
-    if (sym_id != id_none()) and (not is_tuple) {
+    if sym_id != id_none() {
         if named == type_defs.ty_id_none() {
             name_id := db.sym_name(sym_id)
             name := db.interner.get(name_id)
@@ -239,7 +229,7 @@ synth_struct :: fn(eng &Engine, id u32) {
     }
     fields_vec.destroy()
 
-    if (sym_id != id_none()) and (not is_tuple) {
+    if sym_id != id_none() {
         types_ptr.set_nominal_base(named, tyid)
     } else {
         db.set_const_type(id, tyid)
@@ -264,6 +254,44 @@ synth_struct :: fn(eng &Engine, id u32) {
         new_methods_id := process_methods(eng, id, methods_id, sym_id)
         tbl.set_extra(id, new_methods_id)
     }
+}
+
+synth_tuple :: fn(eng &Engine, id u32) {
+    db := &eng.nexus
+    nodes := db.hir.lhs(id)
+    count := db.get_list(nodes).len
+    fields := Vec(u32).with_cap(count * 2)
+    index: u64 = 0
+    while index < count {
+        node := db.get_list(nodes).get(index)
+        ty := synth_type_node(eng, node)
+        if ty == type_defs.ty_id_none() or ty == type_defs.ty_id_type() or
+            ty == type_defs.ty_id_unit() {
+            db.type_error(node, "tuple element requires a runtime value type")
+        }
+        fields.push(db.tuple_field_name(index as u32))
+        fields.push(ty)
+        index = index + 1
+    }
+    ty := db.types.alloc_tuple(fields.as_slice())
+    fields.destroy()
+    if db.hir.kind(id) == hir.hir_kind.nominal_tuple {
+        named := db.get_const_type(id)
+        if db.types.kind(named) != type_defs.TyKind.nominal {
+            sym := db.get_hir_symbol(id)
+            if sym == id_none() { db.type_error(id, "nominal tuple requires a binding") }
+            named = db.types.alloc_nominal(
+                type_defs.ty_id_none()
+                db.interner.get(db.sym_name(sym))
+                id
+            )
+        }
+        db.types.set_nominal_base(named, ty)
+        ty = named
+    }
+    db.set_const_type(id, ty)
+    db.bind_type(db.ensure_slot(id), type_defs.ty_id_type())
+    db.set_is_const(id, true)
 }
 
 synth_enum :: fn(eng &Engine, id u32) {
@@ -379,7 +407,7 @@ synth_struct_init :: fn(db &Nexus, tbl &hir.HirTable, id u32) {
     }
     slice: Slice(u32) = .{ ptr: ptr, len: fields_vec.len }
 
-    tyid := types_ptr.alloc_struct(slice)
+    tyid := types_ptr.alloc_record(slice, if tbl.extra(id) == 1 { 2 as u32 } else { 0 as u32 })
     fields_vec.destroy()
 
     db.bind_type(slot, tyid)
@@ -416,7 +444,7 @@ synth_member :: fn(eng &Engine, id u32) {
         if target == id_none() {
             printf(
                 "\n[type error] module has no member '{}'\n       --> "
-                .{ db.interner.get(name) }
+                .(db.interner.get(name))
             )
             db.print_loc(id)
             print("")
@@ -457,10 +485,10 @@ synth_member :: fn(eng &Engine, id u32) {
         (kind != type_defs.TyKind.array) {
         printf(
             "\n\033[1;31m[type error]\033[0m member receiver must be a struct or enum, got '"
-            .{}
+            .()
         )
         types_ptr.print_type(lhs_ty)
-        printf("'\n       --> ", .{})
+        printf("'\n       --> ", .())
         db.print_loc(id)
         print("")
         #fall
@@ -514,7 +542,7 @@ synth_member :: fn(eng &Engine, id u32) {
         }
         printf(
             "\n\033[1;31m[type error]\033[0m array type has no field or method named '{}'\n       --> "
-            .{ db.interner.get(name_id) }
+            .(db.interner.get(name_id))
         )
         db.print_loc(id)
         print("")
@@ -654,9 +682,9 @@ synth_member :: fn(eng &Engine, id u32) {
             }
         }
     }
-    printf("\n\033[1;31m[type error]\033[0m type '", .{})
+    printf("\n\033[1;31m[type error]\033[0m type '", .())
     types_ptr.print_type(lhs_ty)
-    printf("' has no field or method named '{}'\n       --> ", .{ db.interner.get(name_id) })
+    printf("' has no field or method named '{}'\n       --> ", .(db.interner.get(name_id)))
     db.print_loc(id)
     print("")
     #fall

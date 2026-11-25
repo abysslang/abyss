@@ -15,11 +15,20 @@ parse_common :: @import("./common")
 parse_ident :: @import("./expr").parse_ident
 parse_block :: @import("./stmt").parse_block
 
+is_plain_ident :: fn(p &parse.Parser, id u32) bool {
+    if p.hir.kind(id) != hir.hir_kind.ident {
+        ret false
+    }
+    sp := parse_common.span_of_hir(p, id)
+    name := p.db.interner.get(p.hir.lhs(id))
+    (sp.end - sp.start) as u64 == name.len
+}
+
 parse_binding :: fn(p &parse.Parser, lhs u32, right_bp u8) u32 {
     k := hir.hir_kind
     sp_lhs := parse_common.span_of_hir(p, lhs)
 
-    if p.hir.kind(lhs) != k.ident {
+    if not is_plain_ident(p, lhs) {
         parse.parse_error_at(p, c"left-hand side of declaration must be an identifier", sp_lhs)
     }
     name := p.hir.lhs(lhs)
@@ -57,7 +66,7 @@ parse_var_decl :: fn(p &parse.Parser, lhs u32, right_bp u8) u32 {
     t := Token
     k := hir.hir_kind
 
-    if p.hir.kind(lhs) != k.ident {
+    if not is_plain_ident(p, lhs) {
         parse.parse_error_at(
             p
             c"left-hand side of declaration must be an identifier"
@@ -123,44 +132,6 @@ parse_var_decl :: fn(p &parse.Parser, lhs u32, right_bp u8) u32 {
     node := p.hir.push(kind, lhs, ty, val)
     parse_common.set_span(p, node, span_merge(sp_lhs, sp_end))
     p.db.set_hir_symbol(node, sym_id)
-    node
-}
-
-parse_destructure :: fn(p &parse.Parser) u32 {
-    t := Token
-    k := hir.hir_kind
-    sp_start := parse.curr_span(p)
-
-    idents := Vec(u32).new()
-
-    first := parse_ident(p)
-    idents.push(first)
-
-    while parse.optional(p, t.comma) {
-        idents.push(parse_ident(p))
-    }
-
-    parse.expect(p, t.colon)
-    parse.expect(p, t.eq)
-
-    rhs := parse_expr(p, 0 as u8)
-    sp_end := parse_common.span_of_hir(p, rhs)
-
-    i: u64 = 0
-    while i < idents.len {
-        id_node := idents.get(i)
-        name_id := p.hir.lhs(id_node)
-        sym_id := p.db.alloc_local_symbol(p.file_id, name_id, id_node)
-        p.env.define(name_id, sym_id)
-        p.db.set_hir_symbol(id_node, sym_id)
-        i = i + 1
-    }
-
-    list_id := parse_common.add_list(p, &idents)
-    idents.destroy()
-
-    node := p.hir.push(k.destructure, list_id, hir.hir_none(), rhs)
-    parse_common.set_span(p, node, span_merge(sp_start, sp_end))
     node
 }
 
@@ -244,7 +215,8 @@ parse_params :: fn(p &parse.Parser) u32 {
             )
             cont
         }
-        is_type_token := (parse.peek(p) == t.amp) or (parse.peek(p) == t.star) or
+        is_type_token := (parse.peek(p) == t.o_paren) or (parse.peek(p) == t.amp) or
+            (parse.peek(p) == t.star) or
             (parse.peek(p) == t.o_bracket) or
             (parse.peek(p) == t.at) or
             (parse.peek(p) == t.kw_fn) or
@@ -270,7 +242,8 @@ parse_params :: fn(p &parse.Parser) u32 {
         reject_ellipsis(p)
 
         next_tk := parse.peek(p)
-        has_explicit_type := (next_tk == t.ident) or (next_tk == t.amp) or (next_tk == t.star) or
+        has_explicit_type := (next_tk == t.o_paren) or (next_tk == t.ident) or (next_tk == t.amp) or
+            (next_tk == t.star) or
             (next_tk == t.o_bracket) or
             (next_tk == t.at) or
             (next_tk == t.kw_fn) or
@@ -467,14 +440,122 @@ parse_extern :: fn(p &parse.Parser, min_bp u8) u32 {
     hir.hir_none()
 }
 
-parse_paren :: fn(p &parse.Parser) u32 {
+tuple_fields :: fn(p &parse.Parser, values Slice(u32)) u32 {
+    names := Vec(u32).with_cap(values.len)
+    index: u32 = 0
+    for value in values {
+        name := p.hir.push(
+            hir.hir_kind.ident
+            p.db.tuple_field_name(index)
+            hir.hir_none()
+            hir.hir_none()
+        )
+        parse_common.set_span(p, name, parse_common.span_of_hir(p, value))
+        names.push(name)
+        index = index + 1
+    }
+    result := parse_common.add_list(p, &names)
+    names.destroy()
+    result
+}
+
+parse_paren_list :: fn(p &parse.Parser, kind hir.HirExprKind, grouped bool) u32 {
     t := Token
-    sp_start := parse.curr_span(p)
-    parse.bump(p)
-    expr := parse_expr(p, 0 as u8)
+    start := parse.curr_span(p)
+    parse.expect(p, t.o_paren)
+    values := Vec(u32).new()
+    while parse.peek(p) != t.c_paren and not parse.is_eof(p) {
+        value := parse_expr(p, 0)
+        if value == hir.hir_none() {
+            parse.parse_error_at(p, c"expected a tuple element", parse.curr_span(p))
+        }
+        if grouped and values.len == 0 and parse.peek(p) == t.c_paren {
+            parse.bump(p)
+            values.destroy()
+            ret parse_common.set_span(p, value, span_merge(start, parse.prev_span(p)))
+        }
+        values.push(value)
+        parse_common.check_separator(
+            p
+            t.c_paren
+            c"expected ',' or newline between tuple elements"
+        )
+    }
     parse.expect(p, t.c_paren)
-    sp_end := parse.prev_span(p)
-    parse_common.set_span(p, expr, span_merge(sp_start, sp_end))
+    list := parse_common.add_list(p, &values)
+    node := if kind == hir.hir_kind.struct_init {
+        fields := tuple_fields(p, values.as_slice())
+        p.hir.push(kind, fields, list, 1)
+    } else {
+        p.hir.push(kind, list, hir.hir_none(), hir.hir_none())
+    }
+    values.destroy()
+    parse_common.set_span(p, node, span_merge(start, parse.prev_span(p)))
+}
+
+parse_paren :: fn(p &parse.Parser) u32 {
+    parse_paren_list(p, hir.hir_kind.tuple_type, true)
+}
+
+parse_tuple :: fn(p &parse.Parser, kind hir.HirExprKind) u32 {
+    start := parse.curr_span(p)
+    parse.bump(p)
+    toplv := p.toplv_sym
+    p.toplv_sym = id_none()
+    node := parse_paren_list(p, kind, false)
+    p.toplv_sym = toplv
+    if kind == hir.hir_kind.nominal_tuple and toplv != id_none() {
+        p.db.set_hir_symbol(node, toplv)
+    }
+    parse_common.set_span(p, node, span_merge(start, parse.prev_span(p)))
+}
+
+bind_tuple_pattern :: fn(p &parse.Parser, pattern u32, seen &HashSet(u32)) {
+    k := hir.hir_kind
+    kind := p.hir.kind(pattern)
+    if kind == k.tuple_type {
+        p.hir.set_kind(pattern, k.empty)
+        for child in p.db.get_list(p.hir.lhs(pattern)) {
+            bind_tuple_pattern(p, child, seen)
+        }
+        ret
+    }
+    if not is_plain_ident(p, pattern) {
+        parse.parse_error_at(
+            p
+            c"tuple pattern requires a name, '_' or a tuple pattern"
+            parse_common.span_of_hir(p, pattern)
+        )
+    }
+    name := p.hir.lhs(pattern)
+    p.hir.set_kind(pattern, k.wildcard)
+    p.db.set_hir_symbol(pattern, id_none())
+    if not p.db.interner.get(name).eq("_") {
+        if not seen.insert(name) {
+            parse.parse_error_at(
+                p
+                c"duplicate binding in tuple pattern"
+                parse_common.span_of_hir(p, pattern)
+            )
+        }
+        sym := p.db.alloc_local_symbol(p.file_id, name, pattern)
+        p.env.define(name, sym)
+        p.db.set_hir_symbol(pattern, sym)
+    }
+}
+
+parse_tuple_binding :: fn(p &parse.Parser, pattern u32) u32 {
+    parse.expect(p, Token.eq)
+    rhs := parse_expr(p, 0 as u8)
+    seen := HashSet(u32).new()
+    bind_tuple_pattern(p, pattern, &seen)
+    seen.destroy()
+    node := p.hir.push(hir.hir_kind.destructure, pattern, hir.hir_none(), rhs)
+    parse_common.set_span(
+        p
+        node
+        span_merge(parse_common.span_of_hir(p, pattern), parse_common.span_of_hir(p, rhs))
+    )
 }
 
 parse_call :: fn(p &parse.Parser, lhs u32, right_bp u8) u32 {
@@ -516,38 +597,6 @@ parse_call :: fn(p &parse.Parser, lhs u32, right_bp u8) u32 {
     parse_common.set_span(p, node, span_merge(sp_lhs, sp_end))
 }
 
-is_tuple_struct :: fn(p &parse.Parser) bool {
-    t := Token
-    scan := p.cursor
-    if (scan >= p.end) or (p.tokens.kind(scan) == t.c_brace) {
-        ret false
-    }
-    if p.tokens.kind(scan) != t.ident {
-        ret true
-    }
-    while scan + 1 < p.end {
-        scan = scan + 1
-        next := p.tokens.kind(scan)
-        if (next == t.colon_colon) or (next == t.colon) {
-            ret false
-        }
-        if (next == t.c_brace) or (next == t.semi) or p.tokens.newline_before(scan) {
-            ret true
-        }
-        if next != t.comma {
-            ret false
-        }
-        scan = scan + 1
-        if scan >= p.end {
-            ret false
-        }
-        if p.tokens.kind(scan) != t.ident {
-            ret true
-        }
-    }
-    false
-}
-
 parse_struct :: fn(p &parse.Parser) u32 {
     t := Token
     k := hir.hir_kind
@@ -567,107 +616,83 @@ parse_struct :: fn(p &parse.Parser) u32 {
     struct_toplv := p.toplv_sym
     p.toplv_sym = id_none()
 
-    if is_tuple_struct(p) {
-        idx: u32 = 0
-        while (parse.peek(p) != t.c_brace) and (not parse.is_eof(p)) {
-            sp_ty := parse.curr_span(p)
-            ty := parse_expr(p, prec().var_def + (1 as u8))
-            if ty == hir.hir_none() {
-                parse.parse_error_at(p, c"expected a tuple field type", sp_ty)
-            }
-            f_name_id := p.db.tuple_field_name(idx)
-            f_ident := p.hir.push(k.ident, f_name_id, hir.hir_none(), hir.hir_none())
-            parse_common.set_span(p, f_ident, sp_ty)
-
-            names.push(f_ident)
-            types.push(ty)
-            idx = idx + 1
-
-            parse_common.check_separator(
-                p
-                t.c_brace
-                c"expected ',' or newline between tuple fields"
-            )
-        }
-    } else {
-        while (parse.peek(p) != t.c_brace) and (not parse.is_eof(p)) {
-            if parse.peek(p) == t.hash {
-                parse_common.ensure_type_node(p, &struct_node, k.struct_, struct_toplv)
-                sp_start := parse.curr_span(p)
+    while (parse.peek(p) != t.c_brace) and (not parse.is_eof(p)) {
+        if parse.peek(p) == t.hash {
+            parse_common.ensure_type_node(p, &struct_node, k.struct_, struct_toplv)
+            sp_start := parse.curr_span(p)
+            parse.bump(p)
+            has_paren := false
+            if parse.peek(p) == t.o_paren {
+                has_paren = true
                 parse.bump(p)
-                has_paren := false
-                if parse.peek(p) == t.o_paren {
-                    has_paren = true
-                    parse.bump(p)
-                }
-                expr := parse_expr(
-                    p
-                    if has_paren {
-                        0 as u8
-                    } else {
-                        prec().assignment + (1 as u8)
-                    }
-                )
+            }
+            expr := parse_expr(
+                p
                 if has_paren {
-                    if not parse.expect(p, t.c_paren) {
-                        parse.parse_error_at(
-                            p
-                            c"expected ')' after macro expression"
-                            parse.curr_span(p)
-                        )
-                    }
+                    0 as u8
+                } else {
+                    prec().assignment + (1 as u8)
                 }
-                splice_node := p.hir.push(k.splice, expr, struct_node, hir.hir_none())
-                parse.capture_splice_scope(p, splice_node)
-                parse_common.set_span(p, splice_node, span_merge(sp_start, parse.prev_span(p)))
-                if struct_toplv != id_none() {
-                    p.db.set_hir_symbol(splice_node, struct_toplv)
-                    p.db.set_method_owner(splice_node, struct_toplv)
+            )
+            if has_paren {
+                if not parse.expect(p, t.c_paren) {
+                    parse.parse_error_at(
+                        p
+                        c"expected ')' after macro expression"
+                        parse.curr_span(p)
+                    )
                 }
-                methods.push(splice_node)
-                parse_common.check_separator(
-                    p
-                    t.c_brace
-                    c"expected ',' or newline after '#' in struct"
-                )
-                cont
             }
-            name := parse_ident(p)
-            if parse.peek(p) == t.colon_colon {
-                parse_common.ensure_type_node(p, &struct_node, k.struct_, struct_toplv)
-                parse_common.parse_method(p, name, &methods)
-                cont
+            splice_node := p.hir.push(k.splice, expr, struct_node, hir.hir_none())
+            parse.capture_splice_scope(p, splice_node)
+            parse_common.set_span(p, splice_node, span_merge(sp_start, parse.prev_span(p)))
+            if struct_toplv != id_none() {
+                p.db.set_hir_symbol(splice_node, struct_toplv)
+                p.db.set_method_owner(splice_node, struct_toplv)
             }
-            field_names.push(name)
-            while parse.optional(p, t.comma) {
-                field_names.push(parse_ident(p))
-            }
-
-            if parse.peek(p) == t.colon {
-                parse.parse_error_at(
-                    p
-                    c"struct fields use 'name Type' without ':'"
-                    parse.curr_span(p)
-                )
-            }
-            ty := parse_expr(p, prec().var_def + (1 as u8))
-            if ty == hir.hir_none() {
-                parse.parse_error_at(p, c"expected a field type", parse.curr_span(p))
-            }
-            f_i: u64 = 0
-            while f_i < field_names.len {
-                names.push(field_names.get(f_i))
-                types.push(ty)
-                f_i = f_i + 1
-            }
-            field_names.clear()
-
+            methods.push(splice_node)
             parse_common.check_separator(
                 p
                 t.c_brace
-                c"expected ',' or newline between struct fields"
+                c"expected ',' or newline after '#' in struct"
+            )
+            cont
+        }
+        name := parse_ident(p)
+        if parse.peek(p) == t.colon_colon {
+            parse_common.ensure_type_node(p, &struct_node, k.struct_, struct_toplv)
+            parse_common.parse_method(p, name, &methods)
+            cont
+        }
+        field_names.push(name)
+        while parse.optional(p, t.comma) {
+            field_names.push(parse_ident(p))
+        }
+
+        if parse.peek(p) == t.colon {
+            parse.parse_error_at(
+                p
+                c"struct fields use 'name Type' without ':'"
+                parse.curr_span(p)
             )
         }
+        ty := parse_expr(p, prec().var_def + (1 as u8))
+        if ty == hir.hir_none() {
+            parse.parse_error_at(p, c"expected a field type", parse.curr_span(p))
+        }
+        f_i: u64 = 0
+        while f_i < field_names.len {
+            names.push(field_names.get(f_i))
+            types.push(ty)
+            f_i = f_i + 1
+        }
+        field_names.clear()
+
+        parse_common.check_separator(
+            p
+            t.c_brace
+            c"expected ',' or newline between struct fields"
+        )
     }
 
     if parse.is_eof(p) and (parse.peek(p) != t.c_brace) {
@@ -708,26 +733,17 @@ parse_struct_init :: fn(p &parse.Parser) u32 {
     fields := Vec(u32).new()
     values := Vec(u32).new()
 
-    tup_idx: u32 = 0
-    while (parse.peek(p) != t.c_brace) and (not parse.is_eof(p)) {
-        is_named := (parse.peek(p) == t.ident) and (parse.peek_n(p, 1) == t.colon)
-        if is_named {
-            f := parse_ident(p)
-            parse.expect(p, t.colon)
-            v := parse_expr(p, prec().var_def + (1 as u8))
-            fields.push(f)
-            values.push(v)
-        } else {
-            sp_v := parse.curr_span(p)
-            v := parse_expr(p, prec().var_def + (1 as u8))
-            f_name_id := p.db.tuple_field_name(tup_idx)
-            f := p.hir.push(k.ident, f_name_id, hir.hir_none(), hir.hir_none())
-            parse_common.set_span(p, f, sp_v)
-            fields.push(f)
-            values.push(v)
-            tup_idx = tup_idx + 1
+    while parse.peek(p) != t.c_brace and not parse.is_eof(p) {
+        f := parse_ident(p)
+        if not parse.expect(p, t.colon) {
+            parse.parse_error_at(p, c"expected 'name: value' in struct literal", parse.curr_span(p))
         }
-
+        v := parse_expr(p, prec().var_def + (1 as u8))
+        if v == hir.hir_none() {
+            parse.parse_error_at(p, c"expected a struct field value", parse.curr_span(p))
+        }
+        fields.push(f)
+        values.push(v)
         parse_common.check_separator(p, t.c_brace, c"expected ',' or newline between struct values")
     }
 
@@ -768,10 +784,18 @@ parse_member :: fn(p &parse.Parser, lhs u32, right_bp u8) u32 {
         while (dot_pos < text.len) and (*(text.ptr + dot_pos) != (46 as u8)) {
             dot_pos = dot_pos + 1
         }
+        if dot_pos >= text.len {
+            parse.parse_error_at(p, c"member name must be an identifier", sp_rhs)
+        }
         part1 := text.sub(0, dot_pos)
         part2 := text.sub(dot_pos + 1, text.len - dot_pos - 1)
-        idx1 := parse_u32(part1).unwrap_or(0)
-        idx2 := parse_u32(part2).unwrap_or(0)
+        p1 := parse_u32(part1)
+        p2 := parse_u32(part2)
+        if p1.is_none() or p2.is_none() {
+            parse.parse_error_at(p, c"member name must be an identifier", sp_rhs)
+        }
+        idx1 := p1.unwrap()
+        idx2 := p2.unwrap()
         f1_id := p.db.tuple_field_name(idx1)
         f1 := p.hir.push(k.ident, f1_id, hir.hir_none(), hir.hir_none())
         parse_common.set_span(p, f1, sp_rhs)

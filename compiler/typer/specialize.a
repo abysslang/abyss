@@ -92,7 +92,7 @@ specialize_nominal_from_creator :: fn(eng &Engine, callee_sym u32, concrete_args
     struct_node := hir.hir_none()
     if body_id != hir.hir_none() {
         b_kind := tbl.kind(body_id)
-        if b_kind == hir.hir_kind.struct_ {
+        if b_kind == hir.hir_kind.struct_ or b_kind == hir.hir_kind.nominal_tuple {
             struct_node = body_id
         } else if b_kind == hir.hir_kind.block {
             items_list := tbl.lhs(body_id)
@@ -111,7 +111,13 @@ specialize_nominal_from_creator :: fn(eng &Engine, callee_sym u32, concrete_args
     }
     bind_creator_params(eng, fn_params_slice, concrete_args.as_slice())
 
-    if (struct_node != hir.hir_none()) and (tbl.kind(struct_node) == hir.hir_kind.struct_) {
+    is_nom_struct := (struct_node != hir.hir_none()) and
+        (
+            (tbl.kind(struct_node) == hir.hir_kind.struct_) or
+                (tbl.kind(struct_node) == hir.hir_kind.nominal_tuple)
+        )
+    if is_nom_struct {
+        is_nom_tuple := tbl.kind(struct_node) == hir.hir_kind.nominal_tuple
         nom_origin := types_ptr.len() | 2147483648
         nom_name := Str.of("struct")
         if (callee_sym & 2147483648) != 0 {
@@ -130,28 +136,30 @@ specialize_nominal_from_creator :: fn(eng &Engine, callee_sym u32, concrete_args
         db.add_mono_nominal(callee_sym, concrete_args.as_slice(), nom_ty)
         types_ptr.record_nominal_creator(nom_origin, callee_sym, concrete_args.as_slice())
 
-        names_list := tbl.lhs(struct_node)
-        types_list := tbl.rhs(struct_node)
-        names := db.get_list(names_list)
-        types_nodes := db.get_list(types_list)
+        names_list := if is_nom_tuple { hir.hir_none() } else { tbl.lhs(struct_node) }
+        types_list := if is_nom_tuple { tbl.lhs(struct_node) } else { tbl.rhs(struct_node) }
+        types_len := db.get_list(types_list).len
 
         fields_vec := Vec(u32).new()
         f_i: u64 = 0
-        while (f_i < names.len) and (f_i < types_nodes.len) {
-            names = db.get_list(names_list)
-            types_nodes = db.get_list(types_list)
-            f_name_node := *(names.ptr + f_i)
-            f_name_id := tbl.lhs(f_name_node)
+        while f_i < types_len {
+            f_name_id := db.tuple_field_name(f_i as u32)
+            if not is_nom_tuple {
+                names := db.get_list(names_list)
+                if f_i >= names.len { break }
+                f_name_node := *(names.ptr + f_i)
+                f_name_id = tbl.lhs(f_name_node)
 
-            chk_i: u64 = 0
-            while chk_i < fields_vec.len {
-                if fields_vec.get(chk_i) == f_name_id {
-                    db.type_error(f_name_node, Str.of("duplicate field name"))
+                chk_i: u64 = 0
+                while chk_i < fields_vec.len {
+                    if fields_vec.get(chk_i) == f_name_id {
+                        db.type_error(f_name_node, Str.of("duplicate field name"))
+                    }
+                    chk_i = chk_i + 2
                 }
-                chk_i = chk_i + 2
             }
 
-            f_ty_node := *(types_nodes.ptr + f_i)
+            f_ty_node := db.get_list(types_list).get(f_i)
             f_ty := eval_type_expr(eng, f_ty_node)
             if (f_ty == type_defs.ty_id_none()) or (f_ty == type_defs.ty_id_unit()) or
                 (f_ty == type_defs.ty_id_type()) {
@@ -170,7 +178,9 @@ specialize_nominal_from_creator :: fn(eng &Engine, callee_sym u32, concrete_args
             f_ptr = fields_vec.ptr_at(0)
         }
         f_slice: Slice(u32) = .{ ptr: f_ptr, len: fields_vec.len }
-        structural_ty := if db.is_extern_struct(struct_node) {
+        structural_ty := if is_nom_tuple {
+            types_ptr.alloc_tuple(f_slice)
+        } else if db.is_extern_struct(struct_node) {
             types_ptr.alloc_extern_struct(f_slice)
         } else {
             types_ptr.alloc_struct(f_slice)
@@ -269,6 +279,26 @@ eval_type_expr :: fn(eng &Engine, id u32) u32 {
             ret db.types.make_union_2(lhs_ty, rhs_ty)
         }
         ret type_defs.ty_id_none()
+    }
+    if curr == k.tuple_type {
+        elem_list := tbl.lhs(id)
+        elem_count := db.get_list(elem_list).len
+        fields_vec := Vec(u32).new()
+        i: u64 = 0
+        while i < elem_count {
+            elem_node := db.get_list(elem_list).get(i)
+            elem_ty := eval_type_expr(eng, elem_node)
+            if (elem_ty == type_defs.ty_id_none()) or (elem_ty == type_defs.ty_id_unit()) or
+                (elem_ty == type_defs.ty_id_type()) {
+                db.type_error(elem_node, Str.of("tuple element requires a runtime value type"))
+            }
+            fields_vec.push(db.tuple_field_name(i as u32))
+            fields_vec.push(elem_ty)
+            i = i + 1
+        }
+        res := db.types.alloc_tuple(fields_vec.as_slice())
+        fields_vec.destroy()
+        ret res
     }
     if curr == k.function {
         params_vec := Vec(u32).new()
@@ -543,7 +573,7 @@ transform_type :: fn(
             fields_vec.push(new_f_ty)
             i = i + 1
         }
-        res := types.alloc_struct(fields_vec.as_slice())
+        res := types.alloc_record(fields_vec.as_slice(), types.record_flags(ty))
         fields_vec.destroy()
         ret res
     }

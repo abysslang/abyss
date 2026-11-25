@@ -11,8 +11,8 @@ print :: @import("std/io").print
 main :: fn() {
     arena := Arena.new(64)
     values: [3]u16 = .[7, 8, 9]
-    text := format.fmt(&arena, "__FMT_STATIC_OPEN__ {} {} __FMT_STATIC_CLOSE__", .{values, true})
-    format.fmt_into(&text, " __FMT_APPEND_STATIC__ {}", .{7 as u16})
+    text := format.fmt(&arena, "__FMT_STATIC_OPEN__ {} {} __FMT_STATIC_CLOSE__", .(values, true))
+    format.fmt_into(&text, " __FMT_APPEND_STATIC__ {}", .(7 as u16))
     print(text)
     arena.destroy()
 }
@@ -82,7 +82,7 @@ main :: fn() {
     i: u32 = 0
     while i < 1000 {
         print(i)
-        printf("v={}\n", .{i})
+        printf("v={}\n", .(i))
         if allocation_balance() != 0 { #fall }
         i = i + 1
     }

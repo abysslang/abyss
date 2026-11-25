@@ -90,7 +90,7 @@ UnifyStorage :: struct {
             ret
         }
         pos := calc_pos(self.error_source, self.error_offset)
-        printf("       --> {}:{}:{}\n", .{ self.error_path, pos.line, pos.col })
+        printf("       --> {}:{}:{}\n", .(self.error_path, pos.line, pos.col))
     }
 
     type_contains_slot :: fn(
@@ -166,9 +166,9 @@ UnifyStorage :: struct {
     }
 
     type_mismatch :: fn(self &Self, types &TypeStorage, expected u32, actual u32) {
-        printf("\n\033[1;31m[type error]\033[0m type mismatch: cannot unify '", .{})
+        printf("\n\033[1;31m[type error]\033[0m type mismatch: cannot unify '", .())
         types.print_type(expected)
-        printf("' with '", .{})
+        printf("' with '", .())
         types.print_type(actual)
         print("'")
         if (types.kind(expected) == type_defs.TyKind.nominal) or
@@ -358,7 +358,7 @@ UnifyStorage :: struct {
             fields_a := types.get_struct_fields(a)
             fields_b := types.get_struct_fields(b)
 
-            if fields_a.len != fields_b.len {
+            if fields_a.len != fields_b.len or types.record_flags(a) != types.record_flags(b) {
                 ret type_defs.ty_id_error()
             }
             local_scratch := Vec(u32).new()
@@ -395,7 +395,7 @@ UnifyStorage :: struct {
             }
             slice: Slice(u32) = .{ ptr: local_scratch.ptr_at(0), len: fields_a.len }
 
-            res := types.alloc_struct(slice)
+            res := types.alloc_record(slice, types.record_flags(a))
             local_scratch.destroy()
             ret res
         }
@@ -592,7 +592,7 @@ UnifyStorage :: struct {
             if changed {
                 slice: Slice(u32) = .{ ptr: local_scratch.ptr_at(0), len: fields.len }
 
-                res = types.alloc_struct(slice)
+                res = types.alloc_record(slice, types.record_flags(tyid))
             }
             local_scratch.destroy()
             ret res

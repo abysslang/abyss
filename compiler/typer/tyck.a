@@ -111,6 +111,9 @@ synth_node :: fn(eng &Engine, id u32) {
     if curr == k.struct_ {
         decl.synth_struct(eng, id)
     }
+    if curr == k.tuple_type or curr == k.nominal_tuple {
+        decl.synth_tuple(eng, id)
+    }
     if curr == k.struct_init {
         decl.synth_struct_init(db, tbl, id)
     }
@@ -250,7 +253,7 @@ synth_splice :: fn(eng &Engine, id u32) {
     tokens.destroy()
 
     if parsed_node == hir.hir_none() {
-        printf("\n[syntax error] macro expansion produced no expression\n       --> ", .{})
+        printf("\n[syntax error] macro expansion produced no expression\n       --> ", .())
         db.print_loc(id)
         print("")
         #fall

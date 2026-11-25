@@ -165,34 +165,37 @@ check_value :: fn(db &Nexus, expr u32, expected u32) {
             ret
         }
         if match_count > 1 {
-            printf("\n\033[1;31m[type error]\033[0m ambiguous coercion into union '", .{})
+            printf("\n\033[1;31m[type error]\033[0m ambiguous coercion into union '", .())
             types.print_type(expected)
-            printf("'\n       --> ", .{})
+            printf("'\n       --> ", .())
             db.print_loc(expr)
             print("")
             #fall
         }
-        printf("\n\033[1;31m[type error]\033[0m type '", .{})
+        printf("\n\033[1;31m[type error]\033[0m type '", .())
         types.print_type(val_ty)
-        printf("' is not a member of union '", .{})
+        printf("' is not a member of union '", .())
         types.print_type(expected)
-        printf("'\n       --> ", .{})
+        printf("'\n       --> ", .())
         db.print_loc(expr)
         print("")
         #fall
     }
     if (tbl.kind(expr) == hir.hir_kind.struct_init) and
         ((kind == type_defs.TyKind.nominal) or (kind == type_defs.TyKind.struct_)) {
+        if (tbl.extra(expr) == 1) != types.is_tuple(expected) {
+            db.type_error(expr, "tuple and struct literals require matching types")
+        }
         target := types.get_struct_fields(expected)
         names := db.get_list(tbl.lhs(expr))
         values := db.get_list(tbl.rhs(expr))
         if (names.len != target.len / 2) or (values.len != names.len) {
             printf(
                 "\n\033[1;31m[type error]\033[0m struct literal has wrong number of fields for '"
-                .{}
+                .()
             )
             types.print_type(expected)
-            printf("'\n       --> ", .{})
+            printf("'\n       --> ", .())
             db.print_loc(expr)
             print("")
             #fall
@@ -213,10 +216,10 @@ check_value :: fn(db &Nexus, expr u32, expected u32) {
             if field_ty == type_defs.ty_id_none() {
                 printf(
                     "\n\033[1;31m[type error]\033[0m unexpected field '{}' in struct literal for '"
-                    .{ db.interner.get(name_id) }
+                    .(db.interner.get(name_id))
                 )
                 types.print_type(expected)
-                printf("'\n       --> ", .{})
+                printf("'\n       --> ", .())
                 db.print_loc(*(names.ptr + i))
                 print("")
                 #fall
@@ -279,9 +282,9 @@ check_bool_operand :: fn(db &Nexus, id u32, desc &u8) {
     if slot != slot_none() {
         ty := db.unify.resolve_type_deep(&db.types, slot)
         if (ty != type_defs.ty_id_none()) and (ty != type_defs.ty_id_bool()) {
-            printf("\n\033[1;31m[type error]\033[0m {} must be bool, got '", .{ desc })
+            printf("\n\033[1;31m[type error]\033[0m {} must be bool, got '", .(desc))
             db.types.print_type(ty)
-            printf("'\n       --> ", .{})
+            printf("'\n       --> ", .())
             db.print_loc(id)
             print("")
             #fall

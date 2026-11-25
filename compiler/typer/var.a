@@ -30,7 +30,7 @@ synth_ident :: fn(eng &Engine, id u32) {
             (types_ptr.kind(self_ty) != types.TyKind.enum_) {
             printf(
                 "\n\033[1;31m[type error]\033[0m Self requires a named struct or enum method\n       --> "
-                .{}
+                .()
             )
             db.print_loc(id)
             print("")
@@ -252,7 +252,7 @@ synth_var_or_binding :: fn(eng &Engine, id u32) {
         if type_value == types.ty_id_none() {
             printf(
                 "\n\033[1;31m[type error]\033[0m declaration annotation is not a resolved type\n       --> "
-                .{}
+                .()
             )
             db.print_loc(type_id)
             print("")
@@ -275,7 +275,7 @@ synth_var_or_binding :: fn(eng &Engine, id u32) {
             if (kind != types.TyKind.struct_) and (kind != types.TyKind.nominal) {
                 printf(
                     "\n\033[1;31m[type error]\033[0m struct declaration could not be resolved\n       --> "
-                    .{}
+                    .()
                 )
                 db.print_loc(actual_val)
                 print("")
@@ -283,20 +283,12 @@ synth_var_or_binding :: fn(eng &Engine, id u32) {
             }
             named := structural
             if kind == types.TyKind.struct_ {
-                is_tuple := false
-                fields := types_ptr.get_struct_fields(structural)
-                if fields.len > 0 {
-                    first_name_id := *(fields.ptr + 0)
-                    is_tuple = db.is_tuple_name(first_name_id)
-                }
-                if not is_tuple {
-                    name_id := tbl.lhs(ident_id)
-                    name := db.interner.get(name_id)
-                    named = types_ptr.alloc_nominal(structural, name, id)
-                    db.set_const_type(actual_val, named)
-                    if actual_val != value_id {
-                        db.set_const_type(value_id, named)
-                    }
+                name_id := tbl.lhs(ident_id)
+                name := db.interner.get(name_id)
+                named = types_ptr.alloc_nominal(structural, name, id)
+                db.set_const_type(actual_val, named)
+                if actual_val != value_id {
+                    db.set_const_type(value_id, named)
                 }
             }
             db.set_const_type(ident_id, named)
@@ -317,7 +309,7 @@ synth_var_or_binding :: fn(eng &Engine, id u32) {
                 if type_val == types.ty_id_none() {
                     printf(
                         "\n\033[1;31m[type error]\033[0m type value cannot be resolved\n       --> "
-                        .{}
+                        .()
                     )
                     db.print_loc(value_id)
                     print("")
@@ -394,82 +386,38 @@ synth_arg :: fn(db &Nexus, tbl &hir.HirTable, id u32) {
     }
 }
 
+synth_pattern :: fn(db &Nexus, pattern u32, ty u32) {
+    if db.hir.kind(pattern) != hir.hir_kind.empty {
+        if db.get_hir_symbol(pattern) != id_none() {
+            db.bind_type(db.ensure_slot(pattern), ty)
+        }
+        ret
+    }
+    synth_pattern_items(db, db.hir.lhs(pattern), ty, pattern)
+}
+
+synth_pattern_items :: fn(db &Nexus, list u32, ty u32, origin u32) {
+    if not db.types.is_tuple(ty) {
+        db.type_error(origin, "expected tuple on right-hand side of destructuring")
+    }
+    count := db.get_list(list).len
+    if count != db.types.get_struct_fields_len(ty) as u64 {
+        db.type_error(origin, "mismatched number of elements in tuple destructuring")
+    }
+    index: u64 = 0
+    while index < count {
+        child := db.get_list(list).get(index)
+        field := db.types.get_struct_fields(ty).get(index * 2 + 1)
+        synth_pattern(db, child, field)
+        index = index + 1
+    }
+}
+
 synth_destructure :: fn(eng &Engine, id u32) {
-    db := &(*eng).nexus
-    tbl := &(*db).hir
-    unify_ptr := &(*db).unify
-    types_ptr := &(*db).types
-
-    rhs_node := (tbl).extra(id)
-    synth_node(eng, rhs_node)
-
-    rhs_slot := (unify_ptr).get_slot(rhs_node)
-    rhs_ty := types.ty_id_none()
-    if rhs_slot != slot_none() {
-        rhs_ty = (unify_ptr).resolve_type_deep(types_ptr, rhs_slot)
-    }
-    if rhs_ty == types.ty_id_none() {
-        rhs_ty = db.get_node_type(rhs_node)
-    }
-    t := rhs_ty
-    while (*types_ptr).kind(t) == types.TyKind.nominal {
-        t = (*types_ptr).nominal_base(t)
-    }
-
-    if (*types_ptr).kind(t) != types.TyKind.struct_ {
-        printf(
-            "\n\033[1;31m[type error]\033[0m expected tuple on right-hand side of destructuring\n       --> "
-            .{}
-        )
-        db.print_loc(rhs_node)
-        print("")
-        #fall
-    }
-    fields := (*types_ptr).get_struct_fields(t)
-    field_count := fields.len / 2
-
-    idents_list := (tbl).lhs(id)
-    idents := db.get_list(idents_list)
-
-    if idents.len != field_count {
-        printf(
-            "\n\033[1;31m[type error]\033[0m mismatched number of elements in tuple destructuring\n       --> "
-            .{}
-        )
-        db.print_loc(id)
-        print("")
-        #fall
-    }
-    i: u64 = 0
-    while i < idents.len {
-        ident_node := *(idents.ptr + i)
-        f_name_id := db.tuple_field_name(i as u32)
-
-        f_ty := types.ty_id_none()
-        f_i: u64 = 0
-        while f_i < field_count {
-            fn_id := *(fields.ptr + (f_i * 2))
-            if fn_id == f_name_id {
-                f_ty = *(fields.ptr + (f_i * 2) + 1)
-                break
-            }
-            f_i = f_i + 1
-        }
-
-        if f_ty == types.ty_id_none() {
-            f_ty = *(fields.ptr + (i * 2) + 1)
-        }
-        ident_slot := (unify_ptr).get_slot(ident_node)
-        if ident_slot == slot_none() {
-            ident_slot = (unify_ptr).new_slot(ident_node)
-        }
-        (unify_ptr).bind_type(types_ptr, ident_slot, f_ty)
-        db.set_const_type(ident_node, f_ty)
-
-        i = i + 1
-    }
-
-    destruct_slot := (unify_ptr).new_slot(id)
-    (unify_ptr).bind_type(types_ptr, destruct_slot, types.ty_id_unit())
+    db := &eng.nexus
+    rhs := db.hir.extra(id)
+    ty := db.get_node_type(rhs)
+    synth_pattern(db, db.hir.lhs(id), ty)
+    db.bind_type(db.ensure_slot(id), types.ty_id_unit())
     db.set_const_type(id, types.ty_id_unit())
 }

@@ -184,7 +184,7 @@ CCodeGen :: struct {
     reset_locals :: fn(self &Self) {}
 
     declare_function :: fn(self &Self, fn_name, ret_type, params Str) {
-        text.fmt_into(&self.func_decls, "{} {}({});\n", .{ ret_type, fn_name, params })
+        text.fmt_into(&self.func_decls, "{} {}({});\n", .(ret_type, fn_name, params))
     }
 
     declare_foreign :: fn(self &Self, fn_name, ret_type, params, module, name Str) {
@@ -196,7 +196,7 @@ CCodeGen :: struct {
             text.fmt_into(
                 &self.func_decls
                 "__attribute__((import_module(\"{}\"), import_name(\"{}\"))) "
-                .{ module, name }
+                .(module, name)
             )
         } else if self.target_os == Os.darwin {
             alias := if name.eq("opendir") { "__DARWIN_ALIAS_I" } else if name.eq("readdir") {
@@ -206,7 +206,7 @@ CCodeGen :: struct {
                 text.fmt_into(
                     &self.func_decls
                     "{} {}({}) {}({});\n"
-                    .{ ret_type, fn_name, params, alias, name }
+                    .(ret_type, fn_name, params, alias, name)
                 )
                 ret
             }
@@ -227,7 +227,7 @@ CCodeGen :: struct {
         text.fmt_into(
             &self.struct_forward_decls
             "typedef {} {};\n"
-            .{ name, TypeStorage.name(arena, id) }
+            .(name, TypeStorage.name(arena, id))
         )
     }
 
@@ -243,7 +243,7 @@ CCodeGen :: struct {
         }
         self.declare_function(fn_name, ret_type, params)
         self.temp_count = 0
-        text.fmt_into(&self.code, "{} {}({}) {{\n", .{ ret_type, fn_name, params })
+        text.fmt_into(&self.code, "{} {}({}) {{\n", .(ret_type, fn_name, params))
         self.indent = self.indent + 1
     }
 
@@ -271,7 +271,7 @@ CCodeGen :: struct {
     }
 
     declare_global :: fn(self &Self, sym, ty u32, name, type_name Str) {
-        text.fmt_into(&self.global_decls, "static {} {};\n", .{ type_name, name })
+        text.fmt_into(&self.global_decls, "static {} {};\n", .(type_name, name))
     }
 
     begin_globals :: fn(self &Self) {
@@ -279,7 +279,7 @@ CCodeGen :: struct {
     }
 
     initialize_global :: fn(self &Self, name, ty, value Str) {
-        text.fmt_into(&self.global_defs, "static {} {} = {};\n", .{ ty, name, value })
+        text.fmt_into(&self.global_defs, "static {} {} = {};\n", .(ty, name, value))
     }
 
     end_globals :: fn(self &Self) {
@@ -289,7 +289,7 @@ CCodeGen :: struct {
     create_variable :: fn(self &Self, name, ty, init_val Str, has_init bool) {
         self.indent_line()
         value := if has_init { init_val } else { "{0}" }
-        text.fmt_into(&self.code, "{} {} = {};\n", .{ ty, name, value })
+        text.fmt_into(&self.code, "{} {} = {};\n", .(ty, name, value))
     }
 
     new_temp :: fn(self &Self, arena &Arena, ty Str) Str {
@@ -302,13 +302,13 @@ CCodeGen :: struct {
     expr :: fn(self &Self, e Str) {
         if e.len == 0 { ret }
         self.indent_line()
-        text.fmt_into(&self.code, "{};\n", .{ e })
+        text.fmt_into(&self.code, "{};\n", .(e))
     }
 
     gen_return :: fn(self &Self, val Str, has_val bool) {
         self.indent_line()
         if has_val and val.len > 0 {
-            text.fmt_into(&self.code, "return {};\n", .{ val })
+            text.fmt_into(&self.code, "return {};\n", .(val))
         } else {
             self.code.push_str("return;\n")
         }
@@ -316,7 +316,7 @@ CCodeGen :: struct {
 
     start_if :: fn(self &Self, cond Str) {
         self.indent_line()
-        text.fmt_into(&self.code, "if ({}) {{\n", .{ cond })
+        text.fmt_into(&self.code, "if ({}) {{\n", .(cond))
         self.indent = self.indent + 1
     }
 
@@ -331,7 +331,7 @@ CCodeGen :: struct {
 
     start_while :: fn(self &Self, cond Str) {
         self.indent_line()
-        text.fmt_into(&self.code, "while ({}) {{\n", .{ cond })
+        text.fmt_into(&self.code, "while ({}) {{\n", .(cond))
         self.indent = self.indent + 1
     }
 
@@ -365,12 +365,12 @@ CCodeGen :: struct {
 
     emit_label :: fn(self &Self, label Str) {
         self.indent_line()
-        text.fmt_into(&self.code, "{}:;\n", .{ label })
+        text.fmt_into(&self.code, "{}:;\n", .(label))
     }
 
     emit_goto :: fn(self &Self, label Str) {
         self.indent_line()
-        text.fmt_into(&self.code, "goto {};\n", .{ label })
+        text.fmt_into(&self.code, "goto {};\n", .(label))
     }
 
     emit_break :: fn(self &Self, arena &Arena) {
@@ -434,8 +434,8 @@ CCodeGen :: struct {
     }
 
     start_struct :: fn(self &Self, name Str) {
-        text.fmt_into(&self.struct_forward_decls, "typedef struct {} {};\n", .{ name, name })
-        text.fmt_into(&self.struct_defs, "struct {} {{\n", .{ name })
+        text.fmt_into(&self.struct_forward_decls, "typedef struct {} {};\n", .(name, name))
+        text.fmt_into(&self.struct_defs, "struct {} {{\n", .(name))
     }
 
     define_struct :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32) {
@@ -445,14 +445,14 @@ CCodeGen :: struct {
         }
         for field in fields.chunks(2) {
             ty := self.type_str(types, arena, field.get(1))
-            text.fmt_into(&self.struct_defs, "    {} _f{};\n", .{ ty, field.get(0) })
+            text.fmt_into(&self.struct_defs, "    {} _f{};\n", .(ty, field.get(0)))
         }
     }
 
     define_func_type :: fn(self &Self, types &TypeStorage, arena &Arena, ty_id u32, name Str) {
         ret_type := self.type_str(types, arena, types.func_return(ty_id))
         dst := &self.struct_decls
-        text.fmt_into(dst, "typedef {} (*{})(", .{ ret_type, name })
+        text.fmt_into(dst, "typedef {} (*{})(", .(ret_type, name))
         params := types.func_params(ty_id)
         if params.len == 0 {
             dst.push_str("void")
@@ -473,7 +473,7 @@ CCodeGen :: struct {
         index: u32 = 0
         for member in types.union_members(ty_id) {
             ty := self.type_str(types, arena, member)
-            text.fmt_into(dst, "        {} _v{};\n", .{ ty, index })
+            text.fmt_into(dst, "        {} _v{};\n", .(ty, index))
             index = index + 1
         }
         dst.push_str("    } val;\n")
@@ -493,7 +493,7 @@ CCodeGen :: struct {
             }
             enum_ {
                 backing := self.type_str(types, arena, types.enum_backing(ty_id))
-                text.fmt_into(&self.struct_decls, "typedef {} {};\n", .{ backing, name })
+                text.fmt_into(&self.struct_decls, "typedef {} {};\n", .(backing, name))
                 ret
             }
             struct_, nominal, union_, array {}
@@ -508,7 +508,7 @@ CCodeGen :: struct {
                 text.fmt_into(
                     &self.struct_defs
                     "    {} _v[{}];\n"
-                    .{ ty, types.get_array_len(ty_id) }
+                    .(ty, types.get_array_len(ty_id))
                 )
             }
             else {}
@@ -542,7 +542,7 @@ typedef uint16_t _Float16;
     finish :: fn(self &Self) Str {
         headers := String.new(self.arena)
         for header in self.headers.as_slice() {
-            text.fmt_into(&headers, "#include <{}>\n", .{ header })
+            text.fmt_into(&headers, "#include <{}>\n", .(header))
         }
         parts := .[
             self.c_header()
@@ -571,7 +571,7 @@ typedef uint16_t _Float16;
             }
             prefix := if self.main_returns_status { "return " } else { "" }
             suffix := if self.main_returns_status { "" } else { "return 0; " }
-            text.fmt_into(&out, "{}sym_{}(); {}}}\n", .{ prefix, self.main_sym, suffix })
+            text.fmt_into(&out, "{}sym_{}(); {}}}\n", .(prefix, self.main_sym, suffix))
         }
         out.as_str()
     }
@@ -957,7 +957,7 @@ typedef uint16_t _Float16;
         body := text.fmt(
             arena
             " .tag = {}, .val = {{ ._v{} = {} }} "
-            .{ tag, tag, value }
+            .(tag, tag, value)
         ).as_str()
         self.expr_struct_init(arena, union_name, body)
     }
