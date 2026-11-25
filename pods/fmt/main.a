@@ -51,7 +51,7 @@ main :: fn() i32 {
         i = i + 1
     }
     arena.destroy()
-    printf("formatted {} files\n", .{ total })
+    printf("formatted {} files\n", .(total))
     if failed { ret 1 }
     0
 }

@@ -24,11 +24,10 @@ Formatter :: struct {
             }
             var_decl_stmt { self.format_var_decl(node, level) }
             destructure_stmt {
-                last := node.child_count() - 1
-                self.format_joined(node.children.sub(0, last), level)
+                self.format_node(node.child(0), level)
                 self.layout.space_and_text(":=")
                 self.layout.spaces(1)
-                self.format_node(node.child(last), level)
+                self.format_node(node.child(1), level)
             }
             extern_decl {
                 self.layout.push_str("extern ")
@@ -137,7 +136,13 @@ Formatter :: struct {
                 self.format_node(node.child(0), level)
             }
             array_lit { self.format_list(node.children, ".[", "]", 1, level, node.multiline) }
-            paren_expr { self.format_list(node.children, "(", ")", 0, level, node.multiline) }
+            paren_expr {
+                if node.text.eq("(,") {
+                    self.format_list(node.children, "(", ",)", 0, level, false)
+                } else {
+                    self.format_list(node.children, node.text, ")", 0, level, node.multiline)
+                }
+            }
             ret_expr {
                 self.layout.push_str("ret")
                 if node.child_count() > 0 {
@@ -345,7 +350,7 @@ Formatter :: struct {
             "}"
             1
             level
-            node.multiline or not node.text.eq("tuple")
+            true
         )
     }
 

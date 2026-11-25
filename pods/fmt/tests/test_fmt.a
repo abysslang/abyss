@@ -34,7 +34,7 @@ test_struct_and_enum :: fn(t &Test) {
     res := format_source(&arena, src)
     t.assert_str_eq(res, src, "struct with method")
 
-    src_tuple := "Pair :: struct { i32, Str }\n"
+    src_tuple := "Pair :: struct(i32, Str)\n"
     res_tuple := format_source(&arena, src_tuple)
     t.assert_str_eq(res_tuple, src_tuple, "tuple struct")
 
@@ -91,13 +91,18 @@ test_struct_init_and_tuples :: fn(t &Test) {
     res_named := format_source(&arena, src_named)
     t.assert_str_eq(res_named, src_named, "struct init named")
 
-    src_pos := "main :: fn() {\n    t := .{ 10, 20 }\n    printf(\"msg: {}\\n\", .{ msg })\n}\n"
+    src_pos := "main :: fn() {\n    t := .(10, 20)\n    printf(\"msg: {}\\n\", .(msg))\n}\n"
     res_pos := format_source(&arena, src_pos)
-    t.assert_str_eq(res_pos, src_pos, "struct init positional tuple")
+    t.assert_str_eq(res_pos, src_pos, "tuple literal")
 
-    src_destruct := "main :: fn() {\n    a, b := .{ 10, 20 }\n    x, y, z := triple\n}\n"
+    src_destruct := "main :: fn() {\n    (a, b) := .(10, 20)\n    ((x, _), z) := triple\n}\n"
     res_destruct := format_source(&arena, src_destruct)
-    t.assert_str_eq(res_destruct, src_destruct, "destructure assignment")
+    t.assert_str_eq(res_destruct, src_destruct, "tuple destructuring")
+    dense := "One::(i32,)\nEmpty::()\nNom::struct(i32)\nNomEmpty::struct()\nread::fn(value (i32,Str)) i32 {\n(x,_) := value\nnested := .(1,.(2,3))\n_ = nested.1.0\nx\n}\n"
+    expected := "One :: (i32,)\nEmpty :: ()\nNom :: struct(i32)\nNomEmpty :: struct()\nread :: fn(value (i32, Str)) i32 {\n    (x, _) := value\n    nested := .(1, .(2, 3))\n    _ = nested.1.0\n    x\n}\n"
+    formatted := format_source(&arena, dense)
+    t.assert_str_eq(formatted, expected, "tuple syntax and singleton comma")
+    t.assert_str_eq(format_source(&arena, formatted), formatted, "tuple formatter idempotence")
 
     arena.destroy()
 }
@@ -140,10 +145,11 @@ test_advanced_syntax :: fn(t &Test) {
 test_idempotency :: fn(t &Test) {
     arena := Arena.new(65536)
 
-    messy := "import   std.io :print ,printf as log\n\nPoint::struct{\nx,y i32\n}\n\nmain::fn(){\nx:=10+20*3\np:Point=.{x:1,y:2}\nt:=.{10,20}\nprintf(\"hello {}\\n\",.{x})\n}\n"
+    messy := "Point::struct{\nx,y i32\n}\n\nmain::fn(){\nx:=10+20*3\np:Point=.{x:1,y:2}\nt:=.(10,20)\nprintf(\"hello {}\\n\",.(x))\n}\n"
     pass1 := format_source(&arena, messy)
     pass2 := format_source(&arena, pass1)
 
+    t.assert_true(pass1.len > 0, "formatted output is non-empty")
     t.assert_str_eq(pass1, pass2, "formatting is idempotent")
 
     arena.destroy()

@@ -72,7 +72,7 @@ format_path_with_width :: fn(arena &Arena, path Str, width u64) PathResult {
         if format_file_with_width(file, width) {
             count = count + 1
         } else {
-            printf("error: failed to format {}\n", .{ file })
+            printf("error: failed to format {}\n", .(file))
             failed = true
         }
     }

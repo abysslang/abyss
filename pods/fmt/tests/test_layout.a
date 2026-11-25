@@ -88,18 +88,18 @@ make :: fn( -- args
 }
 
 test_wrapping :: fn(t &Test) {
-    input := `Value :: struct { i32, i64, SomeLongType }
+    input := `Value :: struct(i32, i64, SomeLongType)
 compute :: fn(first_argument i32, second_argument i32) i32 {
     result := use(123, .{ x: 111111, y: 222222 }, .[ 11111, 22222, 33333 ])
     sum := first_argument + second_argument + 1000000000
     ret 0
 }
 `
-    expected := `Value :: struct {
+    expected := `Value :: struct(
     i32
     i64
     SomeLongType
-}
+)
 compute :: fn(
     first_argument i32
     second_argument i32
@@ -191,8 +191,8 @@ test_token_boundaries :: fn(t &Test) {
         "comments and raw strings keep their lexical boundaries"
     )
 
-    code := "Array :: [2 * 3]i32\ncallback :: fn(pkg.Item, pkg.Result) i32\nvalue := .{1,-2,&x,*y}\n"
-    formatted := "Array :: [2 * 3]i32\ncallback :: fn(\n    pkg.Item\n    pkg.Result\n) i32\nvalue := .{\n    1\n    -2\n    &x\n    *y\n}\n"
+    code := "Array :: [2 * 3]i32\ncallback :: fn(pkg.Item, pkg.Result) i32\nvalue := .(1,-2,&x,*y)\n"
+    formatted := "Array :: [2 * 3]i32\ncallback :: fn(\n    pkg.Item\n    pkg.Result\n) i32\nvalue := .(\n    1\n    -2\n    &x\n    *y\n)\n"
     assert_layout(t, code, formatted, 22, "breaks keep separate arguments distinct from operators")
 }
 

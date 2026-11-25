@@ -177,34 +177,9 @@ CstParser :: struct {
         true
     }
 
-    is_destructure :: fn(self &Self) bool {
-        t0 := self.peek_non_ws(0)
-        t1 := self.peek_non_ws(1)
-        if (t0.kind != TokenKind.ident) or (t1.kind != TokenKind.comma) {
-            ret false
-        }
-        i: u64 = 2
-        while true {
-            tok := self.peek_non_ws(i)
-            if tok.kind != TokenKind.ident {
-                ret false
-            }
-            next := self.peek_non_ws(i + 1)
-            if next.kind == TokenKind.comma {
-                i = i + 2
-                cont
-            }
-            if next.kind == TokenKind.colon {
-                after_colon := self.peek_non_ws(i + 2)
-                ret after_colon.kind == TokenKind.eq
-            }
-            ret false
-        }
-        false
-    }
-
     is_type_token :: fn(self &Self, k TokenKind) bool {
-        (k == TokenKind.amp) or (k == TokenKind.star) or (k == TokenKind.o_bracket) or
+        (k == TokenKind.o_paren) or (k == TokenKind.amp) or (k == TokenKind.star) or
+            (k == TokenKind.o_bracket) or
             (k == TokenKind.at) or
             (k == TokenKind.kw_fn) or
             (k == TokenKind.kw_struct) or
@@ -225,31 +200,6 @@ CstParser :: struct {
             idx = idx + 1
         }
         Token.new(TokenKind.eof, Str.empty(), 0, 0)
-    }
-
-    is_tuple_struct :: fn(self &Self) bool {
-        idx := self.cursor
-        while self.tokens.get(idx).is_trivia() { idx = idx + 1 }
-        kind := self.tokens.get(idx).kind
-        if kind == TokenKind.c_brace or kind == TokenKind.eof or kind == TokenKind.hash {
-            ret false
-        }
-        while kind == TokenKind.ident {
-            idx = idx + 1
-            while self.tokens.get(idx).is_whitespace() { idx = idx + 1 }
-            kind = self.tokens.get(idx).kind
-            if kind == TokenKind.comment or kind == TokenKind.newline or
-                kind == TokenKind.c_brace or
-                kind == TokenKind.eof {
-                ret true
-            }
-            if kind != TokenKind.comma { ret false }
-            idx = idx + 1
-            while self.tokens.get(idx).is_trivia() { idx = idx + 1 }
-            kind = self.tokens.get(idx).kind
-            if kind == TokenKind.eof { ret true }
-        }
-        true
     }
 
     parse_binding :: fn(self &Self) &CstNode {
@@ -290,24 +240,6 @@ CstParser :: struct {
         node
     }
 
-    parse_destructure :: fn(self &Self) &CstNode {
-        node := cst_new(self.arena, CstKind.destructure_stmt, Str.of(":="))
-        first := self.bump()
-        node.add_child(cst_leaf(self.arena, CstKind.ident, first.text))
-
-        while self.consume_if(TokenKind.comma) {
-            ident_tok := self.bump()
-            node.add_child(cst_leaf(self.arena, CstKind.ident, ident_tok.text))
-        }
-
-        self.consume_if(TokenKind.colon)
-        self.consume_if(TokenKind.eq)
-
-        rhs := self.parse_expr(0 as u8)
-        node.add_child(rhs)
-        node
-    }
-
     parse_block :: fn(self &Self) &CstNode {
         self.skip_ws_and_nl()
         self.expect(TokenKind.o_brace)
@@ -329,9 +261,6 @@ CstParser :: struct {
     parse_stmt :: fn(self &Self) &CstNode {
         if self.is_binding() {
             ret self.parse_binding()
-        }
-        if self.is_destructure() {
-            ret self.parse_destructure()
         }
         if self.is_var_decl() {
             ret self.parse_var_decl()
@@ -420,8 +349,7 @@ CstParser :: struct {
                 (
                     k == TokenKind.ident and
                         (
-                            next == TokenKind.dot or next == TokenKind.o_paren or
-                                next == TokenKind.pipe
+                            next == TokenKind.dot or next == TokenKind.pipe
                         )
                 ) {
                 self.flush_anonymous_params(node, &pending)
@@ -469,21 +397,15 @@ CstParser :: struct {
 
     parse_struct :: fn(self &Self) &CstNode {
         self.bump()
+        if self.consume_if(TokenKind.o_paren) {
+            node := cst_new(self.arena, CstKind.paren_expr, "struct(")
+            self.parse_arguments(node, TokenKind.c_paren)
+            ret node
+        }
         struct_node := cst_new(self.arena, CstKind.struct_def, Str.empty())
 
         if not self.consume_if(TokenKind.o_brace) {
             self.failed = true
-            ret struct_node
-        }
-        if self.is_tuple_struct() {
-            struct_node.text = Str.of("tuple")
-            while not self.is_eof() {
-                self.read_trivia(struct_node, TokenKind.c_brace)
-                if self.is_eof() or self.peek() == TokenKind.c_brace { break }
-                struct_node.add_child(self.parse_type())
-                self.list_separator(TokenKind.c_brace)
-            }
-            self.expect(TokenKind.c_brace)
             ret struct_node
         }
         while not self.is_eof() {
@@ -727,6 +649,20 @@ CstParser :: struct {
                     break
                 }
             }
+            if min_bp <= 15 and lhs.kind == CstKind.paren_expr and
+                self.peek() == TokenKind.colon and
+                self.peek_non_ws(1).kind == TokenKind.eq {
+                self.bump()
+                self.expect(TokenKind.eq)
+                lhs = cst_binary(
+                    self.arena
+                    CstKind.destructure_stmt
+                    ":="
+                    lhs
+                    self.parse_expr(0)
+                )
+                break
+            }
             bp := self.infix_binding_power(self.peek())
             if bp == 0 as u8 or bp < min_bp {
                 self.cursor = checkpoint
@@ -876,10 +812,17 @@ CstParser :: struct {
         }
         if k == TokenKind.o_paren {
             self.bump()
-            node := cst_new(self.arena, CstKind.paren_expr, "")
-            self.read_trivia(node, TokenKind.c_paren)
-            node.add_child(self.parse_expr(0 as u8))
-            self.read_trivia(node, TokenKind.c_paren)
+            node := cst_new(self.arena, CstKind.paren_expr, "(")
+            count: u32 = 0
+            while not self.is_eof() {
+                self.read_trivia(node, TokenKind.c_paren)
+                if self.is_eof() or self.peek() == TokenKind.c_paren { break }
+                node.add_child(self.parse_expr(0))
+                count = count + 1
+                if count == 1 and self.peek() == TokenKind.comma { node.text = "(," }
+                self.list_separator(TokenKind.c_paren)
+            }
+            if count != 1 { node.text = "(" }
             self.expect(TokenKind.c_paren)
             ret node
         }
@@ -894,6 +837,13 @@ CstParser :: struct {
         }
         if k == TokenKind.dot {
             next := self.peek_non_ws(1)
+            if next.kind == TokenKind.o_paren {
+                self.bump()
+                self.bump()
+                node := cst_new(self.arena, CstKind.paren_expr, ".(")
+                self.parse_arguments(node, TokenKind.c_paren)
+                ret node
+            }
             if next.kind == TokenKind.o_brace {
                 self.bump()
                 self.bump()
@@ -901,21 +851,12 @@ CstParser :: struct {
                 while not self.is_eof() {
                     self.read_trivia(init_node, TokenKind.c_brace)
                     if self.is_eof() or self.peek() == TokenKind.c_brace { break }
-                    is_named := (self.peek() == TokenKind.ident) and
-                        (self.peek_non_ws(1).kind == TokenKind.colon)
-                    if is_named {
-                        field_name := self.bump()
-                        self.bump()
-                        field_val := self.parse_type()
-                        f := cst_new(self.arena, CstKind.struct_init_field, field_name.text)
-                        f.add_child(field_val)
-                        init_node.add_child(f)
-                    } else {
-                        field_val := self.parse_type()
-                        f := cst_new(self.arena, CstKind.struct_init_field, Str.empty())
-                        f.add_child(field_val)
-                        init_node.add_child(f)
-                    }
+                    field_name := self.bump()
+                    if field_name.kind != TokenKind.ident { self.failed = true }
+                    self.expect(TokenKind.colon)
+                    field := cst_new(self.arena, CstKind.struct_init_field, field_name.text)
+                    field.add_child(self.parse_type())
+                    init_node.add_child(field)
                     self.list_separator(TokenKind.c_brace)
                 }
                 self.expect(TokenKind.c_brace)
@@ -1028,7 +969,9 @@ CstParser :: struct {
     parse_infix :: fn(self &Self, op Token, lhs &CstNode, bp u8) &CstNode {
         if op.kind == TokenKind.dot {
             k := self.peek()
-            if k != TokenKind.ident and k != TokenKind.lit_int { self.failed = true }
+            if k != TokenKind.ident and k != TokenKind.lit_int and k != TokenKind.lit_float {
+                self.failed = true
+            }
             member_tok := self.bump()
             node := cst_new(self.arena, CstKind.member_expr, member_tok.text)
             node.add_child(lhs)

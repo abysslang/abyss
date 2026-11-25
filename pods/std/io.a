@@ -12,30 +12,22 @@ write_byte :: fn(value u8) {
     write_str(Str.new(&byte, 1))
 }
 
-print_body :: fn(newline bool) Str {
-    if newline {
-        ret `{
-            arena := Arena.new(1024)
-            text := fmt(&arena, "{}", .{value})
-            write_str(text.as_str())
-            arena.destroy()
-            write_byte('\n')
-        }`
-    }
-    `{
-        arena := Arena.new(1024)
-        text := fmt(&arena, "{}", .{value})
-        write_str(text.as_str())
-        arena.destroy()
-    }`
+write_value :: fn(T type, value T) {
+    arena := Arena.new(1024)
+    text := fmt(&arena, "{}", .(value))
+    write_str(text.as_str())
+    arena.destroy()
 }
 
 write :: fn(T type, value T) {
-    #print_body(false)
+    #`write_value(value)`
 }
 
 print :: fn(T type, value T) {
-    #print_body(true)
+    #`{
+        write_value(value)
+        write_byte('\n')
+    }`
 }
 
 print_codepoint :: fn(cp u32) {
