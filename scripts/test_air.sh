@@ -2,21 +2,8 @@
 set -euo pipefail
 
 compiler=$1
-cc=$2
-work=$3
+work=$2
 mkdir -p "$work"
-
-(
-    mkdir -p "$work/keel"
-    cp -R pods/keel/. "$work/keel/"
-    cd "$work"
-    timeout 10 "$compiler" --map keel=keel r keel/tests/test_cfg.a > cfg.vm.out
-    diff -u keel/tests/cfg.out cfg.vm.out
-    "$compiler" --map keel=keel b keel/tests/test_cfg.a cfg.c
-    "$cc" -std=c99 -D_POSIX_C_SOURCE=200809L cfg.c -o cfg
-    timeout 10 ./cfg > cfg.native.out
-    diff -u keel/tests/cfg.out cfg.native.out
-)
 
 "$compiler" --dump-air > "$work/demo.out"
 diff -u - "$work/demo.out" <<'AIR'

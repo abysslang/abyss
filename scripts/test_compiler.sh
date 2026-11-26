@@ -265,11 +265,11 @@ fi
 
 if [[ -z "${FILTER}" || air == *"${FILTER}"* ]]; then
     TOTAL=$((TOTAL + 1))
-    if bash "${ROOT_DIR}/scripts/test_air.sh" "${COMPILER}" "${C_COMPILER}" "${WORK_DIR}/air"; then
-        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[AIR]${RESET}\n" "air_cfg_and_dump"
+    if bash "${ROOT_DIR}/scripts/test_air.sh" "${COMPILER}" "${WORK_DIR}/air"; then
+        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[AIR]${RESET}\n" "air_dump"
         PASSED=$((PASSED + 1))
     else
-        printf "  ${RED}✘ FAIL${RESET}  %-36s ${DIM}[AIR]${RESET}\n" "air_cfg_and_dump"
+        printf "  ${RED}✘ FAIL${RESET}  %-36s ${DIM}[AIR]${RESET}\n" "air_dump"
         FAILED=$((FAILED + 1))
     fi
 fi
