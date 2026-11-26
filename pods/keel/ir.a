@@ -223,6 +223,10 @@ Function :: struct {
         self.graph.param_count.len
     }
 
+    value_count :: fn(self &Self) u64 {
+        self.graph.types.len
+    }
+
     parameter_count :: fn(self &Self, block Block) u32 {
         self.graph.param_count.get(id.slot(block))
     }

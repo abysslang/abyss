@@ -30,12 +30,35 @@ run_pod_test() {
     fi
 }
 
-run_pod_test "core"
-run_pod_test "std"
-run_pod_test "test"
-run_pod_test "json"
-run_pod_test "simd"
-run_pod_test "fmt"
+PODS=(core std test json simd fmt)
+for POD_NAME in "${PODS[@]}"; do
+    run_pod_test "${POD_NAME}"
+done
+
+if [[ "${ABYSS_TEST_OBJECT:-false}" == true ]]; then
+    POD_MAPS=(
+        --map "test=${ROOT_DIR}/pods/test"
+        --map "json=${ROOT_DIR}/pods/json/json"
+        --map "simd=${ROOT_DIR}/pods/simd"
+        --map "fmt=${ROOT_DIR}/pods/fmt"
+    )
+    for POD_NAME in "${PODS[@]}"; do
+        LOG_FILE="${ROOT_DIR}/tmp/test_pod_${POD_NAME}_elf.log"
+        : > "${LOG_FILE}"
+        for SUITE in "${ROOT_DIR}/pods/${POD_NAME}/tests/"test_*.a; do
+            if ! {
+                timeout 30s "${COMPILER}" "${POD_MAPS[@]}" b --emit-obj --hosted "${SUITE}" "${BUILD_DIR}/suite.o" &&
+                bash "${ROOT_DIR}/scripts/link_object.sh" "${BUILD_DIR}/suite.o" -o "${BUILD_DIR}/suite" &&
+                timeout 10s "${BUILD_DIR}/suite"
+            } >> "${LOG_FILE}" 2>&1; then
+                printf "  \033[1;31m✘ FAIL\033[0m  %-36s \033[1;31m[Pod: %s, ELF]\033[0m\n" "${SUITE##*/}" "${POD_NAME}"
+                cat "${LOG_FILE}"
+                exit 1
+            fi
+        done
+        printf "  \033[1;32m✔ PASS\033[0m  %-36s \033[0;90m[Pod: %s, ELF]\033[0m\n" "${POD_NAME}_unit_tests_elf" "${POD_NAME}"
+    done
+fi
 
 FMT_VM_LOG="${ROOT_DIR}/tmp/test_pod_fmt_vm.log"
 : > "${FMT_VM_LOG}"

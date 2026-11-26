@@ -1,0 +1,1082 @@
+elf :: @import("pods/keel/target/elf64")
+abi :: @import("pods/keel/abi_types")
+ir :: @import("pods/keel/ir")
+program :: @import("pods/keel/program")
+sysv :: @import("pods/keel/target/sysv")
+Arena :: @import("std/allocator").Arena
+Op :: ir.Op
+Ty :: ir.Ty
+Val :: ir.Val
+Inst :: ir.Inst
+Block :: ir.Block
+Edge :: ir.Edge
+Buffer :: elf.Buffer
+Program :: program.Program
+Classification :: sysv.Classification
+Class :: sysv.Class
+
+fail :: sysv.fail
+
+width :: fn(ty Ty) u64 {
+    match ty {
+        i1, i8_, u8_ { 1 }
+        i16_, u16_ { 2 }
+        i32_, u32_, f32_ { 4 }
+        i64_, u64_, f64_, ptr { 8 }
+        i128_, u128_ { 16 }
+        else { fail("unsupported machine value width"), 0 }
+    }
+}
+
+signed :: fn(ty Ty) bool {
+    ty == Ty.i8_ or ty == Ty.i16_ or ty == Ty.i32_ or ty == Ty.i64_ or ty == Ty.i128_
+}
+
+floating :: fn(ty Ty) bool { ty == Ty.f32_ or ty == Ty.f64_ }
+wide :: fn(ty Ty) bool { ty == Ty.i128_ or ty == Ty.u128_ }
+
+check_abi :: fn(air &program.Program, key u32) {
+    ty := air.abi_type(key)
+    if ty.kind == abi.Kind.pointer or ty.kind == abi.Kind.function or ty.indirect() { ret }
+    if ty.kind != abi.Kind.scalar {
+        fail("foreign signatures must use scalar integers or pointers")
+    }
+    if ty.scalar != Ty.void_ { width(ty.scalar) }
+}
+
+check_signature :: fn(air &program.Program, decl program.Decl) {
+    if decl.result != Ty.void_ { width(decl.result) }
+    pos: u64 = 0
+    while pos < decl.count as u64 {
+        width(air.types.get(decl.params as u64 + pos))
+        pos = pos + 1
+    }
+    if decl.abi_signature != 0 {
+        sig := air.abi_type(decl.abi_signature)
+        check_abi(air, sig.inner)
+        pos = 0
+        while pos < sig.count as u64 {
+            check_abi(air, air.abi_field(sig, pos as u32).ty)
+            pos = pos + 1
+        }
+    }
+    if decl.foreign_module.len != 0 { fail("foreign modules are not supported on Linux") }
+}
+
+arg_reg :: fn(index u32) u64 {
+    regs: [6]u8 = .[ 7, 6, 2, 1, 8, 9 ]
+    regs[index] as u64
+}
+
+slot :: fn(value Val) u64 { value as u64 * 16 }
+
+frame_access :: fn(code &elf.Buffer, opcode, reg, offset u64) {
+    code.put(0x48 | ((reg >> 3) << 2), 1)
+    code.put(opcode, 1)
+    code.put(0x85 | ((reg & 7) << 3), 1)
+    code.put(0 - offset, 4)
+}
+
+load_value :: fn(code &elf.Buffer, value Val, reg u64) {
+    frame_access(code, 0x8b, reg, slot(value))
+}
+
+save_value :: fn(code &elf.Buffer, value Val) {
+    frame_access(code, 0x89, 0, slot(value))
+}
+
+normalize :: fn(code &elf.Buffer, ty Ty) {
+    match ty {
+        i1 { code.raw("\x83\xe0\x01") }
+        i8_ { code.raw("\x48\x0f\xbe\xc0") }
+        i16_ { code.raw("\x48\x0f\xbf\xc0") }
+        i32_ { code.raw("\x48\x63\xc0") }
+        u8_ { code.raw("\x0f\xb6\xc0") }
+        u16_ { code.raw("\x0f\xb7\xc0") }
+        u32_, f32_ { code.raw("\x89\xc0") }
+        i64_, u64_, f64_, ptr, i128_, u128_ {}
+        else { fail("unsupported machine value width") }
+    }
+}
+
+immediate :: fn(code &elf.Buffer, value u64) {
+    code.raw("\x48\xb8")
+    code.put(value, 8)
+}
+
+condition :: fn(code &elf.Buffer, flag u64) {
+    code.raw("\x0f")
+    code.put(flag, 1)
+    code.raw("\xc0\x0f\xb6\xc0")
+}
+
+compare_flag :: fn(op Op, signed_test bool) u64 {
+    match op {
+        eq { 0x94 }
+        ne { 0x95 }
+        lt { if signed_test { 0x9c } else { 0x92 } }
+        le { if signed_test { 0x9e } else { 0x96 } }
+        gt { if signed_test { 0x9f } else { 0x97 } }
+        ge { if signed_test { 0x9d } else { 0x93 } }
+        else { fail("unsupported integer instruction"), 0 }
+    }
+}
+
+float_in :: fn(code &elf.Buffer, reg u64) {
+    code.raw("\x66\x48\x0f\x6e")
+    code.put(0xc0 | (reg << 3) | reg, 1)
+}
+
+float_out :: fn(code &elf.Buffer) { code.raw("\x66\x48\x0f\x7e\xc0") }
+
+float_prefix :: fn(code &elf.Buffer, ty Ty) {
+    code.put(if ty == Ty.f32_ { 0xf3 } else { 0xf2 }, 1)
+}
+
+float_binary :: fn(code &elf.Buffer, op Op, ty Ty) {
+    float_in(code, 0)
+    float_in(code, 1)
+    if op as u8 >= Op.eq as u8 and op as u8 <= Op.ge as u8 {
+        if ty == Ty.f64_ { code.put(0x66, 1) }
+        code.raw("\x0f\x2e\xc1")
+        flag: u64 = match op {
+            eq { 0x94 }
+            ne { 0x95 }
+            lt { 0x92 }
+            le { 0x96 }
+            gt { 0x97 }
+            else { 0x93 }
+        }
+        condition(code, flag)
+        if op == Op.ne { code.raw("\x0f\x9a\xc1\x08\xc8") }
+        if op == Op.eq or op == Op.lt or op == Op.le {
+            code.raw("\x0f\x9b\xc1\x20\xc8")
+        }
+        ret
+    }
+    opcode: u64 = match op {
+        iadd { 0x58 }
+        sub { 0x5c }
+        mul { 0x59 }
+        div { 0x5e }
+        else { fail("unsupported floating point instruction"), 0 }
+    }
+    float_prefix(code, ty)
+    code.put(0x0f, 1)
+    code.put(opcode, 1)
+    code.put(0xc1, 1)
+    float_out(code)
+}
+
+float_cast :: fn(code &elf.Buffer, source, result Ty) {
+    if floating(source) {
+        float_in(code, 0)
+        float_prefix(code, source)
+        if floating(result) {
+            code.raw("\x0f\x5a\xc0")
+            float_out(code)
+        } else {
+            code.raw("\x48\x0f\x2c\xc0")
+        }
+    } else if source == Ty.u64_ {
+        code.raw("\x48\x85\xc0\x79\x17")
+        code.raw("\x48\x89\xc1\x83\xe1\x01\x48\xd1\xe8\x48\x09\xc8")
+        float_prefix(code, result)
+        code.raw("\x48\x0f\x2a\xc0")
+        float_prefix(code, result)
+        code.raw("\x0f\x58\xc0\xeb\x05")
+        float_prefix(code, result)
+        code.raw("\x48\x0f\x2a\xc0")
+        float_out(code)
+    } else {
+        float_prefix(code, result)
+        code.raw("\x48\x0f\x2a\xc0")
+        float_out(code)
+    }
+}
+
+Arguments :: struct {
+    gp, sse, stack u64
+
+    new :: fn() Self { .{ gp: 0, sse: 0, stack: 0 } }
+
+    move :: fn(self &Self, code &Buffer, val Val, ty Ty, incoming bool) {
+        if wide(ty) {
+            if self.gp <= 4 {
+                pos: u64 = 0
+                while pos < 2 {
+                    reg := arg_reg(self.gp as u32)
+                    frame_access(code, if incoming { 0x89 } else { 0x8b }, reg, slot(val) - pos * 8)
+                    self.gp = self.gp + 1
+                    pos = pos + 1
+                }
+            } else {
+                self.stack = aligned(self.stack, 16)
+                self.spill(code, slot(val), incoming, Ty.u64_)
+                self.spill(code, slot(val) - 8, incoming, Ty.u64_)
+            }
+        } else if floating(ty) and self.sse < 8 {
+            code.raw(if incoming { "\x66\x0f\xd6" } else { "\xf3\x0f\x7e" })
+            code.put(0x85 | (self.sse << 3), 1)
+            code.put(0 - slot(val), 4)
+            self.sse = self.sse + 1
+        } else if not floating(ty) and self.gp < 6 {
+            reg := arg_reg(self.gp as u32)
+            if incoming {
+                code.put(0x48 | (reg >> 3), 1)
+                code.raw("\x8b")
+                code.put(0xc0 | (reg & 7), 1)
+                normalize(code, ty)
+                save_value(code, val)
+            } else {
+                load_value(code, val, reg)
+            }
+            self.gp = self.gp + 1
+        } else {
+            self.spill(code, slot(val), incoming, ty)
+        }
+    }
+
+    spill :: fn(self &Self, code &Buffer, offset u64, incoming bool, ty Ty) {
+        if incoming {
+            code.raw("\x48\x8b\x85")
+            code.put(16 + self.stack, 4)
+            normalize(code, ty)
+            frame_access(code, 0x89, 0, offset)
+        } else {
+            frame_access(code, 0x8b, 0, offset)
+            code.raw("\x48\x89\x84\x24")
+            code.put(self.stack, 4)
+        }
+        self.stack = self.stack + 8
+    }
+}
+
+adjust_stack :: fn(code &elf.Buffer, size u64, reserve bool) {
+    if size == 0 { ret }
+    code.raw(if reserve { "\x48\x81\xec" } else { "\x48\x81\xc4" })
+    code.put(size, 4)
+}
+
+stack_access :: fn(code &Buffer, opcode, reg, offset u64) {
+    code.put(0x48 | ((reg >> 3) << 2), 1)
+    code.put(opcode, 1)
+    code.put(0x84 | ((reg & 7) << 3), 1)
+    code.put(0x24, 1)
+    code.put(offset, 4)
+}
+
+Location :: struct {
+    shape                Classification
+    gp, sse, stack, home u64
+    memory, aggregate    bool
+
+    registers :: fn(self &Self, code &Buffer, disp u64, stack, save, returning bool) {
+        general := self.gp
+        vector := self.sse
+        index: u64 = 0
+        while index < 2 {
+            offset := disp + index * 8
+            kind := self.shape.parts[index]
+            if kind == Class.integer {
+                reg := if returning { general * 2 } else { arg_reg(general as u32) }
+                opcode: u64 = if save { 0x89 } else { 0x8b }
+                if stack { stack_access(code, opcode, reg, offset) } else {
+                    frame_access(code, opcode, reg, 0 - offset)
+                }
+                general = general + 1
+            } else if kind == Class.sse {
+                code.raw(if save { "\x66\x0f\xd6" } else { "\xf3\x0f\x7e" })
+                code.put((if stack { 0x84 } else { 0x85 }) | (vector << 3), 1)
+                if stack { code.put(0x24, 1) }
+                code.put(offset, 4)
+                vector = vector + 1
+            }
+            index = index + 1
+        }
+    }
+}
+
+Plan :: struct {
+    args       Vec(Location)
+    result     Location
+    bytes, sse u64
+}
+
+plan_call :: fn(air &Program, key u32) Plan {
+    sig := air.abi_type(key)
+    result := sysv.classify(air, sig.inner)
+    output: Location = .{
+        shape: result
+        gp: 0
+        sse: 0
+        stack: 0
+        home: 0
+        memory: result.size > 16
+        aggregate: air.abi_type(sig.inner).indirect()
+    }
+    locations := Vec(Location).with_cap(sig.count as u64)
+    gp: u64 = output.memory as u64
+    sse: u64 = 0
+    stack: u64 = 0
+    stage: u64 = if output.aggregate and not output.memory { 16 } else { 0 }
+    index: u32 = 0
+    while index < sig.count {
+        key := air.abi_field(sig, index).ty
+        item := sysv.classify(air, key)
+        aggregate := air.abi_type(key).indirect()
+        loc: Location = .{
+            shape: item
+            gp: gp
+            sse: sse
+            stack: 0
+            home: stage
+            memory: item.size > 16 or gp + item.gp() > 6 or sse + item.sse() > 8
+            aggregate: aggregate
+        }
+        if loc.memory {
+            stack = aligned(stack, if item.align > 8 { item.align } else { 8 })
+            loc.stack = stack
+            stack = stack + aligned(item.size, 8)
+        } else {
+            gp = gp + item.gp()
+            sse = sse + item.sse()
+            if aggregate { stage = stage + 16 }
+        }
+        locations.push(loc)
+        index = index + 1
+    }
+    start := aligned(stack, 16)
+    for loc in locations.iter_ref() { loc.home = loc.home + start }
+    output.home = start
+    .{ args: locations, result: output, bytes: start + stage, sse: sse }
+}
+
+copy_count :: fn(code &Buffer, count u64) {
+    code.raw("\xb9")
+    code.put(count, 4)
+    code.raw("\xf3\xa4")
+}
+
+abi_invoke :: fn(
+    image &elf.Image
+    air &Program
+    target, sig u32
+    body &ir.Function
+    inst Inst
+    start u64
+) {
+    code := &image.text
+    plan := plan_call(air, sig)
+    adjust_stack(code, plan.bytes, true)
+    index: u64 = start + plan.result.aggregate as u64
+    for loc in plan.args {
+        val := body.operand(inst, index)
+        if loc.aggregate {
+            load_value(code, val, 6)
+            stack_access(code, 0x8d, 7, if loc.memory { loc.stack } else { loc.home })
+            copy_count(code, loc.shape.size)
+        } else if loc.memory {
+            load_value(code, val, 0)
+            stack_access(code, 0x89, 0, loc.stack)
+            if loc.shape.size > 8 {
+                frame_access(code, 0x8b, 0, slot(val) - 8)
+                stack_access(code, 0x89, 0, loc.stack + 8)
+            }
+        }
+        index = index + 1
+    }
+    if plan.result.memory { load_value(code, body.operand(inst, start), 7) }
+    index = start + plan.result.aggregate as u64
+    for loc in plan.args {
+        if not loc.memory {
+            if loc.aggregate { loc.registers(code, loc.home, true, false, false) } else {
+                loc.registers(code, 0 - slot(body.operand(inst, index)), false, false, false)
+            }
+        }
+        index = index + 1
+    }
+    code.put(0xb0, 1)
+    code.put(plan.sse, 1)
+    if target != 0 {
+        code.put(0xe8, 1)
+        image.relative(target, 4)
+    } else {
+        load_value(code, body.operand(inst, 0), 11)
+        code.raw("\x41\xff\xd3")
+    }
+    if plan.result.aggregate and not plan.result.memory {
+        plan.result.registers(code, plan.result.home, true, true, true)
+        stack_access(code, 0x8d, 6, plan.result.home)
+        load_value(code, body.operand(inst, start), 7)
+        copy_count(code, plan.result.shape.size)
+    }
+    adjust_stack(code, plan.bytes, false)
+    plan.args.destroy()
+}
+
+emit_wrapper :: fn(image &elf.Image, air &Program, decl program.Decl, wrapper, target u32) {
+    code := &image.text
+    start := code.len()
+    plan := plan_call(air, decl.abi_signature)
+    extra := plan.result.aggregate as u64
+    code.raw("\x55\x48\x89\xe5")
+    adjust_stack(code, decl.count as u64 * 16 + plan.bytes, true)
+    if plan.result.aggregate {
+        if plan.result.memory {
+            frame_access(code, 0x89, 7, slot(1 as Val))
+        } else {
+            stack_access(code, 0x8d, 0, plan.result.home)
+            save_value(code, 1 as Val)
+        }
+    }
+    index: u64 = 0
+    for loc in plan.args {
+        val := (index + extra + 1) as Val
+        if loc.aggregate {
+            if loc.memory {
+                frame_access(code, 0x8d, 0, 0 - (16 + loc.stack))
+            } else {
+                loc.registers(code, loc.home, true, true, false)
+                stack_access(code, 0x8d, 0, loc.home)
+            }
+            save_value(code, val)
+        } else if loc.memory {
+            frame_access(code, 0x8b, 0, 0 - (16 + loc.stack))
+            save_value(code, val)
+            if loc.shape.size > 8 {
+                frame_access(code, 0x8b, 0, 0 - (24 + loc.stack))
+                frame_access(code, 0x89, 0, slot(val) - 8)
+            }
+        } else {
+            loc.registers(code, 0 - slot(val), false, true, false)
+        }
+        index = index + 1
+    }
+    outgoing := decl.count as u64 * 16
+    adjust_stack(code, outgoing, true)
+    args := Arguments.new()
+    index = 0
+    while index < decl.count as u64 {
+        args.move(code, (index + 1) as Val, air.types.get(decl.params as u64 + index), false)
+        index = index + 1
+    }
+    code.put(0xe8, 1)
+    image.relative(target, 4)
+    adjust_stack(code, outgoing, false)
+    if plan.result.aggregate {
+        if plan.result.memory { load_value(code, 1 as Val, 0) } else {
+            plan.result.registers(code, plan.result.home, true, false, true)
+        }
+    }
+    code.raw("\xc9\xc3")
+    plan.args.destroy()
+    image.define(wrapper, start, code.len() - start)
+}
+
+binary :: fn(code &elf.Buffer, op Op, ty Ty) {
+    signed_test := signed(ty)
+    match op {
+        iadd { code.raw("\x48\x01\xc8") }
+        sub { code.raw("\x48\x29\xc8") }
+        mul { code.raw("\x48\x0f\xaf\xc1") }
+        band { code.raw("\x48\x21\xc8") }
+        bor { code.raw("\x48\x09\xc8") }
+        bxor { code.raw("\x48\x31\xc8") }
+        div, rem {
+            if signed_test { code.raw("\x48\x99\x48\xf7\xf9") } else {
+                code.raw("\x31\xd2\x48\xf7\xf1")
+            }
+            if op == Op.rem { code.raw("\x48\x89\xd0") }
+        }
+        shl, shr {
+            code.raw("\x83\xe1")
+            code.put(if ty == Ty.i1 { 0 } else { width(ty) * 8 - 1 }, 1)
+            code.raw("\x48\xd3")
+            code.put(if op == Op.shl { 0xe0 } else if signed_test { 0xf8 } else { 0xe8 }, 1)
+        }
+        else {
+            code.raw("\x48\x39\xc8")
+            condition(code, compare_flag(op, signed_test))
+        }
+    }
+}
+
+read_mem :: fn(code &elf.Buffer, size u64) {
+    if size == 1 { code.raw("\x0f\xb6\x00") } else if size == 2 {
+        code.raw("\x0f\xb7\x00")
+    } else {
+        if size == 8 { code.put(0x48, 1) }
+        code.raw("\x8b\x00")
+    }
+}
+
+write_mem :: fn(code &elf.Buffer, size u64) {
+    if size == 1 { code.raw("\x88\x08") } else {
+        if size == 2 { code.put(0x66, 1) }
+        if size == 8 { code.put(0x48, 1) }
+        code.raw("\x89\x08")
+    }
+}
+
+rel32 :: fn(code &elf.Buffer, at, to u64) {
+    distance := to as i64 - (at as i64 + 4)
+    if distance < -2147483648 or distance > 2147483647 { fail("branch is out of range") }
+    code.patch(at, distance as u64, 4)
+}
+
+memmove :: fn(code &elf.Buffer) {
+    code.raw("\x48\x85\xc9\x74\x17\x48\x39\xf7\x76\x10")
+    code.raw("\x48\x8d\x74\x0e\xff\x48\x8d\x7c\x0f\xff")
+    code.raw("\xfd\xf3\xa4\xfc\xeb\x02\xf3\xa4")
+}
+
+Fixup :: struct {
+    at     u64
+    target Block
+}
+
+Encoder :: struct {
+    image              &elf.Image
+    air                &Program
+    symbols            Slice(u32)
+    addresses          Slice(u32)
+    body               &ir.Function
+    blocks             Vec(u64)
+    jumps              Vec(Fixup)
+    scratch, stack_top u64
+
+    helper :: fn(self &Self, name Str) {
+        self.image.text.put(0xe8, 1)
+        self.image.relative(self.image.symbol(name, 0, 0x12), 4)
+    }
+
+    convert_float :: fn(self &Self, source, result Ty, value Val) {
+        code := &self.image.text
+        if result == Ty.i1 {
+            code.raw("\x48\x0f\xba\xf0")
+            code.put(width(source) * 8 - 1, 1)
+        } else if wide(source) {
+            args := Arguments.new()
+            args.move(code, value, source, false)
+            name := if result == Ty.f32_ {
+                if signed(source) { "__floattisf" } else { "__floatuntisf" }
+            } else {
+                if signed(source) { "__floattidf" } else { "__floatuntidf" }
+            }
+            self.helper(name)
+            float_out(code)
+        } else if wide(result) or result == Ty.u64_ {
+            float_in(code, 0)
+            name := if result == Ty.u64_ {
+                if source == Ty.f32_ { "__fixunssfdi" } else { "__fixunsdfdi" }
+            } else if source == Ty.f32_ {
+                if signed(result) { "__fixsfti" } else { "__fixunssfti" }
+            } else {
+                if signed(result) { "__fixdfti" } else { "__fixunsdfti" }
+            }
+            self.helper(name)
+        } else {
+            float_cast(code, source, result)
+        }
+    }
+
+    invoke :: fn(self &Self, inst Inst, direct bool, target, count u32, result Ty) {
+        body := self.body
+        code := &self.image.text
+        pos: u64 = if direct { 0 } else { 1 }
+        signature: u32 = 0
+        symbol: u32 = 0
+        if direct {
+            symbol = self.symbols.get(target as u64 - 1)
+            decl := self.air.get(target as ir.Symbol)
+            if decl.kind == program.Kind.external { signature = decl.abi_signature }
+        } else { signature = target }
+        if sysv.needs_bridge(self.air, signature) {
+            abi_invoke(self.image, self.air, symbol, signature, body, inst, pos)
+            if floating(result) { float_out(code) }
+            ret
+        }
+        space := count as u64 * 16
+        adjust_stack(code, space, true)
+        args := Arguments.new()
+        while pos < count as u64 {
+            value := body.operand(inst, pos)
+            args.move(code, value, body.value_type(value), false)
+            pos = pos + 1
+        }
+        code.put(0xb0, 1)
+        code.put(args.sse, 1)
+        if direct {
+            code.put(0xe8, 1)
+            self.image.relative(symbol, 4)
+        } else {
+            load_value(code, body.operand(inst, 0), 11)
+            code.raw("\x41\xff\xd3")
+        }
+        adjust_stack(code, space, false)
+        if floating(result) { float_out(code) }
+    }
+
+    wide_binary :: fn(self &Self, op Op, first, second Val) {
+        code := &self.image.text
+        ty := self.body.value_type(first)
+        if op == Op.div or op == Op.rem {
+            name := if op == Op.div {
+                if signed(ty) { "__divti3" } else { "__udivti3" }
+            } else {
+                if signed(ty) { "__modti3" } else { "__umodti3" }
+            }
+            args := Arguments.new()
+            args.move(code, first, ty, false)
+            args.move(code, second, ty, false)
+            self.helper(name)
+            ret
+        }
+        load_value(code, first, 0)
+        load_value(code, second, 1)
+        frame_access(code, 0x8b, 2, slot(first) - 8)
+        frame_access(code, 0x8b, 8, slot(second) - 8)
+        match op {
+            iadd { code.raw("\x48\x01\xc8\x4c\x11\xc2") }
+            sub { code.raw("\x48\x29\xc8\x4c\x19\xc2") }
+            band { code.raw("\x48\x21\xc8\x4c\x21\xc2") }
+            bor { code.raw("\x48\x09\xc8\x4c\x09\xc2") }
+            bxor { code.raw("\x48\x31\xc8\x4c\x31\xc2") }
+            mul {
+                code.raw(
+                    "\x48\x0f\xaf\xd1\x4c\x0f\xaf\xc0\x4c\x01\xc2\x49\x89\xd0\x48\xf7\xe1\x4c\x01\xc2"
+                )
+            }
+            shl, shr {
+                code.raw("\xf6\xc1\x40")
+                if op == Op.shl {
+                    code.raw("\x75\x09\x48\x0f\xa5\xc2\x48\xd3\xe0\xeb\x08")
+                    code.raw("\x48\x89\xc2\x48\xd3\xe2\x31\xc0")
+                } else {
+                    code.raw("\x75\x09\x48\x0f\xad\xd0\x48\xd3")
+                    code.put(if signed(ty) { 0xfa } else { 0xea }, 1)
+                    code.raw("\xeb")
+                    code.put(if signed(ty) { 10 } else { 8 }, 1)
+                    code.raw("\x48\x89\xd0\x48\xd3")
+                    if signed(ty) { code.raw("\xf8\x48\xc1\xfa\x3f") } else {
+                        code.raw("\xe8\x31\xd2")
+                    }
+                }
+            }
+            else {
+                code.raw("\x4c\x39\xc2\x75\x0b\x48\x39\xc8")
+                condition(code, compare_flag(op, false))
+                code.raw("\xeb\x06")
+                condition(code, compare_flag(op, signed(ty)))
+            }
+        }
+    }
+
+    edge :: fn(self &Self, edge Edge) {
+        code := &self.image.text
+        body := self.body
+        target := body.edge_target(edge)
+        count := body.argument_count(edge)
+        pos: u32 = 0
+        while pos < count {
+            load_value(code, body.argument(edge, pos), 0)
+            temp := self.scratch + (pos as u64 + 1) * 16
+            frame_access(code, 0x89, 0, temp)
+            value := body.argument(edge, pos)
+            if wide(body.value_type(value)) {
+                frame_access(code, 0x8b, 0, slot(value) - 8)
+                frame_access(code, 0x89, 0, temp - 8)
+            }
+            pos = pos + 1
+        }
+        pos = 0
+        while pos < count {
+            temp := self.scratch + (pos as u64 + 1) * 16
+            value := body.parameter(target, pos)
+            frame_access(code, 0x8b, 0, temp)
+            save_value(code, value)
+            if wide(body.value_type(value)) {
+                frame_access(code, 0x8b, 0, temp - 8)
+                frame_access(code, 0x89, 0, slot(value) - 8)
+            }
+            pos = pos + 1
+        }
+        code.put(0xe9, 1)
+        self.jumps.push(.{ at: code.len(), target: target })
+        code.put(0, 4)
+    }
+
+    instruction :: fn(self &Self, inst Inst) {
+        body := self.body
+        code := &self.image.text
+        op := body.opcode(inst)
+        first := body.operand(inst, 0)
+        second := body.operand(inst, 1)
+        result := body.result(inst)
+        ty := body.value_type(result)
+        arg0 := body.payload(inst, 0)
+        arg1 := body.payload(inst, 1)
+        arg2 := body.payload(inst, 2)
+
+        if ir.binary(op) and wide(body.value_type(first)) {
+            self.wide_binary(op, first, second)
+        } else if ir.binary(op) {
+            load_value(code, first, 0)
+            load_value(code, second, 1)
+            operand_ty := body.value_type(first)
+            if floating(operand_ty) { float_binary(code, op, operand_ty) } else {
+                binary(code, op, operand_ty)
+            }
+        } else {
+            match op {
+                constant {
+                    immediate(code, arg0 as u64 | ((arg1 as u64) << 32))
+                    if wide(ty) { code.raw("\x31\xd2") }
+                }
+                stack {
+                    item := stack_shape(self.air, body, inst)
+                    self.stack_top = stack_end(self.stack_top, item.size, item.align)
+                    frame_access(code, 0x8d, 0, self.stack_top)
+                }
+                address {
+                    code.raw("\x48\x8b\x05")
+                    self.image.relative(self.addresses.get(arg0 as u64 - 1), 9)
+                }
+                offset {
+                    load_value(code, first, 0)
+                    load_value(code, second, 1)
+                    if arg2 != 1 {
+                        if arg2 > 2147483647 { fail("pointer stride is too large") }
+                        code.raw("\x48\x69\xc9")
+                        code.put(arg2 as u64, 4)
+                    }
+                    code.raw("\x48\x01\xc8")
+                }
+                cast, invert, neg {
+                    load_value(code, first, 0)
+                    source := body.value_type(first)
+                    if wide(source) {
+                        frame_access(code, 0x8b, 2, slot(first) - 8)
+                    } else if wide(ty) {
+                        code.raw(if signed(source) { "\x48\x99" } else { "\x31\xd2" })
+                    }
+                    if op == Op.neg {
+                        if floating(ty) {
+                            code.raw("\x48\x0f\xba\xf8")
+                            code.put(width(ty) * 8 - 1, 1)
+                        } else if wide(ty) {
+                            code.raw("\x48\xf7\xd8\x48\x83\xd2\x00\x48\xf7\xda")
+                        } else {
+                            code.raw("\x48\xf7\xd8")
+                        }
+                    }
+                    if op == Op.invert {
+                        if ty == Ty.i1 { code.raw("\x83\xf0\x01") } else {
+                            code.raw("\x48\xf7\xd0")
+                            if wide(ty) { code.raw("\x48\xf7\xd2") }
+                        }
+                    }
+                    if op == Op.cast {
+                        if floating(ty) or floating(source) {
+                            self.convert_float(source, ty, first)
+                        }
+                        if ty == Ty.i1 {
+                            if wide(source) { code.raw("\x48\x09\xd0") }
+                            code.raw("\x48\x85\xc0")
+                            condition(code, 0x95)
+                        }
+                    }
+                }
+                load {
+                    load_value(code, first, 0)
+                    if wide(ty) { code.raw("\x48\x8b\x50\x08\x48\x8b\x00") } else {
+                        read_mem(code, width(ty))
+                    }
+                }
+                store {
+                    load_value(code, first, 0)
+                    load_value(code, second, 1)
+                    source := body.value_type(second)
+                    if wide(source) {
+                        frame_access(code, 0x8b, 2, slot(second) - 8)
+                        code.raw("\x48\x89\x50\x08\x48\x89\x08")
+                    } else { write_mem(code, width(source)) }
+                }
+                zero {
+                    load_value(code, first, 7)
+                    code.put(0xb9, 1)
+                    code.put(
+                        if arg2 == 0 { arg1 as u64 } else { sysv.layout(self.air, arg1).size }
+                        4
+                    )
+                    code.raw("\x31\xc0\xf3\xaa")
+                }
+                copy, copy_bytes {
+                    load_value(code, first, 7)
+                    load_value(code, second, 6)
+                    if op == Op.copy {
+                        code.put(0xb9, 1)
+                        code.put(arg2 as u64, 4)
+                    } else {
+                        load_value(code, body.operand(inst, 2), 1)
+                    }
+                    memmove(code)
+                }
+                call, call_indirect { self.invoke(inst, op == Op.call, arg0, arg2, ty) }
+                jump { self.edge(body.successor(inst, 0)) }
+                branch {
+                    load_value(code, first, 0)
+                    code.raw("\x48\x85\xc0\x0f\x84")
+                    skip := code.len()
+                    code.put(0, 4)
+                    self.edge(body.successor(inst, 0))
+                    rel32(code, skip, code.len())
+                    self.edge(body.successor(inst, 1))
+                }
+                ret_ {
+                    if first != Val.none {
+                        load_value(code, first, 0)
+                        if floating(body.value_type(first)) { float_in(code, 0) }
+                        if wide(body.value_type(first)) {
+                            frame_access(code, 0x8b, 2, slot(first) - 8)
+                        }
+                    }
+                    code.raw("\xc9\xc3")
+                }
+                trap { code.raw("\x0f\x0b") }
+                abi_size { immediate(code, sysv.layout(self.air, arg0).size) }
+                abi_field {
+                    offset := if arg2 == 0 {
+                        sysv.header_offset(self.air.abi_type(arg0), self.air.names.get(arg1 as u64))
+                    } else if arg2 == 1 {
+                        sysv.field_offset(self.air, arg0, arg1)
+                    } else { sysv.payload_offset(self.air, arg0) }
+                    immediate(code, offset)
+                }
+                c_value {
+                    header := self.air.names.get(arg0 as u64)
+                    name := self.air.names.get(arg1 as u64)
+                    if header.eq("errno.h") and name.eq("errno") {
+                        self.helper("__errno_location")
+                        read_mem(code, 4)
+                    } else { immediate(code, sysv.header_value(header, name)) }
+                }
+                else { fail("unsupported AIR instruction") }
+            }
+        }
+        if result != Val.none {
+            normalize(code, ty)
+            save_value(code, result)
+            if wide(ty) { frame_access(code, 0x89, 2, slot(result) - 8) }
+        }
+    }
+}
+
+aligned :: fn(value, align u64) u64 { (value + align - 1) & (0 - align) }
+
+stack_shape :: fn(air &Program, body &ir.Function, inst Inst) sysv.Shape {
+    if body.payload(inst, 2) != 0 { ret sysv.layout(air, body.payload(inst, 0)) }
+    sysv.shape(body.payload(inst, 0) as u64, body.payload(inst, 1) as u64)
+}
+
+stack_end :: fn(top, size, align u64) u64 {
+    if align == 0 or align > 16 or (align & (align - 1)) != 0 {
+        fail("stack objects require a power-of-two alignment up to 16 bytes")
+    }
+    aligned(top + (if size == 0 { 1 } else { size }), align)
+}
+
+emit_body :: fn(
+    image &elf.Image
+    air &Program
+    symbols, addresses Slice(u32)
+    body &ir.Function
+    index u32
+) {
+    code := &image.text
+    start := code.len()
+    block_count := body.block_count()
+    max_params: u32 = 0
+    block: u64 = 1
+    while block <= block_count {
+        count := body.parameter_count(block as Block)
+        if count > max_params { max_params = count }
+        block = block + 1
+    }
+    scratch := body.value_count() * 16
+    stack_top := scratch + max_params as u64 * 16
+    end := stack_top
+    block = 1
+    while block <= block_count {
+        inst := body.first_inst(block as Block)
+        while inst != Inst.none {
+            if body.opcode(inst) == Op.stack {
+                item := stack_shape(air, body, inst)
+                end = stack_end(end, item.size, item.align)
+            }
+            inst = body.next_inst(inst)
+        }
+        block = block + 1
+    }
+    frame := aligned(end, 16)
+    if frame > 2147483647 { fail("stack frame is too large") }
+    code.raw("\x55\x48\x89\xe5\x48\x81\xec")
+    code.put(frame, 4)
+    count := body.parameter_count(Block.entry)
+    pos: u32 = 0
+    args := Arguments.new()
+    while pos < count {
+        val := body.parameter(Block.entry, pos)
+        args.move(code, val, body.value_type(val), true)
+        pos = pos + 1
+    }
+    encoder: Encoder = .{
+        image: image
+        air: air
+        symbols: symbols
+        addresses: addresses
+        body: body
+        blocks: Vec(u64).with_cap(block_count)
+        jumps: Vec(Fixup).new()
+        scratch: scratch
+        stack_top: stack_top
+    }
+    block = 1
+    while block <= block_count {
+        encoder.blocks.push(code.len())
+        inst := body.first_inst(block as Block)
+        while inst != Inst.none {
+            encoder.instruction(inst)
+            inst = body.next_inst(inst)
+        }
+        block = block + 1
+    }
+    for jump in encoder.jumps {
+        rel32(code, jump.at, encoder.blocks.get(jump.target as u64 - 1))
+    }
+    encoder.blocks.destroy()
+    encoder.jumps.destroy()
+    image.define(index, start, code.len() - start)
+}
+
+emit_entry :: fn(
+    image &elf.Image
+    air &program.Program
+    symbols Slice(u32)
+    index u32
+    hosted bool
+) {
+    code := &image.text
+    start := code.len()
+    if hosted { code.raw("\x55\x48\x89\xe5\x57\x56") } else {
+        code.raw("\x48\x83\xe4\xf0")
+    }
+    if air.initializer != ir.Symbol.none {
+        code.put(0xe8, 1)
+        image.relative(symbols.get(air.initializer as u64 - 1), 4)
+    }
+    if hosted {
+        pos: u64 = 0
+        for decl in air.declarations {
+            if decl.exported and decl.name.eq("abyss_process_set_args") {
+                code.raw("\x48\x8b\x7d\xf8\x48\x8b\x75\xf0\xe8")
+                image.relative(symbols.get(pos), 4)
+            }
+            pos = pos + 1
+        }
+    }
+    code.put(0xe8, 1)
+    image.relative(symbols.get(air.entry as u64 - 1), 4)
+    has_result := air.get(air.entry).result != Ty.void_
+    if hosted {
+        if not has_result { code.raw("\x31\xc0") }
+        code.raw("\xc9\xc3")
+    } else {
+        if has_result { code.raw("\x89\xc7") } else { code.raw("\x31\xff") }
+        code.raw("\xb8\x3c\x00\x00\x00\x0f\x05\x0f\x0b")
+    }
+    image.define(index, start, code.len() - start)
+}
+
+emit :: fn(arena &Arena, air &program.Program, executable, hosted bool) Str {
+    image := elf.Image.new(arena)
+    symbols := Vec(u32).with_cap(air.declarations.len)
+    addresses := Vec(u32).with_cap(air.declarations.len)
+    for decl in air.declarations {
+        bridge := decl.kind == program.Kind.function and sysv.needs_bridge(air, decl.abi_signature)
+        index := match decl.kind {
+            function, external {
+                check_signature(air, decl)
+                if (decl.exported and not bridge) or decl.kind == program.Kind.external { 0 } else {
+                    image.symbol(decl.name, elf.text_section(), 2)
+                }
+            }
+            else { image.symbol(decl.name, elf.data_section(), 1) }
+        }
+        symbols.push(index)
+        address := if bridge and not decl.exported {
+            image.symbol(Str.empty(), elf.text_section(), 2)
+        } else { index }
+        addresses.push(address)
+    }
+    first_global := image.symbol_count()
+    at: u64 = 0
+    for decl in air.declarations {
+        if decl.exported or decl.kind == program.Kind.external {
+            if executable and not hosted and decl.name.eq("_start") {
+                fail("'_start' is reserved for the object entry")
+            }
+            section := if decl.exported { elf.text_section() } else { 0 }
+            symbol := image.symbol(decl.name, section, 0x12)
+            addresses.set(at, symbol)
+            if symbols.get(at) == 0 { symbols.set(at, symbol) }
+        }
+        at = at + 1
+    }
+    at = 0
+    for decl in air.declarations {
+        index := symbols.get(at)
+        match decl.kind {
+            function {
+                emit_body(
+                    &image
+                    air
+                    symbols.as_slice()
+                    addresses.as_slice()
+                    air.functions.ptr_at(decl.body as u64 - 1)
+                    index
+                )
+                address := addresses.get(at)
+                if address != index { emit_wrapper(&image, air, decl, address, index) }
+            }
+            data {
+                image.define(index, image.data.len(), decl.bytes.len)
+                image.data.raw(decl.bytes)
+            }
+            global {
+                item := if decl.layout == 0 {
+                    sysv.shape(decl.size as u64, decl.align as u64)
+                } else { sysv.layout(air, decl.layout) }
+                align := item.align
+                if align == 0 or (align & (align - 1)) != 0 { fail("invalid global alignment") }
+                if align > image.alignment { image.alignment = align }
+                image.data.align(align)
+                image.define(index, image.data.len(), item.size)
+                image.data.zeros(item.size)
+            }
+            external {}
+        }
+        at = at + 1
+    }
+    if executable {
+        entry := if hosted { "main" } else { "_start" }
+        index := image.symbol(entry, elf.text_section(), 0x12)
+        emit_entry(&image, air, symbols.as_slice(), index, hosted)
+    } else if air.initializer != ir.Symbol.none {
+        image.initializer = symbols.get(air.initializer as u64 - 1)
+    }
+    symbols.destroy()
+    addresses.destroy()
+    elf.emit(arena, &image, first_global)
+}

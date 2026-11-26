@@ -79,6 +79,12 @@ gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O0 -Werror=implicit-function-declarati
 "${WORK_DIR}/wide" > "${WORK_DIR}/wide.out"
 printf '340282366920938463463374607431768211455\n-170141183460469231731687303715884105728\n' > "${WORK_DIR}/wide.expected"
 cmp "${WORK_DIR}/wide.expected" "${WORK_DIR}/wide.out"
+if [[ "${ABYSS_TEST_OBJECT:-false}" == true ]]; then
+    "${COMPILER}" b --emit-obj --hosted "${WORK_DIR}/wide.a" "${WORK_DIR}/wide.o"
+    bash "${ROOT_DIR}/scripts/link_object.sh" "${WORK_DIR}/wide.o" -o "${WORK_DIR}/wide-elf"
+    timeout 10s "${WORK_DIR}/wide-elf" > "${WORK_DIR}/wide.elf.out"
+    cmp "${WORK_DIR}/wide.expected" "${WORK_DIR}/wide.elf.out"
+fi
 printf "  \033[1;32m✔ PASS\033[0m  %-36s \033[0;90m[Precision]\033[0m\n" "wide_128bit_integer_preservation"
 cat > "${WORK_DIR}/balance.a" <<'ABYSS'
 print :: @import("std/io").print

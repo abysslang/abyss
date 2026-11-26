@@ -31,3 +31,8 @@ expect_failure() {
 
 expect_failure "${WORK_DIR}/fall"
 expect_failure "${COMPILER}" r "${SOURCE}"
+if [[ "${ABYSS_TEST_OBJECT:-false}" == true ]]; then
+    "${COMPILER}" b --emit-obj --hosted "${SOURCE}" "${WORK_DIR}/fall.o"
+    bash scripts/link_object.sh "${WORK_DIR}/fall.o" -o "${WORK_DIR}/fall-elf"
+    expect_failure "${WORK_DIR}/fall-elf"
+fi

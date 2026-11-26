@@ -5,6 +5,7 @@ fs :: @import("std/fs")
 sys :: @import("std/sys")
 
 c99 :: @import("pods/keel/target/c99")
+x86_64 :: @import("pods/keel/target/x86_64")
 air :: @import("compiler/air/lower")
 Engine :: @import("compiler/engine").Engine
 id_none :: @import("compiler/nexus/pool").id_none
@@ -17,6 +18,8 @@ CompilerConfig :: struct {
     src_path     &u8
     out_path     &u8
     is_vm_run    bool
+    emit_object  bool
+    hosted_obj   bool
     import_dirs  Vec(Str)
     map_keys     Vec(Str)
     map_values   Vec(Str)
@@ -29,6 +32,8 @@ CompilerConfig :: struct {
         src := Env.get_or(c"ABYSS_SRC", c"main.a")
         out := Env.get_or(c"ABYSS_OUT", c"out.c")
         vm_run := Env.has(c"ABYSS_VM")
+        emit_object := false
+        hosted_obj := false
         import_dirs := Vec(Str).new()
         map_keys := Vec(Str).new()
         map_values := Vec(Str).new()
@@ -64,6 +69,10 @@ CompilerConfig :: struct {
                     print("--arch expects x86_64, aarch64, or wasm32")
                     #sys.fall
                 }
+            } else if arg_str.eq("--emit-obj") {
+                emit_object = true
+            } else if arg_str.eq("--hosted") {
+                hosted_obj = true
             } else if arg_str.eq("--library") {
                 library = true
             } else if arg_str.eq("-I") {
@@ -127,10 +136,23 @@ CompilerConfig :: struct {
             print("VM execution requires a program for the host target")
             #sys.fall
         }
+        if emit_object {
+            if vm_run or target_os != target.Os.linux or target_arch != target.Arch.x86_64 {
+                sys.write_stderr("--emit-obj requires a Linux x86_64 build\n")
+                #sys.fall
+            }
+            if pos_idx < 2 { out = c"out.o" }
+        }
+        if hosted_obj and not emit_object {
+            sys.write_stderr("--hosted requires --emit-obj\n")
+            #sys.fall
+        }
         .{
             src_path: src
             out_path: out
             is_vm_run: vm_run
+            emit_object: emit_object
+            hosted_obj: hosted_obj
             import_dirs: import_dirs
             map_keys: map_keys
             map_values: map_values
@@ -172,7 +194,11 @@ Driver :: struct {
         executable := not self.config.is_library and self.config.target_os != target.Os.freestanding
         eng.nexus.native_output = not self.config.is_vm_run
         eng.nexus.native_executable = executable and eng.nexus.native_output
-        fid := eng.add_file(Str.of(self.config.src_path), source)
+        fid := eng.add_file_with_runtime(
+            Str.of(self.config.src_path)
+            source
+            not self.config.emit_object or (executable and self.config.hosted_obj)
+        )
         sym_id := eng.build_entry(fid, executable)
 
         if self.config.is_vm_run {
@@ -197,8 +223,12 @@ Driver :: struct {
             ret
         }
         program := air.lower(&eng.nexus, self.arena, fid, sym_id, id_none())
-        c_code := c99.emit(self.arena, &program, self.config.target_os, executable)
-        fs.write_file(self.config.out_path, c_code)
+        output := if self.config.emit_object {
+            x86_64.emit(self.arena, &program, executable, self.config.hosted_obj)
+        } else {
+            c99.emit(self.arena, &program, self.config.target_os, executable)
+        }
+        fs.write_file(self.config.out_path, output)
         program.destroy()
     }
 }

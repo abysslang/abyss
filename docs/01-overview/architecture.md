@@ -51,7 +51,7 @@ The payoff is a compiler that parses and type-checks fast enough to be invisible
 
 Native calls from the VM go through a runtime binding layer built on the platform's foreign-function interface, so `extern` declarations work under `abyssc r` as well as in emitted binaries.
 
-## 4. The C99 Backend
+## 4. Keel Backends
 
 `abyssc b main.a out.c` emits one portable C99 translation unit. Compile it with any supported C compiler:
 
@@ -71,13 +71,51 @@ finishes type checking, then prints function bodies as basic blocks and SSA valu
 with globals and external declarations. Pass a function name after the path to inspect
 one function and its dependencies. AIR dumping does not execute the program.
 
+On Linux x86-64, Keel can also write a relocatable ELF object directly. Try it
+with this `main.a`:
+
+```abyss
+main :: fn() i32 { 42 }
+```
+
+```sh
+abyssc b --target linux --arch x86_64 --emit-obj main.a main.o
+ld -o main main.o
+./main
+echo $?
+```
+
+The program exits with status `42`. Keel encodes machine instructions and
+relocations itself. Its entry point calls `main` and exits through a Linux
+system call, so this program links without an assembler or libc.
+
+For programs that use libc or the hosted standard library, emit a hosted
+object and link it with the system runtime:
+
+```sh
+abyssc b --emit-obj --hosted main.a main.o
+cc -no-pie main.o -lm -pthread -o main
+```
+
+The `cc` command only links; the input is already machine code. The backend
+uses stack slots for SSA values and supports integers through 128 bits,
+floating point, indirect calls, and System V argument and return conventions.
+Some wide integer operations need compiler runtime helpers. Use `--library`
+to emit exported functions without a program entry point. The ELF backend
+knows the glibc layouts and constants used by the standard library. Use C99
+for arbitrary C header layouts and constants, or for other platforms.
+
 ## 5. Self-Hosting and Fixed-Point Determinism
 
 The compiler compiles itself:
 
 $$\text{abyssc}_{G_1}(\text{main.a}) \rightarrow G_2 \qquad \text{abyssc}_{G_2}(\text{main.a}) \rightarrow G_3$$
 
-Multi-generation bootstrap verification checks that generation two and generation three produce byte-identical C source. There is no randomness, timestamp, or environment leakage in the emitted output, which makes the build reproducible across machines. Release and maintainer workflows gate on this fixed point before shipping.
+Bootstrap verification checks that generation two and generation three
+produce byte-identical C source. On Linux x86-64 it then runs an ELF bootstrap,
+starting with the C-built compiler and checking that the ELF-built compilers
+emit byte-identical objects. The compiler suite compares shared runtime
+fixtures across the VM, C99, and ELF on that platform.
 
 ## 6. Zero-Dependency Bootstrap
 

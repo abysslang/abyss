@@ -103,7 +103,31 @@ if ! cmp -s "${WORK_DIR}/final.c" "${WORK_DIR}/gen_${ROUNDS}.c"; then
 fi
 
 export ABYSS_TEST_FULL=true
-bash "${ROOT_DIR}/scripts/test_compiler.sh" "${CURRENT_COMPILER}"
+TEST_COMPILER="${CURRENT_COMPILER}"
+if [[ "$(uname -sm)" == "Linux x86_64" ]]; then
+    echo -e "\n${CYAN}Verifying the ELF object bootstrap...${RESET}"
+    NATIVE_COMPILER="${CURRENT_COMPILER}"
+    PREV_OBJECT=""
+    for round in $(seq 1 "${ROUNDS}"); do
+        object="${WORK_DIR}/native_${round}.o"
+        binary="${WORK_DIR}/abyss_native_${round}"
+        timeout 90s "${NATIVE_COMPILER}" b --emit-obj --hosted "${ROOT_DIR}/compiler/main.a" "${object}"
+        bash "${ROOT_DIR}/scripts/link_object.sh" "${object}" -o "${binary}"
+        if [[ -n "${PREV_OBJECT}" ]] && ! cmp -s "${PREV_OBJECT}" "${object}"; then
+            echo "[FAIL] ELF object diverged at generation ${round}"
+            exit 1
+        fi
+        printf '    ELF generation %s: ' "${round}"
+        sha256sum "${object}"
+        PREV_OBJECT="${object}"
+        NATIVE_COMPILER="${binary}"
+    done
+    timeout 90s "${NATIVE_COMPILER}" b --emit-obj --hosted "${ROOT_DIR}/compiler/main.a" "${WORK_DIR}/final.o"
+    cmp "${PREV_OBJECT}" "${WORK_DIR}/final.o"
+    TEST_COMPILER="${NATIVE_COMPILER}"
+    echo "ELF fixed point verified."
+fi
+bash "${ROOT_DIR}/scripts/test_compiler.sh" "${TEST_COMPILER}"
 
 echo -e "\n${CYAN}====================================================${RESET}"
 if [ "${FIXED_POINT_REACHED}" = true ]; then

@@ -23,6 +23,11 @@ fi
 for _ in {1..5}; do
     timeout 15s "${WORK_DIR}/thread"
 done
+if [[ "${ABYSS_TEST_OBJECT:-false}" == true ]]; then
+    "${COMPILER}" b --emit-obj --hosted tests/native/thread.a "${WORK_DIR}/thread.o"
+    bash scripts/link_object.sh "${WORK_DIR}/thread.o" -o "${WORK_DIR}/thread-elf"
+    timeout 15s "${WORK_DIR}/thread-elf"
+fi
 
 if [[ "${HOST}" == Linux ]] && command -v gcc >/dev/null; then
     "${COMPILER}" b tests/native/thread_failures.a "${WORK_DIR}/failures.c"
@@ -31,6 +36,14 @@ if [[ "${HOST}" == Linux ]] && command -v gcc >/dev/null; then
         -Wl,--wrap=nanosleep \
         -o "${WORK_DIR}/failures"
     timeout 15s "${WORK_DIR}/failures"
+    if [[ "${ABYSS_TEST_OBJECT:-false}" == true ]]; then
+        "${COMPILER}" b --emit-obj --hosted tests/native/thread_failures.a "${WORK_DIR}/failures.o"
+        gcc -std=gnu11 -pthread -O2 "${STRICT[@]}" -c tests/native/thread_faults.c -o "${WORK_DIR}/faults.o"
+        bash scripts/link_object.sh "${WORK_DIR}/failures.o" "${WORK_DIR}/faults.o" \
+            -Wl,--wrap=malloc,--wrap=free,--wrap=pthread_create,--wrap=pthread_join,--wrap=pthread_mutex_init,--wrap=nanosleep \
+            -o "${WORK_DIR}/failures-elf"
+        timeout 15s "${WORK_DIR}/failures-elf"
+    fi
 fi
 
 if command -v x86_64-w64-mingw32-gcc >/dev/null; then

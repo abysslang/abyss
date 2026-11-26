@@ -29,6 +29,16 @@ fi
 "${CC}" -std=c99 -D_POSIX_C_SOURCE=200809L -Werror=implicit-function-declaration -Werror=incompatible-pointer-types \
     "${WORK_DIR}/headers.c" -o "${WORK_DIR}/headers"
 timeout 10s "${WORK_DIR}/headers"
+if [[ "${ABYSS_TEST_OBJECT:-false}" == true ]]; then
+    timeout 30s "${COMPILER}" b --emit-obj --hosted "${FIXTURES}/interop.a" "${WORK_DIR}/interop.o"
+    timeout 30s "${COMPILER}" b --emit-obj --library "${FIXTURES}/fixture.a" "${WORK_DIR}/fixture.o"
+    bash scripts/link_object.sh "${WORK_DIR}/interop.o" "${WORK_DIR}/fixture.o" -o "${WORK_DIR}/interop-elf"
+    timeout 10s "${WORK_DIR}/interop-elf" > "${WORK_DIR}/object.out"
+    diff -u "${WORK_DIR}/expected" "${WORK_DIR}/object.out"
+    timeout 30s "${COMPILER}" b --emit-obj --hosted "${FIXTURES}/headers.a" "${WORK_DIR}/headers.o"
+    bash scripts/link_object.sh "${WORK_DIR}/headers.o" -o "${WORK_DIR}/headers-elf"
+    timeout 10s "${WORK_DIR}/headers-elf"
+fi
 
 for mode in r wasi freestanding; do
     args=(b --target "${mode}")
@@ -62,10 +72,14 @@ while IFS=$'\t' read -r name line message source; do
     case_file="${WORK_DIR}/${name}.a"
     output="${WORK_DIR}/${name}.c"
     printf '%s\n' "${source//|/$'\n'}" > "${case_file}"
-    for mode in b r; do
+    modes=(b r)
+    if [[ "${ABYSS_TEST_OBJECT:-false}" == true ]]; then modes+=(elf); fi
+    for mode in "${modes[@]}"; do
+        args=("${mode}")
+        if [[ "${mode}" == elf ]]; then args=(b --emit-obj --hosted); fi
         log="${WORK_DIR}/${name}.${mode}.log"
         status=0
-        timeout 10s "${COMPILER}" "${mode}" "${case_file}" "${output}" > "${log}" 2>&1 || status=$?
+        timeout 10s "${COMPILER}" "${args[@]}" "${case_file}" "${output}" > "${log}" 2>&1 || status=$?
         if [[ ${status} -ne 1 || -e "${output}" ]] ||
             ! grep -Fq -- "${message}" "${log}" ||
             ! grep -Fq -- "${name}.a:${line}:" "${log}"; then
@@ -90,4 +104,6 @@ if [[ ${status} -ne 1 ]] || ! grep -Fq 'undefined external symbol: abyss_no_such
     exit 1
 fi
 
-printf '  ✔ PASS  %-36s [C+VM; %s compile diagnostics per backend and one VM runtime diagnostic]\n' "extern_abi" "${count}"
+backends=C+VM
+if [[ "${ABYSS_TEST_OBJECT:-false}" == true ]]; then backends+=+ELF; fi
+printf '  ✔ PASS  %-36s [%s; %s compile diagnostics per backend and one VM runtime diagnostic]\n' "extern_abi" "${backends}" "${count}"

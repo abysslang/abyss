@@ -1,0 +1,208 @@
+Arena :: @import("std/allocator").Arena
+String :: @import("std/string").String
+
+Buffer :: struct {
+    bytes String
+
+    new :: fn(arena &Arena) Self { .{ bytes: String.new(arena) } }
+    len :: fn(self &Self) u64 { self.bytes.len }
+    view :: fn(self &Self) Str { self.bytes.as_str() }
+    raw :: fn(self &Self, bytes Str) { self.bytes.push_str(bytes) }
+
+    put :: fn(self &Self, value u64, size u64) {
+        start := self.len()
+        self.bytes.reserve(start + size)
+        self.bytes.len = start + size
+        self.patch(start, value, size)
+    }
+
+    patch :: fn(self &Self, at, value, size u64) {
+        pos: u64 = 0
+        while pos < size {
+            self.bytes.ptr[at + pos] = (value >> (pos * 8)) as u8
+            pos = pos + 1
+        }
+    }
+
+    align :: fn(self &Self, alignment u64) {
+        end := (self.len() + alignment - 1) & (0 - alignment)
+        self.zeros(end - self.len())
+    }
+
+    zeros :: fn(self &Self, size u64) {
+        start := self.len()
+        self.bytes.reserve(start + size)
+        pos: u64 = 0
+        while pos < size {
+            self.bytes.ptr[start + pos] = 0
+            pos = pos + 1
+        }
+        self.bytes.len = start + size
+    }
+}
+
+text_section :: fn() u16 { 1 }
+data_section :: fn() u16 { 2 }
+
+Image :: struct {
+    text, data, relocs, symbols, names Buffer
+    alignment u64
+    initializer u32
+
+    new :: fn(arena &Arena) Self {
+        image: Self = .{
+            text: Buffer.new(arena)
+            data: Buffer.new(arena)
+            relocs: Buffer.new(arena)
+            symbols: Buffer.new(arena)
+            names: Buffer.new(arena)
+            alignment: 1
+            initializer: 0
+        }
+        image.symbols.zeros(24)
+        image.names.put(0, 1)
+        image
+    }
+
+    symbol_count :: fn(self &Self) u32 { (self.symbols.len() / 24) as u32 }
+
+    symbol :: fn(self &Self, name Str, section u16, info u8) u32 {
+        index := self.symbol_count()
+        self.symbols.put(if name.len == 0 { 0 } else { self.names.len() }, 4)
+        self.symbols.put(info as u64, 1)
+        self.symbols.put(0, 1)
+        self.symbols.put(section as u64, 2)
+        self.symbols.zeros(16)
+        if name.len != 0 {
+            self.names.raw(name)
+            self.names.put(0, 1)
+        }
+        index
+    }
+
+    define :: fn(self &Self, symbol u32, offset, size u64) {
+        at := symbol as u64 * 24
+        self.symbols.patch(at + 8, offset, 8)
+        self.symbols.patch(at + 16, size, 8)
+    }
+
+    relative :: fn(self &Self, symbol, kind u32) {
+        self.relocs.put(self.text.len(), 8)
+        self.relocs.put((symbol as u64 << 32) | kind as u64, 8)
+        self.relocs.put((-4 as i64) as u64, 8)
+        self.text.put(0, 4)
+    }
+}
+
+Section :: struct {
+    name, kind, link, info             u32
+    flags, offset, size, align, stride u64
+
+    write :: fn(self &Self, out &Buffer) {
+        out.put(self.name as u64, 4)
+        out.put(self.kind as u64, 4)
+        out.put(self.flags, 8)
+        out.put(0, 8)
+        out.put(self.offset, 8)
+        out.put(self.size, 8)
+        out.put(self.link as u64, 4)
+        out.put(self.info as u64, 4)
+        out.put(self.align, 8)
+        out.put(self.stride, 8)
+    }
+}
+
+section :: fn(out, names &Buffer, name Str, bytes Str, kind u32, flags, align u64) Section {
+    index := names.len()
+    names.raw(name)
+    names.put(0, 1)
+    out.align(align)
+    offset := out.len()
+    out.raw(bytes)
+    .{
+        name: index as u32
+        kind: kind
+        flags: flags
+        offset: offset
+        size: bytes.len
+        align: align
+        link: 0
+        info: 0
+        stride: 0
+    }
+}
+
+emit :: fn(arena &Arena, image &Image, first_global u32) Str {
+    out := Buffer.new(arena)
+    names := Buffer.new(arena)
+    names.put(0, 1)
+    out.raw("\x7fELF\x02\x01\x01")
+    out.zeros(9)
+    out.put(1, 2)
+    out.put(62, 2)
+    out.put(1, 4)
+    out.zeros(24)
+    out.put(0, 4)
+    out.put(64, 2)
+    out.zeros(4)
+    out.put(64, 2)
+    out.put(if image.initializer == 0 { 8 } else { 10 }, 2)
+    out.put(7, 2)
+
+    code := section(&out, &names, ".text", image.text.view(), 1, 6, 16)
+    data := section(&out, &names, ".data", image.data.view(), 1, 3, image.alignment)
+    reloc := section(&out, &names, ".rela.text", image.relocs.view(), 4, 64, 8)
+    reloc.link = 4
+    reloc.info = text_section() as u32
+    reloc.stride = 24
+    symbols := section(&out, &names, ".symtab", image.symbols.view(), 2, 0, 8)
+    symbols.link = 5
+    symbols.info = first_global
+    symbols.stride = 24
+    strings := section(&out, &names, ".strtab", image.names.view(), 3, 0, 1)
+    stack := section(&out, &names, ".note.GNU-stack", Str.empty(), 1, 0, 1)
+    init_bytes := Buffer.new(arena)
+    init_reloc := Buffer.new(arena)
+    if image.initializer != 0 {
+        init_bytes.zeros(8)
+        init_reloc.put(0, 8)
+        init_reloc.put(((image.initializer as u64) << 32) | 1, 8)
+        init_reloc.put(0, 8)
+    }
+    init := section(&out, &names, ".init_array", init_bytes.view(), 14, 3, 8)
+    init.stride = 8
+    init_relocations := section(&out, &names, ".rela.init_array", init_reloc.view(), 4, 64, 8)
+    init_relocations.link = 4
+    init_relocations.info = 8
+    init_relocations.stride = 24
+    sh_name := names.len()
+    names.raw(".shstrtab")
+    names.put(0, 1)
+    sh_strings: Section = .{
+        name: sh_name as u32
+        kind: 3
+        offset: out.len()
+        size: names.len()
+        align: 1
+        flags: 0
+        link: 0
+        info: 0
+        stride: 0
+    }
+    out.raw(names.view())
+    out.align(8)
+    out.patch(40, out.len(), 8)
+    out.zeros(64)
+    code.write(&out)
+    data.write(&out)
+    reloc.write(&out)
+    symbols.write(&out)
+    strings.write(&out)
+    stack.write(&out)
+    sh_strings.write(&out)
+    if image.initializer != 0 {
+        init.write(&out)
+        init_relocations.write(&out)
+    }
+    out.view()
+}

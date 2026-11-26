@@ -57,6 +57,17 @@ else
 fi
 
 SUITE_START=$(date +%s%3N)
+OBJECT_TEST=false
+if [[ "${ABYSS_TEST_WINE:-false}" != true && "$(uname -sm)" == "Linux x86_64" ]]; then
+    OBJECT_TEST=true
+fi
+export ABYSS_TEST_OBJECT="${OBJECT_TEST}"
+SHARED_BACKENDS=C+VM
+NATIVE_BACKENDS=C
+if [[ "${OBJECT_TEST}" == true ]]; then
+    SHARED_BACKENDS+=+ELF
+    NATIVE_BACKENDS+=+ELF
+fi
 
 echo -e "${CYAN}========================================================================${RESET}"
 echo -e "${BOLD}   ABYSS TEST RUNNER${RESET}  ${DIM}(Backend: ${C_COMPILER} | Target: $(basename "${COMPILER}"))${RESET}"
@@ -168,9 +179,27 @@ while IFS= read -r TEST_FILE; do
             FAILED=$((FAILED + 1))
             continue
         fi
+        if [[ "${OBJECT_TEST}" == true ]]; then
+            OBJECT_FILE="${CASE_DIR}/out.o"
+            OBJECT_LOG="${CASE_DIR}/object_compile.log"
+            OBJECT_STATUS=0
+            timeout 30s "${COMPILER}" b --emit-obj --hosted "${TEST_FILE}" "${OBJECT_FILE}" > "${OBJECT_LOG}" 2>&1 || OBJECT_STATUS=$?
+            OBJECT_MATCHED=true
+            while IFS= read -r PATTERN; do
+                if ! grep -Fq -- "${PATTERN}" "${OBJECT_LOG}"; then
+                    OBJECT_MATCHED=false
+                fi
+            done < "${TEST_FILE%.a}.err"
+            if [[ ${OBJECT_STATUS} -ne 1 || -e "${OBJECT_FILE}" || "${OBJECT_MATCHED}" != true ]]; then
+                printf "  ${RED}✘ FAIL${RESET}  %-36s ${RED}[ELF] diagnostic mismatch (status %s)${RESET}\n" "${TEST_NAME}" "${OBJECT_STATUS}"
+                cat "${OBJECT_LOG}"
+                FAILED=$((FAILED + 1))
+                continue
+            fi
+        fi
         CASE_END=$(date +%s%3N)
         CASE_MS=$((CASE_END - CASE_START))
-        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[Errors]${RESET} ${DIM}(%sms)${RESET}\n" "${TEST_NAME}" "${CASE_MS}"
+        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[Errors: %s]${RESET} ${DIM}(%sms)${RESET}\n" "${TEST_NAME}" "${SHARED_BACKENDS}" "${CASE_MS}"
     else
         C_OUT="${CASE_DIR}/out.c"
         C_LOG="${CASE_DIR}/c_compile.log"
@@ -229,9 +258,24 @@ while IFS= read -r TEST_FILE; do
             FAILED=$((FAILED + 1))
             continue
         fi
+        if [[ "${OBJECT_TEST}" == true ]]; then
+            OBJECT_LOG="${CASE_DIR}/object.log"
+            OBJECT_OUT="${CASE_DIR}/object_actual.out"
+            if ! {
+                timeout 30s "${COMPILER}" b --emit-obj --hosted "${TEST_FILE}" "${CASE_DIR}/out.o" &&
+                bash "${ROOT_DIR}/scripts/link_object.sh" "${CASE_DIR}/out.o" -o "${CASE_DIR}/object_program" &&
+                timeout 5s "${CASE_DIR}/object_program" > "${OBJECT_OUT}" &&
+                diff --strip-trailing-cr -u "${TEST_FILE%.a}.out" "${OBJECT_OUT}"
+            } > "${OBJECT_LOG}" 2>&1; then
+                printf "  ${RED}✘ FAIL${RESET}  %-36s ${RED}[ELF] compile, link, or execution failed${RESET}\n" "${TEST_NAME}"
+                cat "${OBJECT_LOG}"
+                FAILED=$((FAILED + 1))
+                continue
+            fi
+        fi
         CASE_END=$(date +%s%3N)
         CASE_MS=$((CASE_END - CASE_START))
-        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[C+VM]${RESET} ${DIM}(%sms)${RESET}\n" "${TEST_NAME}" "${CASE_MS}"
+        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[%s]${RESET} ${DIM}(%sms)${RESET}\n" "${TEST_NAME}" "${SHARED_BACKENDS}" "${CASE_MS}"
     fi
     PASSED=$((PASSED + 1))
 done < <(find tests -type f -name '*.a' | sort)
@@ -248,10 +292,10 @@ fi
 if [[ -z "${FILTER}" || fall == *"${FILTER}"* ]]; then
     TOTAL=$((TOTAL + 1))
     if bash "${ROOT_DIR}/scripts/test_fall.sh" "${COMPILER}" "${C_COMPILER}" "${WORK_DIR}/fall"; then
-        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[C+VM]${RESET}\n" "fall_source_location"
+        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[%s]${RESET}\n" "fall_source_location" "${SHARED_BACKENDS}"
         PASSED=$((PASSED + 1))
     else
-        printf "  ${RED}✘ FAIL${RESET}  %-36s ${RED}[C+VM]${RESET}\n" "fall_source_location"
+        printf "  ${RED}✘ FAIL${RESET}  %-36s ${RED}[%s]${RESET}\n" "fall_source_location" "${SHARED_BACKENDS}"
         FAILED=$((FAILED + 1))
     fi
 fi
@@ -259,10 +303,10 @@ fi
 if [[ -z "${FILTER}" || thread == *"${FILTER}"* ]]; then
     TOTAL=$((TOTAL + 1))
     if bash "${ROOT_DIR}/scripts/test_threads.sh" "${COMPILER}" "${C_COMPILER}" "${WORK_DIR}/thread"; then
-        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[Native]${RESET}\n" "thread_runtime"
+        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[%s]${RESET}\n" "thread_runtime" "${NATIVE_BACKENDS}"
         PASSED=$((PASSED + 1))
     else
-        printf "  ${RED}✘ FAIL${RESET}  %-36s ${DIM}[Native]${RESET}\n" "thread_runtime"
+        printf "  ${RED}✘ FAIL${RESET}  %-36s ${DIM}[%s]${RESET}\n" "thread_runtime" "${NATIVE_BACKENDS}"
         FAILED=$((FAILED + 1))
     fi
 fi
@@ -274,6 +318,17 @@ if [[ -z "${FILTER}" || air == *"${FILTER}"* ]]; then
         PASSED=$((PASSED + 1))
     else
         printf "  ${RED}✘ FAIL${RESET}  %-36s ${DIM}[AIR]${RESET}\n" "air_dump"
+        FAILED=$((FAILED + 1))
+    fi
+fi
+
+if [[ "${OBJECT_TEST}" == true && ( -z "${FILTER}" || object == *"${FILTER}"* ) ]]; then
+    TOTAL=$((TOTAL + 1))
+    if bash "${ROOT_DIR}/scripts/test_object.sh" "${COMPILER}" "${WORK_DIR}/object"; then
+        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[ELF]${RESET}\n" "object_backend"
+        PASSED=$((PASSED + 1))
+    else
+        printf "  ${RED}✘ FAIL${RESET}  %-36s ${RED}[ELF]${RESET}\n" "object_backend"
         FAILED=$((FAILED + 1))
     fi
 fi

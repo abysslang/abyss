@@ -1,0 +1,212 @@
+abi :: @import("pods/keel/abi_types")
+program :: @import("pods/keel/program")
+Ty :: @import("pods/keel/ir").Ty
+Program :: program.Program
+sys :: @import("std/sys")
+
+fail :: fn(message Str) {
+    sys.write_stderr("[object error] ")
+    sys.write_stderr(message)
+    sys.write_stderr("\n")
+    sys.exit_process(1)
+}
+
+align_up :: fn(size, align u64) u64 { (size + align - 1) & (0 - align) }
+
+Shape :: struct {
+    size, align u64
+}
+
+shape :: fn(size, align u64) Shape { .{ size: size, align: align } }
+
+header :: fn(ty abi.Type) Shape {
+    if ty.header.eq("pthread.h") {
+        if ty.name.eq("pthread_t") { ret shape(8, 8) }
+        if ty.name.eq("pthread_attr_t") { ret shape(56, 8) }
+        if ty.name.eq("pthread_mutex_t") { ret shape(40, 8) }
+        if ty.name.eq("pthread_mutexattr_t") { ret shape(4, 4) }
+    }
+    if ty.header.eq("stdlib.h") and ty.name.eq("div_t") { ret shape(8, 4) }
+    if ty.header.eq("time.h") and ty.name.eq("struct timespec") { ret shape(16, 8) }
+    fail("unknown Linux x86-64 header type layout")
+    shape(0, 1)
+}
+
+layout :: fn(air &Program, key u32) Shape {
+    ty := air.abi_type(key)
+    match ty.kind {
+        pointer, function { ret shape(8, 8) }
+        header { ret header(ty) }
+        scalar {
+            size: u64 = match ty.scalar {
+                void_ { 0 }
+                i1, i8_, u8_ { 1 }
+                i16_, u16_ { 2 }
+                i32_, u32_, f32_ { 4 }
+                i128_, u128_ { 16 }
+                else { 8 }
+            }
+            ret shape(size, if size == 0 { 1 } else { size })
+        }
+        array {
+            item := layout(air, ty.inner)
+            ret shape(item.size * ty.count as u64, item.align)
+        }
+        else {
+            merged := if ty.kind == abi.Kind.union_ { shape(0, 4) } else { shape(0, 1) }
+            index: u32 = 0
+            while index < ty.count {
+                item := layout(air, air.abi_field(ty, index).ty)
+                if ty.kind == abi.Kind.union_ {
+                    if item.size > merged.size { merged.size = item.size }
+                } else {
+                    merged.size = align_up(merged.size, item.align) + item.size
+                }
+                if item.align > merged.align { merged.align = item.align }
+                index = index + 1
+            }
+            if ty.kind == abi.Kind.union_ {
+                if merged.size == 0 { merged.size = 1 }
+                merged.size = align_up(4, merged.align) + merged.size
+            }
+            if merged.size == 0 { merged.size = 1 }
+            merged.size = align_up(merged.size, merged.align)
+            ret merged
+        }
+    }
+    shape(0, 1)
+}
+
+field_offset :: fn(air &Program, key, field u32) u64 {
+    ty := air.abi_type(key)
+    offset: u64 = 0
+    index: u32 = 0
+    while index < field {
+        item := layout(air, air.abi_field(ty, index).ty)
+        offset = align_up(offset, item.align) + item.size
+        index = index + 1
+    }
+    align_up(offset, layout(air, air.abi_field(ty, field).ty).align)
+}
+
+payload_offset :: fn(air &Program, ty u32) u64 { align_up(4, layout(air, ty).align) }
+
+header_offset :: fn(ty abi.Type, name Str) u64 {
+    if ty.header.eq("stdlib.h") and ty.name.eq("div_t") {
+        if name.eq("quot") { ret 0 }
+        if name.eq("rem") { ret 4 }
+    }
+    if ty.header.eq("time.h") and ty.name.eq("struct timespec") {
+        if name.eq("tv_sec") { ret 0 }
+        if name.eq("tv_nsec") { ret 8 }
+    }
+    fail("unknown Linux x86-64 header field")
+    0
+}
+
+header_value :: fn(header, name Str) u64 {
+    if header.eq("limits.h") {
+        if name.eq("CHAR_BIT") { ret 8 }
+        if name.eq("UCHAR_MAX") { ret 255 }
+    }
+    if header.eq("stdio.h") and name.eq("EOF") { ret 0 - (1 as u64) }
+    if header.eq("pthread.h") and name.eq("PTHREAD_CREATE_DETACHED") { ret 1 }
+    if header.eq("errno.h") {
+        if name.eq("EINTR") { ret 4 }
+        if name.eq("ENOMEM") { ret 12 }
+        if name.eq("EOVERFLOW") { ret 75 }
+    }
+    fail("unknown Linux x86-64 header value")
+    0
+}
+
+Class :: enum u8 {
+    empty
+    integer
+    sse
+}
+
+Classification :: struct {
+    parts       [2]Class
+    size, align u64
+
+    gp :: fn(self &Self) u64 {
+        (self.parts[0] == Class.integer) as u64 + ((self.parts[1] == Class.integer) as u64)
+    }
+
+    sse :: fn(self &Self) u64 {
+        (self.parts[0] == Class.sse) as u64 + ((self.parts[1] == Class.sse) as u64)
+    }
+}
+
+merge :: fn(parts &[2]Class, index u64, kind Class) {
+    prev := (*parts)[index]
+    if prev == Class.empty or kind == Class.integer { (*parts)[index] = kind }
+}
+
+classes_at :: fn(air &Program, parts &[2]Class, key u32, at u64) {
+    ty := air.abi_type(key)
+    match ty.kind {
+        record, union_ {
+            offset: u64 = 0
+            if ty.kind == abi.Kind.union_ {
+                merge(parts, at / 8, Class.integer)
+                offset = payload_offset(air, key)
+            }
+            index: u32 = 0
+            while index < ty.count {
+                field := air.abi_field(ty, index).ty
+                place := if ty.kind == abi.Kind.union_ { offset } else {
+                    field_offset(air, key, index)
+                }
+                classes_at(air, parts, field, at + place)
+                index = index + 1
+            }
+            if ty.count == 0 { merge(parts, (at + offset) / 8, Class.integer) }
+        }
+        array {
+            stride := layout(air, ty.inner).size
+            index: u64 = 0
+            while index < ty.count as u64 and stride != 0 {
+                classes_at(air, parts, ty.inner, at + stride * index)
+                index = index + 1
+            }
+        }
+        else {
+            item := layout(air, key)
+            if item.size != 0 {
+                kind := if ty.scalar == Ty.f32_ or ty.scalar == Ty.f64_ { Class.sse } else {
+                    Class.integer
+                }
+                merge(parts, at / 8, kind)
+                if at / 8 != (at + item.size - 1) / 8 {
+                    merge(parts, (at + item.size - 1) / 8, kind)
+                }
+            }
+        }
+    }
+}
+
+classify :: fn(air &Program, key u32) Classification {
+    item := layout(air, key)
+    result: Classification = .{
+        parts: .[ Class.empty, Class.empty ]
+        size: item.size
+        align: item.align
+    }
+    if item.size <= 16 { classes_at(air, &result.parts, key, 0) }
+    result
+}
+
+needs_bridge :: fn(air &Program, key u32) bool {
+    if key == 0 { ret false }
+    sig := air.abi_type(key)
+    if air.abi_type(sig.inner).indirect() { ret true }
+    index: u32 = 0
+    while index < sig.count {
+        item := air.abi_type(air.abi_field(sig, index).ty)
+        if item.indirect() { ret true }
+        index = index + 1
+    }
+    false
+}
