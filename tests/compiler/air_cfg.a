@@ -1,0 +1,39 @@
+ir :: @import("compiler/air/ir")
+fall :: @import("std/sys").fall
+
+require :: fn(ok bool) {
+    if not ok { #fall }
+}
+
+main :: fn() {
+    func := ir.Function.new()
+    entry := func.block()
+    left := func.block()
+    right := func.block()
+    exit := func.block()
+
+    func.begin(entry)
+    value := func.param(ir.Ty.i32_, 0)
+    flag := func.param(ir.Ty.i1, 1)
+    func.branch(flag, left, right)
+
+    func.begin(right)
+    func.jump(exit)
+    func.begin(left)
+    func.jump(exit)
+    func.begin(exit)
+    func.ret_value(value)
+
+    require(func.ops.len == 6)
+    require(func.range(entry).end == 3)
+    require(func.range(right).start == 3)
+    require(func.range(left).start == 4)
+    require(func.words(2).get(0) == flag.index)
+    targets := func.successors(entry)
+    require(targets.len == 2 and targets.get(0) == left.index and targets.get(1) == right.index)
+    require(func.successors(right).get(0) == exit.index)
+    require(func.successors(exit).len == 0)
+    require(func.words(5).get(0) == value.index)
+    func.destroy()
+    print("AIR CFG OK")
+}

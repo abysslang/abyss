@@ -19,6 +19,7 @@ abyss/
 │   ├── parser/         # Recursive-descent parser producing HIR
 │   ├── typer/          # Type synthesis, unification, comptime & reflection
 │   ├── lower.a         # HIR lowering and desugaring passes
+│   ├── air/            # Experimental typed CFG and diagnostic dump
 │   ├── codegen.a       # C99 code generator
 │   └── vm/             # Native bytecode VM (vm.a) & VM codegen (codegen.a)
 ├── pods/               # Standard, library, and tool pods (managed by Sonar & toolchain)
@@ -87,6 +88,8 @@ The single source of truth for the compilation session:
 ### 4. Backends
 - **C CodeGen** (`compiler/codegen.a`): Generates idiomatic, portable C99 with proper struct and function layouts.
 - **Bytecode VM** (`compiler/vm/`): Fast in-memory bytecode virtual machine used by `./abyss r` for instant execution without invoking an external C compiler.
+
+Run `./abyss emit --dump-air` to inspect the experimental AIR lowering of an embedded `add` function, or pass a source path and function name. AIR uses instruction indices as SSA values and flat operand storage. The preview lowers parameters, addition, and return for simple `i32` functions. The production backends still use `compiler/lower.a`.
 
 ---
 

@@ -1,9 +1,30 @@
 Arena :: @import("std/allocator").Arena
 
 Driver :: @import("compiler/driver").Driver
+Engine :: @import("compiler/engine").Engine
+Env :: @import("std/env").Env
+fs :: @import("std/fs")
+
+dump_air :: fn(arena &Arena) {
+    engine := Engine.new(arena)
+    count := Env.args_len()
+    if count < 3 {
+        engine.dump_air("air-demo.a", "add :: fn(a, b i32) i32 { a + b }", "add")
+    } else {
+        path := Env.arg(2)
+        name := if count > 3 { Str.of(Env.arg(3)) } else { "add" }
+        engine.dump_air(Str.of(path), fs.read_file(arena, path), name)
+    }
+    engine.destroy()
+}
 
 main :: fn() {
     arena := Arena.new(1024 * 1024 * 16)
+    if Env.args_len() > 1 and Str.of(Env.arg(1)).eq("--dump-air") {
+        dump_air(&arena)
+        arena.destroy()
+        ret
+    }
     driver := Driver.new(&arena)
     driver.run()
 }

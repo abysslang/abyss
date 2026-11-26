@@ -1,0 +1,52 @@
+ir :: @import("./ir")
+hir :: @import("compiler/hir")
+Nexus :: @import("compiler/nexus/nexus").Nexus
+types :: @import("compiler/types")
+
+expr :: fn(db &Nexus, out &ir.Function, params &HashMap(u32, ir.Val), node u32) ir.Val {
+    table := &db.hir
+    kind := table.kind(node)
+    if kind == hir.hir_kind.ident {
+        found := params.get(db.get_hir_symbol(node))
+        if found != 0 as &ir.Val { ret *found }
+    }
+    if kind == hir.hir_kind.binary_add {
+        lhs := expr(db, out, params, table.lhs(node))
+        rhs := expr(db, out, params, table.rhs(node))
+        ret out.iadd(lhs, rhs)
+    }
+    db.type_error(node, "AIR expects an i32 parameter or addition")
+    .{ index: 0 }
+}
+
+lower :: fn(db &Nexus, func u32) ir.Function {
+    table := &db.hir
+    sig := db.get_node_type(func)
+    int := db.types.alloc_int(32)
+    root := table.extra(func)
+    if db.types.kind(sig) != types.TyKind.func or db.types.func_return(sig) != int or
+        db.is_extern_fn(func) or
+        root == hir.hir_none() {
+        db.type_error(func, "AIR expects a defined function returning i32")
+    }
+
+    body := db.get_list(table.lhs(root))
+    if body.len != 1 { db.type_error(root, "AIR expects one return expression") }
+    node := body.get(0)
+    if table.kind(node) == hir.hir_kind.k_ret { node = table.lhs(node) }
+
+    out := ir.Function.new()
+    out.begin(out.block())
+    params := HashMap(u32, ir.Val).new()
+    position: u32 = 0
+    for arg in db.get_list(table.lhs(func)) {
+        name := table.lhs(arg)
+        if db.get_node_type(name) != int { db.type_error(arg, "AIR expects i32 parameters") }
+        params.insert(db.get_hir_symbol(name), out.param(ir.Ty.i32_, position))
+        position = position + 1
+    }
+    result := expr(db, &out, &params, node)
+    out.ret_value(result)
+    params.destroy()
+    out
+}

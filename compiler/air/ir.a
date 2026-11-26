@@ -1,0 +1,137 @@
+fall :: @import("std/sys").fall
+
+Val :: struct {
+    index u32
+}
+Block :: struct {
+    index u32
+}
+
+Ty :: enum u8 {
+    void_
+    i1
+    i32_
+}
+Op :: enum u8 {
+    param
+    iadd
+    jump
+    branch
+    ret_
+}
+
+index :: fn(length u64) u32 {
+    if length > 4294967295 as u64 { #fall }
+    length as u32
+}
+
+BlockRange :: struct {
+    start, end u32
+}
+
+Function :: struct {
+    ops         Vec(Op)
+    types       Vec(Ty)
+    starts      Vec(u32)
+    pool        Vec(u32)
+    block_start Vec(u32)
+    block_end   Vec(u32)
+    current     Maybe(Block)
+
+    new :: fn() Self {
+        .{
+            ops: Vec(Op).new()
+            types: Vec(Ty).new()
+            starts: Vec(u32).new()
+            pool: Vec(u32).new()
+            block_start: Vec(u32).new()
+            block_end: Vec(u32).new()
+            current: Maybe(Block).none()
+        }
+    }
+
+    destroy :: fn(self &Self) {
+        self.ops.destroy()
+        self.types.destroy()
+        self.starts.destroy()
+        self.pool.destroy()
+        self.block_start.destroy()
+        self.block_end.destroy()
+    }
+
+    block :: fn(self &Self) Block {
+        id: Block = .{ index: index(self.block_start.len) }
+        self.block_start.push(0)
+        self.block_end.push(0)
+        id
+    }
+
+    begin :: fn(self &Self, id Block) {
+        at := id.index as u64
+        if self.current.is_some() or at >= self.block_start.len { #fall }
+        if self.block_end.get(at) != 0 { #fall }
+        self.block_start.set(at, index(self.ops.len))
+        self.current = Maybe(Block).some(id)
+    }
+
+    emit :: fn(self &Self, op Op, ty Ty, words Slice(u32)) Val {
+        if self.current.is_none() { #fall }
+        next := index(self.ops.len + 1)
+        index(self.pool.len + words.len)
+        self.ops.push(op)
+        self.types.push(ty)
+        self.starts.push(self.pool.len as u32)
+        self.pool.extend(words.ptr, words.len)
+        if op == Op.jump or op == Op.branch or op == Op.ret_ {
+            self.block_end.set(self.current.unwrap().index as u64, next)
+            self.current = Maybe(Block).none()
+        }
+        .{ index: next - 1 }
+    }
+
+    param :: fn(self &Self, ty Ty, position u32) Val {
+        self.emit(Op.param, ty, Slice(u32).new(&position, 1))
+    }
+
+    iadd :: fn(self &Self, lhs, rhs Val) Val {
+        args := .[ lhs.index, rhs.index ]
+        self.emit(Op.iadd, Ty.i32_, Slice(u32).new(&args as &u32, 2))
+    }
+
+    jump :: fn(self &Self, target Block) {
+        self.emit(Op.jump, Ty.void_, Slice(u32).new(&target.index, 1))
+    }
+
+    branch :: fn(self &Self, cond Val, yes, no Block) {
+        args := .[ cond.index, yes.index, no.index ]
+        self.emit(Op.branch, Ty.void_, Slice(u32).new(&args as &u32, 3))
+    }
+
+    ret_value :: fn(self &Self, value Val) {
+        self.emit(Op.ret_, Ty.void_, Slice(u32).new(&value.index, 1))
+    }
+
+    words :: fn(self &Self, at u64) Slice(u32) {
+        first := self.starts.get(at) as u64
+        last := if at + 1 < self.starts.len { self.starts.get(at + 1) as u64 } else {
+            self.pool.len
+        }
+        self.pool.as_slice().sub(first, last - first)
+    }
+
+    successors :: fn(self &Self, id Block) Slice(u32) {
+        end := self.block_end.get(id.index as u64)
+        if end == 0 { ret Slice(u32).empty() }
+        at := (end - 1) as u64
+        match self.ops.get(at) {
+            jump { self.words(at) }
+            branch { self.words(at).sub(1, 2) }
+            else { Slice(u32).empty() }
+        }
+    }
+
+    range :: fn(self &Self, id Block) BlockRange {
+        at := id.index as u64
+        .{ start: self.block_start.get(at), end: self.block_end.get(at) }
+    }
+}

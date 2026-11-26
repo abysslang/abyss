@@ -4,6 +4,8 @@ Path :: @import("std/path").Path
 fall :: @import("std/sys").fall
 current_dir :: @import("std/sys/current_dir").current_dir
 
+air_dump :: @import("./air/dump")
+air_lower :: @import("./air/lower")
 hir :: @import("./hir")
 modules :: @import("./modules")
 lex :: @import("./lexer").lex
@@ -69,6 +71,21 @@ Engine :: struct {
             self.load_module(fid, 0, Str.empty(), runtime)
         }
         fid
+    }
+
+    dump_air :: fn(self &Self, path, source, name Str) {
+        file := self.add_file(path, source)
+        db := &self.nexus
+        symbol := db.find_local_symbol(file, db.interner.intern(name))
+        self.ensure_resolved(symbol)
+        func := db.get_fn_node(symbol)
+        if func == id_none() {
+            printf("[air error] function '{}' not found\n", .(name))
+            #fall
+        }
+        body := air_lower.lower(db, func)
+        air_dump.dump(name, &body)
+        body.destroy()
     }
 
     type_check :: fn(self &Self, sym_id u32) {

@@ -1,0 +1,28 @@
+ir :: @import("./ir")
+
+dump :: fn(name Str, func &ir.Function) {
+    printf("air {}\n", .(name))
+    block: u64 = 0
+    for start in func.block_start {
+        printf("b{}:\n", .(block))
+        at := start as u64
+        end := func.block_end.get(block) as u64
+        while at < end {
+            args := func.words(at)
+            match func.ops.get(at) {
+                param {
+                    ty := if func.types.get(at) == ir.Ty.i1 { "i1" } else { "i32" }
+                    printf("  v{} = param {} {}\n", .(at, ty, args.get(0)))
+                }
+                iadd { printf("  v{} = iadd i32 v{}, v{}\n", .(at, args.get(0), args.get(1))) }
+                jump { printf("  jump b{}\n", .(args.get(0))) }
+                branch {
+                    printf("  branch v{}, b{}, b{}\n", .(args.get(0), args.get(1), args.get(2)))
+                }
+                ret_ { printf("  ret v{}\n", .(args.get(0))) }
+            }
+            at = at + 1
+        }
+        block = block + 1
+    }
+}
