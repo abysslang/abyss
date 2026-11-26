@@ -4,13 +4,15 @@ Nexus :: @import("compiler/nexus/nexus").Nexus
 fall :: @import("std/sys").fall
 Ty :: keel.Ty
 Kind :: types.TyKind
+Arch :: @import("core/target").Arch
+topo :: @import("compiler/topo_sort")
 
 Shape :: struct {
     size, align u32
 }
 
 Field :: struct {
-    offset, ty u32
+    offset, ty, index u32
 }
 
 error :: fn(db &Nexus, node u32, message Str) {
@@ -23,6 +25,11 @@ error :: fn(db &Nexus, node u32, message Str) {
 aggregate :: fn(db &Nexus, ty u32) bool {
     kind := db.types.kind(ty)
     kind == Kind.struct_ or kind == Kind.nominal or kind == Kind.array or kind == Kind.union_
+}
+
+native :: fn(db &Nexus, ty u32) u32 {
+    if db.types.kind(ty) != Kind.nominal { ret hir_none() }
+    db.native_type_node(ty)
 }
 
 scalar :: fn(db &Nexus, ty, node u32) Ty {
@@ -58,16 +65,27 @@ align_up :: fn(size, align u32) u32 {
 }
 
 shape :: fn(db &Nexus, ty, node u32) Shape {
+    shape_at(db, ty, node, 0)
+}
+
+shape_at :: fn(db &Nexus, ty, node, depth u32) Shape {
     table := &db.types
+    if depth == 64 {
+        queue := Vec(u32).new()
+        queue.push(ty)
+        sorted := topo.topo_sort(db, &queue)
+        sorted.destroy()
+        queue.destroy()
+    }
     match table.kind(ty) {
         nominal {
             if db.native_type_node(ty) != hir_none() {
                 error(db, node, "AIR cannot determine the layout of a C header type")
             }
-            ret shape(db, table.nominal_base(ty), node)
+            ret shape_at(db, table.nominal_base(ty), node, depth + 1)
         }
         array {
-            item := shape(db, table.get_array_type(ty), node)
+            item := shape_at(db, table.get_array_type(ty), node, depth + 1)
             size := item.size as u64 * table.get_array_len(ty) as u64
             if size > 4294967295 as u64 { error(db, node, "AIR object exceeds 4 GiB") }
             ret .{ size: size as u32, align: item.align }
@@ -78,7 +96,7 @@ shape :: fn(db &Nexus, ty, node u32) Shape {
             alignment: u32 = 1
             i: u64 = 1
             while i < fields.len {
-                item := shape(db, fields.get(i), node)
+                item := shape_at(db, fields.get(i), node, depth + 1)
                 offset = align_up(offset, item.align) + item.size
                 if alignment < item.align { alignment = item.align }
                 i = i + 2
@@ -86,11 +104,12 @@ shape :: fn(db &Nexus, ty, node u32) Shape {
             ret .{ size: align_up(offset, alignment), align: alignment }
         }
         union_ {
-            alignment := union_align(db, ty, node)
+            alignment: u32 = 4
             size: u32 = 0
             for member in table.union_members(ty) {
-                item := shape(db, member, node)
+                item := shape_at(db, member, node, depth + 1)
                 if size < item.size { size = item.size }
+                if alignment < item.align { alignment = item.align }
             }
             ret .{ size: align_up(alignment + size, alignment), align: alignment }
         }
@@ -102,7 +121,7 @@ shape :: fn(db &Nexus, ty, node u32) Shape {
                 i32_, u32_, f32_ { 4 as u32 }
                 i64_, u64_, f64_ { 8 as u32 }
                 i128_, u128_ { 16 as u32 }
-                ptr { @sizeof(&u8) as u32 }
+                ptr { if db.target_arch == Arch.wasm32 { 4 as u32 } else { 8 as u32 } }
             }
             ret .{ size: size, align: if size == 0 { 1 as u32 } else { size } }
         }
@@ -118,23 +137,22 @@ union_align :: fn(db &Nexus, ty, node u32) u32 {
     align
 }
 
-field :: fn(db &Nexus, ty, name, node u32) Field {
-    if db.native_type_node(ty) != hir_none() {
-        error(db, node, "AIR cannot determine C header field offsets")
-    }
+field :: fn(db &Nexus, ty, name, node u32, dynamic bool) Field {
     fields := db.types.get_struct_fields(ty)
     offset: u32 = 0
     i: u64 = 0
     while i < fields.len {
         item_ty := fields.get(i + 1)
-        item := shape(db, item_ty, node)
-        offset = align_up(offset, item.align)
-        if fields.get(i) == name { ret .{ offset: offset, ty: item_ty } }
-        offset = offset + item.size
+        if not dynamic {
+            item := shape(db, item_ty, node)
+            offset = align_up(offset, item.align)
+            if fields.get(i) != name { offset = offset + item.size }
+        }
+        if fields.get(i) == name { ret .{ offset: offset, ty: item_ty, index: (i / 2) as u32 } }
         i = i + 2
     }
     error(db, node, "field has no runtime offset")
-    .{ offset: 0, ty: types.ty_id_none() }
+    .{ offset: 0, ty: types.ty_id_none(), index: 0 }
 }
 
 hir_none :: @import("compiler/hir").hir_none

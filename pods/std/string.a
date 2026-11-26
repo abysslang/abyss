@@ -107,6 +107,11 @@ String :: struct {
         self.push_u32(value)
         self
     }
+
+    append_u64 :: fn(self &Self, value u64) &Self {
+        Convert.unsigned64(self, value)
+        self
+    }
 }
 
 parse_u32 :: fn(s Str) Maybe(u32) {

@@ -17,7 +17,7 @@ RESET='\033[0m'
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SEED_COMPILER="${ABYSS_COMPILER:-${ROOT_DIR}/abyssc}"
 
-GCC_FLAGS="-std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 -march=native -mtune=native -fomit-frame-pointer -funroll-loops"
+GCC_FLAGS="-std=gnu99 -D_POSIX_C_SOURCE=200809L -O2"
 
 echo -e "${CYAN}====================================================${RESET}"
 echo -e "${CYAN}        ABYSS COMPILER BOOTSTRAP STABILITY TEST     ${RESET}"
@@ -63,18 +63,10 @@ for i in $(seq 1 "${ROUNDS}"); do
     GEN_C="${WORK_DIR}/gen_${i}.c"
 
     GEN_BIN="${WORK_DIR}/abyss_gen_${i}"
-    if [ "${i}" -lt "${ROUNDS}" ] && command -v tcc >/dev/null 2>&1; then
-        echo -e "    Compiling C output via TCC..."
-        if ! tcc -std=c99 -D_POSIX_C_SOURCE=200809L "${GEN_C}" -o "${GEN_BIN}"; then
-            echo -e "${RED}[FAIL] TCC compilation failed for Generation ${i} C output!${RESET}"
-            exit 1
-        fi
-    else
-        echo -e "    Compiling C output via GCC..."
-        if ! gcc ${GCC_FLAGS} "${GEN_C}" -o "${GEN_BIN}"; then
-            echo -e "${RED}[FAIL] GCC compilation failed for Generation ${i} C output!${RESET}"
-            exit 1
-        fi
+    echo -e "    Compiling C output..."
+    if ! "${CC:-gcc}" ${GCC_FLAGS} "${GEN_C}" -o "${GEN_BIN}"; then
+        echo -e "${RED}[FAIL] C compilation failed for Generation ${i}!${RESET}"
+        exit 1
     fi
 
     CURR_C_HASH=$(sha256sum "${GEN_C}" | awk '{print $1}')

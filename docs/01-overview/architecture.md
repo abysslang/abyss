@@ -1,6 +1,6 @@
 # Architecture
 
-Abyss is a self-hosted compiler with two execution engines: a bytecode VM for instant runs and compile-time evaluation, and a C99 backend for native output. Both consume the same typed program, so a feature works the same way in either engine.
+Abyss is a self-hosted compiler with a bytecode VM for direct runs and compile-time evaluation, and a C99 backend for native output. Both paths start from typed HIR.
 
 ---
 
@@ -20,14 +20,16 @@ Abyss is a self-hosted compiler with two execution engines: a bytecode VM for in
               │
       ┌───────┴────────┐
       ▼                ▼
-  Bytecode VM      C99 codegen
-  (immediate run)  (gcc / clang)
+     Bytecode        Keel AIR
+      │                │
+      ▼                ▼
+      VM            C99 output
 ```
 
 1. **Lex and parse.** Each resolved file is tokenized and parsed into HIR nodes. Modules are parsed on demand, so a program only pays for what it imports.
 2. **Resolve modules and symbols.** `@import` resolves a compile-time path to a file, which gets one module identity per compilation. Top-level declarations become members of a namespace value. Preludes (`core/prelude`, `std/prelude`) are loaded first so their names are available everywhere.
 3. **Type-check.** Bidirectional unification infers types, resolves generics, and monomorphizes concrete instantiations. Errors point at the offending source location.
-4. **Execute or emit.** The VM executes the typed program immediately, or the C99 backend emits a translation unit that a system C compiler builds natively.
+4. **Execute or emit.** The VM path lowers typed HIR directly to bytecode. The native path lowers typed HIR to AIR, which Keel translates into a C99 translation unit.
 
 The runtime entry point is emitted by the compiler, not written by hand: hosted native builds route through `std/sys/process`, standalone WASI builds through `std/sys/start`, and both are ordinary Abyss source in `pods/std`.
 
@@ -45,7 +47,7 @@ The payoff is a compiler that parses and type-checks fast enough to be invisible
 
 ## 3. The Bytecode VM
 
-`abyssc r main.a` parses, type-checks, compiles to bytecode, and runs in one process. No object files, no linker, no temporary files. The same VM executes `cmpt` blocks and splices during type-checking, which is why compile-time code is written in ordinary Abyss rather than a separate macro language.
+`abyssc r main.a` parses, type-checks, compiles to bytecode, and runs in one process. The same VM executes `cmpt` blocks and splices during type checking. Both paths emit bytecode directly, without building AIR or running optimization passes.
 
 Native calls from the VM go through a runtime binding layer built on the platform's foreign-function interface, so `extern` declarations work under `abyssc r` as well as in emitted binaries.
 
@@ -60,7 +62,11 @@ gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 out.c -o program
 
 Hosted targets use standard C99 declarations and standard library calls. WASI import declarations use compiler attributes (`__attribute__((import_module(...), import_name(...)))`), which is exactly how `clang` marks wasm imports.
 
-To inspect the experimental Abyss IR (AIR), run `abyssc --dump-air main.a`. The compiler
+Keel emits labels and jumps for basic blocks and uses C temporaries for SSA values.
+On each edge, it saves incoming arguments before assigning block parameters so
+that a loop can safely swap two values. Keel runs no optimization passes.
+
+To inspect Abyss IR (AIR), run `abyssc --dump-air main.a`. The compiler
 finishes type checking, then prints function bodies as basic blocks and SSA values, along
 with globals and external declarations. Pass a function name after the path to inspect
 one function and its dependencies. AIR dumping does not execute the program.

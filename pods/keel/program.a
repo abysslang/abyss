@@ -3,6 +3,9 @@ Function :: ir.Function
 Symbol :: id.Symbol
 ir :: @import("./ir")
 id :: @import("./id")
+abi :: @import("./abi_types")
+AbiType :: abi.Type
+AbiField :: abi.Field
 
 Kind :: enum u8 {
     function
@@ -12,18 +15,28 @@ Kind :: enum u8 {
 }
 
 Decl :: struct {
-    kind          Kind
-    name          Str
-    params, count u32
-    result        Ty
-    body          u32
-    size, align   u32
-    bytes         Str
+    kind           Kind
+    name           Str
+    foreign_module Str
+    exported       bool
+    header         Str
+    abi_signature  u32
+    layout         u32
+    params, count  u32
+    result         Ty
+    body           u32
+    size, align    u32
+    bytes          Str
 
     new :: fn(kind Kind, name Str) Self {
         .{
             kind: kind
             name: name
+            foreign_module: Str.empty()
+            exported: false
+            header: Str.empty()
+            abi_signature: 0
+            layout: 0
             params: 0
             count: 0
             result: Ty.void_
@@ -39,6 +52,10 @@ Program :: struct {
     declarations       Vec(Decl)
     types              Vec(Ty)
     functions          Vec(Function)
+    abi_types          Vec(abi.Type)
+    abi_fields         Vec(abi.Field)
+    abi_order          Vec(u32)
+    names              Vec(Str)
     entry, initializer Symbol
 
     new :: fn() Self {
@@ -46,6 +63,10 @@ Program :: struct {
             declarations: Vec(Decl).new()
             types: Vec(Ty).new()
             functions: Vec(Function).new()
+            abi_types: Vec(abi.Type).new()
+            abi_fields: Vec(abi.Field).new()
+            abi_order: Vec(u32).new()
+            names: Vec(Str).new()
             entry: Symbol.none
             initializer: Symbol.none
         }
@@ -56,6 +77,24 @@ Program :: struct {
         self.functions.destroy()
         self.declarations.destroy()
         self.types.destroy()
+        self.abi_types.destroy()
+        self.abi_fields.destroy()
+        self.abi_order.destroy()
+        self.names.destroy()
+    }
+
+    abi_type :: fn(self &Self, key u32) AbiType {
+        self.abi_types.get((key - 1) as u64)
+    }
+
+    abi_field :: fn(self &Self, ty AbiType, position u32) AbiField {
+        self.abi_fields.get(ty.start as u64 + position as u64)
+    }
+
+    text :: fn(self &Self, value Str) u32 {
+        pos := self.names.len as u32
+        self.names.push(value)
+        pos
     }
 
     add :: fn(self &Self, decl Decl) Symbol {
@@ -79,6 +118,12 @@ Program :: struct {
         decl := Decl.new(Kind.global, name)
         decl.size = size
         decl.align = align
+        self.add(decl)
+    }
+
+    typed_global :: fn(self &Self, name Str, layout u32) Symbol {
+        decl := Decl.new(Kind.global, name)
+        decl.layout = layout
         self.add(decl)
     }
 

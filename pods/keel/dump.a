@@ -33,7 +33,7 @@ ty_text :: fn(ty Ty) Str {
 }
 
 op_text :: fn(op Op) Str {
-    names: [34]Str = .[
+    names: [37]Str = .[
         "iadd"
         "sub"
         "mul"
@@ -68,6 +68,9 @@ op_text :: fn(op Op) Str {
         "branch"
         "ret"
         "trap"
+        "abi_size"
+        "abi_field"
+        "c_value"
     ]
     names[op as u64]
 }
@@ -108,9 +111,18 @@ instruction :: fn(out &Fmt, func &Function, inst Inst) {
             ret
         }
         stack {
+            if func.payload(inst, 2) != 0 {
+                out.str(" layout @").uint64(func.payload(inst, 0) as u64)
+                ret
+            }
             out.str(" ").uint64((func.payload(inst, 0)) as u64).str(", align ").uint64(
                 (func.payload(inst, 1)) as u64
             )
+            ret
+        }
+        abi_size, abi_field, c_value {
+            out.str(" @").uint64(func.payload(inst, 0) as u64)
+            if op != Op.abi_size { out.str(", ").uint64(func.payload(inst, 1) as u64) }
             ret
         }
         address { out.str(" @").uint64((func.payload(inst, 0)) as u64), ret }

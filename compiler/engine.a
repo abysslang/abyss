@@ -10,6 +10,8 @@ keel :: @import("pods/keel")
 modules :: @import("./modules")
 lex :: @import("./lexer").lex
 lower_function :: @import("./lower").lower_function
+VmCodeGen :: @import("./vm/codegen").VmCodeGen
+VmCodeBuilder :: @import("./vm/codegen").VmCodeBuilder
 Nexus :: @import("./nexus/nexus").Nexus
 id_none :: @import("./nexus/pool").id_none
 Parser_new :: @import("./parser/core").Parser_new
@@ -328,40 +330,7 @@ Engine :: struct {
         sym_id
     }
 
-    compile :: fn(self &Self, B type, L type, backend &B, builder &L, arena &Arena, sym_id u32) {
-        visited := HashSet(u32).new()
-        lower_function(
-            &self.nexus
-            backend
-            builder
-            backend.empty_value()
-            arena
-            sym_id
-            &visited
-            true
-        )
-        if not backend.is_vm() {
-            for index in Range.new(0, self.nexus.sym_count() as i32) {
-                i := index as u32
-                if self.nexus.sym_tok_start(i) == id_none() or self.nexus.resolve_sym(i) != i {
-                    cont
-                }
-                node := self.nexus.get_fn_node(i)
-                if node != id_none() and self.nexus.is_extern_fn(node) and
-                    self.nexus.hir.extra(node) != hir.hir_none() {
-                    lower_function(
-                        &self.nexus
-                        backend
-                        builder
-                        backend.empty_value()
-                        arena
-                        i
-                        &visited
-                        false
-                    )
-                }
-            }
-        }
-        visited.destroy()
+    compile_vm :: fn(self &Self, backend &VmCodeGen, builder &VmCodeBuilder, sym_id u32) {
+        lower_function(&self.nexus, backend, builder, self.arena, sym_id)
     }
 }

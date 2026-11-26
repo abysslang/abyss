@@ -71,7 +71,7 @@ if [[ "${FULL_TEST}" == true && -z "${FILTER}" ]]; then
         cat "${SELF_HOST_DIR}/stage1_compile.log"
         exit 1
     fi
-    if ! "${C_COMPILER}" ${C_FLAGS} "${SELF_HOST_DIR}/stage1.c" -o "${SELF_HOST_DIR}/stage1_bin" > "${SELF_HOST_DIR}/stage1_c.log" 2>&1; then
+    if ! "${CC:-gcc}" -std=gnu99 -D_POSIX_C_SOURCE=200809L -O2 "${SELF_HOST_DIR}/stage1.c" -o "${SELF_HOST_DIR}/stage1_bin" > "${SELF_HOST_DIR}/stage1_c.log" 2>&1; then
         printf "  ${RED}✘ FAIL${RESET}  %-36s ${RED}stage 1 C build failed${RESET}\n" "fixed_point_verification"
         cat "${SELF_HOST_DIR}/stage1_c.log"
         exit 1
@@ -79,6 +79,10 @@ if [[ "${FULL_TEST}" == true && -z "${FILTER}" ]]; then
     if ! timeout 60s "${SELF_HOST_DIR}/stage1_bin" b "${ROOT_DIR}/compiler/main.a" "${SELF_HOST_DIR}/stage2.c" > "${SELF_HOST_DIR}/stage2_compile.log" 2>&1; then
         printf "  ${RED}✘ FAIL${RESET}  %-36s ${RED}stage 2 self-hosting failed${RESET}\n" "fixed_point_verification"
         cat "${SELF_HOST_DIR}/stage2_compile.log"
+        exit 1
+    fi
+    if ! grep -q '^b1: ;$' "${SELF_HOST_DIR}/stage2.c"; then
+        printf "  ${RED}✘ FAIL${RESET}  %-36s ${RED}Keel blocks were not emitted${RESET}\n" "fixed_point_verification"
         exit 1
     fi
     if ! cmp -s "${SELF_HOST_DIR}/stage1.c" "${SELF_HOST_DIR}/stage2.c"; then

@@ -63,6 +63,7 @@ Uses :: struct {
     }
 
     value :: fn(self &Self, use u32) Val {
+        if use == Use.none as u32 { ret Val.none }
         self.values.get(id.slot(use))
     }
 

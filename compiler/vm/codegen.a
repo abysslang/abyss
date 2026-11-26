@@ -173,14 +173,6 @@ VmCodeGen :: struct {
         self.fn_ptr_fixups_sym.destroy()
     }
 
-    empty_value :: fn(self &Self) VmVal {
-        VmVal.empty()
-    }
-
-    is_vm :: fn(self &Self) bool {
-        true
-    }
-
     has_value :: fn(self &Self, val VmVal) bool {
         val.kind != VmValKind.none
     }
@@ -624,11 +616,11 @@ VmCodeGen :: struct {
         self.fn_ptr_fixups_sym.clear()
     }
 
-    start_function :: fn(self &Self, fn_name VmVal, ret_type VmVal, params VmVal, exported bool) {
-        self.current_fn = fn_name.id
-        self.current_fn_ret_type = ret_type.raw as u32
+    start_function :: fn(self &Self, symbol, result u32) {
+        self.current_fn = symbol
+        self.current_fn_ret_type = result
         entry_ip := self.chunk.buf.len as u32
-        self.register_fn_entry(fn_name.id, entry_ip)
+        self.register_fn_entry(symbol, entry_ip)
         for index in Range.new(0, self.local_types.len as i32) {
             slot := index as u16
             ty := self.get_local_type(slot as u32)
@@ -659,22 +651,6 @@ VmCodeGen :: struct {
         self.local_count = 0
         self.local_types.clear()
     }
-
-    declare_function :: fn(self &Self, fn_name VmVal, ret_type VmVal, params VmVal) {}
-
-    declare_foreign :: fn(
-        self &Self
-        fn_name VmVal
-        ret_type VmVal
-        params VmVal
-        module Str
-        name Str
-    ) {}
-    include_header :: fn(self &Self, header Str) {}
-    declare_header_type :: fn(self &Self, arena &Arena, id u32, header, name Str) {}
-    expr_c_value :: fn(self &Self, arena &Arena, header, name Str, ty VmVal) VmVal { VmVal.empty() }
-    begin_inline_scope :: fn(self &Self) {}
-    end_inline_scope :: fn(self &Self) {}
 
     zero_global :: fn(self &Self, ty u32) &u8 {
         size := vm_data_size(self.types, ty)
@@ -967,24 +943,6 @@ VmCodeGen :: struct {
         }
 
         VmVal.global(1000000 + ext_id)
-    }
-
-    empty_parameters :: fn(self &Self) VmVal {
-        VmVal.empty()
-    }
-
-    parameter_name :: fn(self &Self, arena &Arena, index u32) VmVal {
-        VmVal.local(index)
-    }
-
-    parameter :: fn(self &Self, arena &Arena, ty VmVal, name VmVal) VmVal {
-        slot := if name.kind == VmValKind.local {
-            self.alloc_temp()
-        } else {
-            self.alloc_local(name.id)
-        }
-        self.set_local_type(slot, ty.raw as u32)
-        VmVal.empty()
     }
 
     expr_reflection :: fn(self &Self, D type, arena &Arena, db &D, ty u32, value u64) VmVal {

@@ -1,0 +1,101 @@
+keel :: @import("pods/keel")
+abi :: @import("pods/keel/abi_types")
+types :: @import("compiler/types")
+storage :: @import("./layout")
+Nexus :: @import("compiler/nexus/nexus").Nexus
+Os :: @import("core/target").Os
+
+require_headers :: fn(db &Nexus, node u32) {
+    if db.target_os == Os.wasi or db.target_os == Os.freestanding {
+        db.type_error(node, "C headers require a hosted native target")
+    }
+}
+
+dependent :: fn(db &Nexus, cache &HashMap(u32, bool), ty u32) bool {
+    if not storage.aggregate(db, ty) { ret false }
+    found := cache.get(ty)
+    if found != (0 as &bool) { ret *found }
+    cache.insert(ty, false)
+    table := &db.types
+    result := storage.native(db, ty) != storage.hir_none()
+    if not result {
+        match table.kind(ty) {
+            array { result = dependent(db, cache, table.get_array_type(ty)), {} }
+            union_ {
+                for item in table.union_members(ty) {
+                    if dependent(db, cache, item) { result = true, break }
+                }
+            }
+            else {
+                for pair in table.get_struct_fields(ty).chunks(2) {
+                    if dependent(db, cache, pair.get(1)) { result = true, break }
+                }
+            }
+        }
+    }
+    cache.insert(ty, result)
+    result
+}
+
+lower :: fn(db &Nexus, air &keel.Program, cache &HashMap(u32, u32), ty, node u32) u32 {
+    found := cache.get(ty)
+    if found != (0 as &u32) { ret *found }
+    key := (air.abi_types.len + 1) as u32
+    cache.insert(ty, key)
+    value := abi.Type.new(abi.Kind.scalar)
+    air.abi_types.push(value)
+    table := &db.types
+    fields := Vec(abi.Field).new()
+    native := storage.native(db, ty)
+    if native != storage.hir_none() {
+        require_headers(db, node)
+        value.kind = abi.Kind.header
+        value.name = db.native_type_name(native)
+        value.header = db.extern_header(native)
+    } else {
+        match table.kind(ty) {
+            ptr {
+                value.kind = abi.Kind.pointer
+                value.inner = lower(db, air, cache, table.payload(ty), node)
+                {}
+            }
+            struct_, nominal {
+                value.kind = abi.Kind.record
+                for pair in table.get_struct_fields(ty).chunks(2) {
+                    child := lower(db, air, cache, pair.get(1), node)
+                    fields.push(.{ ty: child, name: Str.empty() })
+                }
+            }
+            union_ {
+                value.kind = abi.Kind.union_
+                for item in table.union_members(ty) {
+                    fields.push(.{ ty: lower(db, air, cache, item, node), name: Str.empty() })
+                }
+            }
+            array {
+                value.kind = abi.Kind.array
+                value.inner = lower(db, air, cache, table.get_array_type(ty), node)
+                value.count = table.get_array_len(ty)
+                {}
+            }
+            func {
+                value.kind = abi.Kind.function
+                value.inner = lower(db, air, cache, table.func_return(ty), node)
+                for param in table.func_params(ty) {
+                    if param == types.ty_id_type() { cont }
+                    child := lower(db, air, cache, param, node)
+                    if child == 0 { cont }
+                    fields.push(.{ ty: child, name: Str.empty() })
+                }
+            }
+            else { value.scalar = storage.scalar(db, ty, node), {} }
+        }
+    }
+    value.start = air.abi_fields.len as u32
+    if value.kind != abi.Kind.array { value.count = fields.len as u32 }
+    air.abi_fields.extend(fields.ptr, fields.len)
+    fields.destroy()
+    air.abi_types.set(key as u64 - 1, value)
+    air.abi_order.push(key)
+    key
+}

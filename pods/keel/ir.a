@@ -61,10 +61,13 @@ Op :: enum u8 {
     branch
     ret_
     trap
+    abi_size
+    abi_field
+    c_value
 }
 
 terminates :: fn(op Op) bool {
-    op as u8 >= Op.jump as u8
+    op as u8 >= Op.jump as u8 and op as u8 <= Op.trap as u8
 }
 
 binary :: fn(op Op) bool {
@@ -330,6 +333,22 @@ Function :: struct {
         self.emit(Op.stack, Ty.ptr, size, align, 0)
     }
 
+    stack_layout :: fn(self &Self, layout u32) Val {
+        self.emit(Op.stack, Ty.ptr, layout, 0, 1)
+    }
+
+    size_of :: fn(self &Self, layout u32) Val {
+        self.emit(Op.abi_size, Ty.u64_, layout, 0, 0)
+    }
+
+    field_offset :: fn(self &Self, layout, index, format u32) Val {
+        self.emit(Op.abi_field, Ty.u64_, layout, index, format)
+    }
+
+    header_value :: fn(self &Self, ty Ty, header, name u32) Val {
+        self.emit(Op.c_value, ty, header, name, 0)
+    }
+
     address :: fn(self &Self, symbol Symbol) Val {
         self.emit(Op.address, Ty.ptr, symbol as u32, 0, 0)
     }
@@ -364,6 +383,10 @@ Function :: struct {
         self.emit(Op.zero, Ty.void_, self.graph.uses.add(dest), size, 0)
     }
 
+    zero_layout :: fn(self &Self, dest Val, layout u32) {
+        self.emit(Op.zero, Ty.void_, self.graph.uses.add(dest), layout, 1)
+    }
+
     call :: fn(self &Self, symbol Symbol, ty Ty, args Slice(Val)) Val {
         first := id.next_id(Use, self.graph.uses.values.len)
         for value in args { self.graph.uses.add(value) }
@@ -371,9 +394,13 @@ Function :: struct {
     }
 
     call_indirect :: fn(self &Self, address Val, ty Ty, args Slice(Val)) Val {
+        self.call_abi(address, ty, args, 0)
+    }
+
+    call_abi :: fn(self &Self, address Val, ty Ty, args Slice(Val), signature u32) Val {
         first := self.graph.uses.add(address)
         for value in args { self.graph.uses.add(value) }
-        self.emit(Op.call_indirect, ty, 0, first, args.len as u32 + 1)
+        self.emit(Op.call_indirect, ty, signature, first, args.len as u32 + 1)
     }
 
     successor :: fn(self &Self, inst Inst, position u64) Edge {

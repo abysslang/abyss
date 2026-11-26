@@ -4,7 +4,8 @@ Env :: @import("std/env").Env
 fs :: @import("std/fs")
 sys :: @import("std/sys")
 
-c_codegen :: @import("compiler/codegen")
+c99 :: @import("pods/keel/target/c99")
+air :: @import("compiler/air/lower")
 Engine :: @import("compiler/engine").Engine
 id_none :: @import("compiler/nexus/pool").id_none
 platform :: @import("compiler/platform")
@@ -179,7 +180,7 @@ Driver :: struct {
             vcg.init_types(&eng.nexus.types, self.arena)
             vbuilder := vm_codegen.VmCodeBuilder.new(&vcg)
             vcg.abyss_main(sym_id)
-            eng.compile(&vcg, &vbuilder, self.arena, sym_id)
+            eng.compile_vm(&vcg, &vbuilder, sym_id)
             vcg.finish_linking()
             vm := Vm.new()
             Env.shift_args(self.config.source_index)
@@ -195,17 +196,9 @@ Driver :: struct {
             }
             ret
         }
-        ccg := c_codegen.CCodeGen.new(self.arena)
-        builder := c_codegen.CCodeBuilder.new()
-        ccg.target_os = self.config.target_os
-        if executable {
-            ccg.abyss_main(sym_id)
-            return_type := eng.nexus.types.func_return(eng.type_of(sym_id))
-            ccg.main_returns_status = eng.nexus.types.kind(return_type) != TyKind.unit
-        }
-        eng.compile(&ccg, &builder, self.arena, sym_id)
-        c_code := ccg.finish()
+        program := air.lower(&eng.nexus, self.arena, fid, sym_id, id_none())
+        c_code := c99.emit(self.arena, &program, self.config.target_os, executable)
         fs.write_file(self.config.out_path, c_code)
-        ccg.destroy()
+        program.destroy()
     }
 }

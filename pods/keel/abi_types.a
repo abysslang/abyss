@@ -1,0 +1,40 @@
+Ty :: @import("./ir").Ty
+
+Kind :: enum u8 {
+    scalar
+    pointer
+    record
+    union_
+    array
+    header
+    function
+}
+
+Field :: struct {
+    ty   u32
+    name Str
+}
+
+Type :: struct {
+    kind                Kind
+    scalar              Ty
+    inner, count, start u32
+    name, header        Str
+
+    new :: fn(kind Kind) Self {
+        .{
+            kind: kind
+            scalar: Ty.void_
+            inner: 0
+            count: 0
+            start: 0
+            name: Str.empty()
+            header: Str.empty()
+        }
+    }
+
+    indirect :: fn(self &Self) bool {
+        self.kind == Kind.record or self.kind == Kind.union_ or self.kind == Kind.array or
+            self.kind == Kind.header
+    }
+}

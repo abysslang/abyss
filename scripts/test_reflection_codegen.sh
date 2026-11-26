@@ -26,20 +26,27 @@ import sys
 root = Path(sys.argv[1])
 generated = Path(sys.argv[2]).read_text()
 assert 'AbyssFfiScope' not in generated, 'normal programs must not include the VM bridge'
-functions = re.findall(r'^([^\n;{}]*\bsym_\d+\([^\n]*\)) \{\n(.*?)^\}', generated, re.M | re.S)
-formats = [(signature, body) for signature, body in functions if '__FMT_STATIC_OPEN__' in body]
+starts = list(re.finditer(r'^(static [^\n;{}]*\bk_\d+\([^\n]*\)) \{\n', generated, re.M))
+functions = [(match[1], generated[match.end():starts[index + 1].start() if index + 1 < len(starts) else len(generated)]) for index, match in enumerate(starts)]
+def specializations(literal):
+    name = re.search(r'^static const uint8_t (k_\d+)\[\] = "[^\n]*' + literal, generated, re.M)[1]
+    return [(signature, body) for signature, body in functions if re.search(r'&' + name + r'\b', body)]
+formats = specializations('__FMT_STATIC_OPEN__')
 assert len(formats) == 1, 'expected one specialization for the format literal'
 signature, body = formats[0]
 assert not re.search(r'\b(?:while|for|malloc|realloc)\s*\(', body), 'format specialization contains runtime traversal or dispatch'
-assert len(signature[signature.index('(') + 1:-1].split(',')) == 2, 'compile-time format string leaked into runtime parameters'
+assert len(signature[signature.index('(') + 1:-1].split(',')) == 3, 'expected return storage, arena, and values'
 assert '__FMT_STATIC_OPEN__ {} {}' not in generated, 'format template was retained at runtime'
-converters = [re.search(r'\bsym_\d+', signature).group() for signature, body in functions if '% 10' in body]
+converters = [
+    re.search(r'\bk_\d+', signature)[0] for signature, body in functions
+    if any(re.search(r'% ' + value + r';', body) for value in re.findall(r'(v\d+) = \(uint64_t\)10ULL;', body))
+]
 assert len(converters) == 1, 'expected one unsigned numeric conversion helper'
 assert len(re.findall(r'\b' + converters[0] + r'\(', body)) == 3, 'fixed array elements must convert through three direct calls'
-appends = [(signature, body) for signature, body in functions if '__FMT_APPEND_STATIC__' in body]
+appends = specializations('__FMT_APPEND_STATIC__')
 assert len(appends) == 1, 'expected one specialization for the appended format literal'
 signature, body = appends[0]
-assert re.search(r'\bvoid\s+sym_\d+\([^,]*\*[^,]*,[^,]+\)$', signature), 'append specialization must take a destination pointer and values'
+assert re.search(r'\bvoid\s+k_\d+\(void \* v1, void \* v2\)$', signature), 'append specialization must take a destination pointer and values'
 assert not re.search(r'\b(?:while|for|malloc|realloc)\s*\(', body), 'append specialization contains runtime traversal or dispatch'
 assert re.search(r'\b' + converters[0] + r'\(', body), 'append specialization must convert directly into the destination'
 assert '__FMT_APPEND_STATIC__ {}' not in generated, 'append template was retained at runtime'

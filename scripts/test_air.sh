@@ -77,3 +77,60 @@ if "$compiler" --dump-air "$work/functions.a" missing > "$work/missing.log" 2>&1
     exit 1
 fi
 grep -Fq "function 'missing' not found" "$work/missing.log"
+
+cat > "$work/edges.a" <<'ABYSS'
+keel :: @import("pods/keel")
+c99 :: @import("pods/keel/target/c99")
+abi :: @import("pods/keel/abi_types")
+Arena :: @import("std/allocator").Arena
+Os :: @import("core/target").Os
+Ty :: keel.Ty
+Val :: keel.Val
+
+main :: fn() {
+    air := keel.Program.new()
+    body := keel.Function.new()
+    ty := Ty.i32_
+    param_types: [3]Ty = .[ty, ty, Ty.i1]
+    params: Slice(Ty) = .{ ptr: &param_types[0], len: 3 }
+    entry := body.block()
+    repeat := body.block_with_params(params)
+    done := body.block()
+    body.begin(entry)
+    one := body.constant(ty, 1)
+    two := body.constant(ty, 2)
+    again := body.constant(Ty.i1, 1)
+    initial: [3]Val = .[one, two, again]
+    args: Slice(Val) = .{ ptr: &initial[0], len: 3 }
+    body.jump_with_args(repeat, args)
+    body.begin(repeat)
+    left := body.parameter(repeat, 0)
+    right := body.parameter(repeat, 1)
+    stop := body.constant(Ty.i1, 0)
+    next: [3]Val = .[right, left, stop]
+    swapped: Slice(Val) = .{ ptr: &next[0], len: 3 }
+    body.branch_with_args(body.parameter(repeat, 2), repeat, swapped, done, Slice(Val).empty())
+    body.begin(done)
+    body.ret_value(body.binary(keel.Op.sub, left, right))
+    symbol := air.declare("swap", Slice(Ty).empty(), ty, false)
+    air.define(symbol, body)
+    air.declarations.ptr_at(0).exported = true
+    result := abi.Type.new(abi.Kind.scalar)
+    result.scalar = ty
+    air.abi_types.push(result)
+    signature := abi.Type.new(abi.Kind.function)
+    signature.inner = 1
+    air.abi_types.push(signature)
+    air.declarations.ptr_at(0).abi_signature = 2
+    arena := Arena.new(4096)
+    @import("std/io").write_str(c99.emit(&arena, &air, Os.linux, false))
+    air.destroy()
+    arena.destroy()
+}
+ABYSS
+"$compiler" b "$work/edges.a" "$work/emit_edges.c"
+"${CC:-gcc}" -std=gnu99 -O2 "$work/emit_edges.c" -o "$work/emit_edges"
+"$work/emit_edges" > "$work/edges.c"
+printf 'int main(void) { return swap() != 1; }\n' >> "$work/edges.c"
+"${CC:-gcc}" -std=gnu99 -O2 "$work/edges.c" -o "$work/edges"
+timeout 5s "$work/edges"

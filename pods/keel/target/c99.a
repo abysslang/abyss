@@ -1,0 +1,769 @@
+Arena :: @import("std/allocator").Arena
+String :: @import("std/string").String
+Os :: @import("core/target").Os
+id :: @import("pods/keel/id")
+ir :: @import("pods/keel/ir")
+program :: @import("pods/keel/program")
+abi :: @import("pods/keel/abi_types")
+AbiType :: abi.Type
+Ty :: ir.Ty
+Op :: ir.Op
+Symbol :: id.Symbol
+
+type_name :: fn(ty Ty) Str {
+    names: [15]Str = .[
+        "void"
+        "bool"
+        "int8_t"
+        "int16_t"
+        "int32_t"
+        "int64_t"
+        "__int128"
+        "uint8_t"
+        "uint16_t"
+        "uint32_t"
+        "uint64_t"
+        "unsigned __int128"
+        "float"
+        "double"
+        "void *"
+    ]
+    names[ty as u64]
+}
+
+integer :: fn(ty Ty) bool {
+    ty as u8 >= Ty.i8_ as u8 and ty as u8 <= Ty.u128_ as u8
+}
+
+unsigned_word :: fn(ty Ty) Str {
+    if ty == Ty.i128_ or ty == Ty.u128_ { ret "unsigned __int128" }
+    if ty == Ty.i64_ or ty == Ty.u64_ { ret "uint64_t" }
+    "uint32_t"
+}
+
+width :: fn(ty Ty) u32 {
+    match ty {
+        i8_, u8_ { 8 as u32 }
+        i16_, u16_ { 16 as u32 }
+        i32_, u32_ { 32 as u32 }
+        i64_, u64_ { 64 as u32 }
+        else { 128 as u32 }
+    }
+}
+
+operator :: fn(op Op) Str {
+    symbols: [16]Str = .[
+        "+"
+        "-"
+        "*"
+        "/"
+        "%"
+        "=="
+        "!="
+        "<"
+        "<="
+        ">"
+        ">="
+        "&"
+        "|"
+        "^"
+        "<<"
+        ">>"
+    ]
+    symbols[op as u64]
+}
+
+number :: fn(out &String, value id.Val) {
+    out.push_char('v')
+    out.push_u32(value as u32)
+}
+
+internal_name :: fn(out &String, symbol Symbol) {
+    out.append("k_").push_u32(symbol as u32)
+}
+
+foreign_name :: fn(out &String, air &program.Program, symbol Symbol) {
+    decl := air.get(symbol)
+    if decl.exported or (decl.kind == program.Kind.external and decl.foreign_module.len == 0) {
+        out.push_str(decl.name)
+    } else {
+        out.append("ka_").push_u32(symbol as u32)
+    }
+}
+
+abi_name :: fn(out &String, air &program.Program, key u32) {
+    ty := air.abi_type(key)
+    match ty.kind {
+        scalar { out.push_str(type_name(ty.scalar)) }
+        pointer { abi_name(out, air, ty.inner), out.push_char('*') }
+        header { out.push_str(ty.name) }
+        else { out.append("kt_").push_u32(key) }
+    }
+}
+
+abi_params :: fn(out &String, air &program.Program, signature AbiType, named bool) {
+    if signature.count == 0 { out.push_str("void") }
+    for index in Range.new(0, signature.count as i32) {
+        if index > 0 { out.push_str(", ") }
+        abi_name(out, air, air.abi_field(signature, index as u32).ty)
+        if named { out.append(" p").push_u32(index as u32) }
+    }
+}
+
+abi_types :: fn(out &String, air &program.Program) {
+    for pos in Range.new(1, air.abi_types.len as i32 + 1) {
+        key := pos as u32
+        ty := air.abi_type(key)
+        if ty.kind == abi.Kind.record or ty.kind == abi.Kind.union_ or ty.kind == abi.Kind.array {
+            out.append("typedef struct kt_").append_u32(key).append(" kt_").append_u32(
+                key
+            ).push_str(";\n")
+        }
+    }
+    for key in air.abi_order.iter() {
+        ty := air.abi_type(key)
+        match ty.kind {
+            function {
+                out.push_str("typedef ")
+                abi_name(out, air, ty.inner)
+                out.append(" (*kt_").append_u32(key).push_str(")(")
+                abi_params(out, air, ty, false)
+                out.push_str(");\n")
+            }
+            record, union_, array {
+                out.append("struct kt_").append_u32(key).push_str(" { ")
+                if ty.kind == abi.Kind.array {
+                    abi_name(out, air, ty.inner)
+                    out.append(" items[").append_u32(ty.count).push_str("]; ")
+                } else {
+                    if ty.kind == abi.Kind.union_ { out.push_str("uint32_t tag; union { ") }
+                    if ty.count == 0 { out.push_str("uint8_t dummy; ") }
+                    for index in Range.new(0, ty.count as i32) {
+                        field := air.abi_field(ty, index as u32)
+                        item := air.abi_type(field.ty)
+                        if item.kind == abi.Kind.scalar and item.scalar == Ty.void_ { cont }
+                        abi_name(out, air, field.ty)
+                        out.append(" f").append_u32(index as u32).push_str("; ")
+                    }
+                    if ty.kind == abi.Kind.union_ { out.push_str("} payload; ") }
+                }
+                out.push_str("};\n")
+            }
+            else {}
+        }
+    }
+}
+
+abi_signature :: fn(out &String, air &program.Program, symbol Symbol) {
+    decl := air.get(symbol)
+    ty := air.abi_type(decl.abi_signature)
+    if decl.kind == program.Kind.function and (not decl.exported or process_symbol(decl.name)) {
+        out.push_str("static ")
+    }
+    abi_name(out, air, ty.inner)
+    out.push_char(' ')
+    foreign_name(out, air, symbol)
+    out.push_char('(')
+    abi_params(out, air, ty, true)
+    out.push_char(')')
+}
+
+process_symbol :: fn(name Str) bool {
+    name.eq("abyss_process_arg_count") or name.eq("abyss_process_arg") or
+        name.eq("abyss_process_args") or
+        name.eq("abyss_process_set_args")
+}
+
+libc_symbol :: fn(name Str) bool {
+    for symbol in .[
+        "puts"
+        "printf"
+        "malloc"
+        "free"
+        "realloc"
+        "memcpy"
+        "memset"
+        "memmove"
+        "exit"
+        "abort"
+        "remove"
+        "strlen"
+        "strcmp"
+        "strncmp"
+        "getenv"
+        "fopen"
+        "fclose"
+        "fread"
+        "fwrite"
+        "fseek"
+        "ftell"
+        "system"
+    ] {
+        if name.eq(symbol) { ret true }
+    }
+    false
+}
+
+include :: fn(out &String, headers &Vec(Str), path Str) {
+    if path.len == 0 { ret }
+    for header in headers.iter() {
+        if path.eq(header) { ret }
+    }
+    headers.push(path)
+    out.append("#include <").append(path).push_str(">\n")
+}
+
+abi_wrapper :: fn(out &String, air &program.Program, symbol Symbol) {
+    decl := air.get(symbol)
+    ty := air.abi_type(decl.abi_signature)
+    result := air.abi_type(ty.inner)
+    aggregate := result.indirect()
+    abi_signature(out, air, symbol)
+    out.push_str(" { ")
+    if aggregate {
+        abi_name(out, air, ty.inner)
+        out.push_str(" result; ")
+    } else if decl.result != Ty.void_ {
+        out.push_str("return ")
+        out.push_char('(')
+        abi_name(out, air, ty.inner)
+        out.push_char(')')
+    }
+    internal_name(out, symbol)
+    out.push_char('(')
+    if aggregate { out.push_str("&result") }
+    for index in Range.new(0, ty.count as i32) {
+        if index > 0 or aggregate { out.push_str(", ") }
+        param := air.abi_type(air.abi_field(ty, index as u32).ty)
+        if param.indirect() { out.push_char('&') }
+        out.append("p").push_u32(index as u32)
+    }
+    out.push_str("); ")
+    if aggregate { out.push_str("return result; ") }
+    out.push_str("}\n")
+}
+
+abi_call :: fn(
+    out &String
+    air &program.Program
+    body &ir.Function
+    inst id.Inst
+    symbol id.Symbol
+    sig u32
+) {
+    ty := air.abi_type(sig)
+    aggregate := air.abi_type(ty.inner).indirect()
+    start: u64 = if symbol == Symbol.none { 1 } else { 0 }
+    if aggregate {
+        out.push_str("{ ")
+        abi_name(out, air, ty.inner)
+        out.push_str(" result = ")
+    } else {
+        assignment(out, body.result(inst))
+    }
+    if symbol == Symbol.none {
+        out.append("((kt_").append_u32(sig).append(")v").append_u32(
+            body.operand(inst, 0) as u32
+        ).push_str(")")
+    } else {
+        foreign_name(out, air, symbol)
+    }
+    out.push_char('(')
+    for pos in Range.new(0, ty.count as i32) {
+        if pos > 0 { out.push_str(", ") }
+        if symbol != Symbol.none and pos == 0 {
+            name := air.get(symbol).name
+            if name.eq("__builtin_wasm_memory_size") or name.eq("__builtin_wasm_memory_grow") {
+                out.push_char('0')
+                cont
+            }
+        }
+        field := air.abi_field(ty, pos as u32)
+        value := body.operand(inst, start + pos as u64 + aggregate as u64)
+        indirect := air.abi_type(field.ty).indirect()
+        if indirect { out.push_str("*(") }
+        out.push_char('(')
+        abi_name(out, air, field.ty)
+        if indirect { out.push_char('*') }
+        out.push_char(')')
+        number(out, value)
+        if indirect { out.push_char(')') }
+    }
+    out.push_str("); ")
+    if aggregate {
+        out.append("keel_copy(v").append_u32(body.operand(inst, start) as u32).push_str(
+            ", &result, sizeof(result)); }"
+        )
+    }
+    out.push_char(10)
+}
+
+locals :: fn(out &String, body &ir.Function) {
+    for index in Range.new(0, body.graph.types.len as i32) {
+        value := (index + 1) as id.Val
+        ty := body.value_type(value)
+        if ty == Ty.void_ { cont }
+        if value as u32 <= body.parameter_count(id.Block.entry) { cont }
+        out.append(type_name(ty)).append(" v").append_u32((value as u32) as u32).push_str(";\n")
+    }
+}
+
+edge :: fn(out &String, body &ir.Function, target id.Edge) {
+    block := body.edge_target(target)
+    count := body.argument_count(target) as i32
+    for index in Range.new(0, count) {
+        pos := index as u32
+        arg := body.argument(target, pos)
+        out.append(type_name(body.value_type(arg))).append(" edge_").append_u32(
+            (pos) as u32
+        ).append(" = v").append_u32((arg as u32) as u32).push_str(";\n")
+    }
+    for index in Range.new(0, count) {
+        pos := index as u32
+        out.append("v").append_u32((body.parameter(block, pos) as u32) as u32).append(
+            " = edge_"
+        ).append_u32((pos) as u32).push_str(";\n")
+    }
+    out.append("goto b").append_u32((block as u32) as u32).push_str(";\n")
+}
+
+assignment :: fn(out &String, value id.Val) {
+    if value == id.Val.none { ret }
+    number(out, value)
+    out.push_str(" = ")
+}
+
+instruction :: fn(out &String, air &program.Program, body &ir.Function, inst id.Inst) {
+    op := body.opcode(inst)
+    result := body.result(inst)
+    ty := body.value_type(result)
+    first := body.operand(inst, 0)
+    second := body.operand(inst, 1)
+    lhs := first as u32
+    rhs := second as u32
+    arg_ty := body.value_type(first)
+    arg0 := body.payload(inst, 0)
+    arg1 := body.payload(inst, 1)
+    arg2 := body.payload(inst, 2)
+    value := result as u32
+
+    if ir.binary(op) {
+        assignment(out, result)
+        if integer(ty) and (op as u8 <= Op.mul as u8 or op == Op.shl) {
+            unsigned := unsigned_word(ty)
+            out.append("(").append(type_name(ty)).append(")((").append(unsigned).append(
+                ")v"
+            ).append_u32((lhs) as u32).append(" ").append(operator(op)).push_str(" (")
+            if op == Op.shl {
+                out.append("(uint32_t)v").append_u32((rhs) as u32).append(" & ").append_u32(
+                    (width(ty) - 1) as u32
+                ).push_str("));\n")
+            } else {
+                out.append(unsigned).append(")v").append_u32((rhs) as u32).push_str(");\n")
+            }
+        } else if op == Op.shr {
+            out.append("v").append_u32((lhs) as u32).append(" >> ((uint32_t)v").append_u32(
+                (rhs) as u32
+            ).append(" & ").append_u32((width(ty) - 1) as u32).push_str(");\n")
+        } else {
+            out.append("v").append_u32((lhs) as u32).append(" ").append(operator(op)).append(
+                " v"
+            ).append_u32((rhs) as u32).push_str(";\n")
+        }
+        ret
+    }
+
+    match op {
+        neg {
+            if integer(ty) {
+                out.append("v").append_u32(value).append(" = (").append(type_name(ty)).append(
+                    ")(-("
+                ).append(unsigned_word(ty)).append(")v").append_u32(lhs).push_str(");\n")
+            } else {
+                out.append("v").append_u32((value) as u32).append(" = -v").append_u32(
+                    (lhs) as u32
+                ).push_str(";\n")
+            }
+        }
+        invert {
+            sign := if ty == Ty.i1 { "!" } else { "~" }
+            out.append("v").append_u32((value) as u32).append(" = ").append(sign).append(
+                "v"
+            ).append_u32((lhs) as u32).push_str(";\n")
+        }
+        cast {
+            if ty == Ty.ptr {
+                out.append("v").append_u32((value) as u32).append(
+                    " = (void *)(uintptr_t)v"
+                ).append_u32((lhs) as u32).push_str(";\n")
+            } else if arg_ty == Ty.ptr and ty != Ty.i1 {
+                out.append("v").append_u32((value) as u32).append(" = (").append(
+                    type_name(ty)
+                ).append(")(uintptr_t)v").append_u32((lhs) as u32).push_str(";\n")
+            } else {
+                out.append("v").append_u32((value) as u32).append(" = (").append(
+                    type_name(ty)
+                ).append(")v").append_u32((lhs) as u32).push_str(";\n")
+            }
+        }
+        constant {
+            bits := (arg1 as u64 << 32) | arg0 as u64
+            if ty == Ty.f32_ {
+                out.append("v").append_u32((value) as u32).append(
+                    " = ((union { uint32_t bits; float value; }){ .bits = "
+                ).append_u32((arg0) as u32).push_str("U }).value;\n")
+            } else if ty == Ty.f64_ {
+                out.append("v").append_u32((value) as u32).append(
+                    " = ((union { uint64_t bits; double value; }){ .bits = "
+                ).append_u64(bits).push_str("ULL }).value;\n")
+            } else if ty == Ty.ptr {
+                out.append("v").append_u32((value) as u32).append(
+                    " = (void *)(uintptr_t)"
+                ).append_u64(bits).push_str("ULL;\n")
+            } else {
+                out.append("v").append_u32((value) as u32).append(" = (").append(
+                    type_name(ty)
+                ).append(")").append_u64(bits).push_str("ULL;\n")
+            }
+        }
+        stack {
+            if arg2 == 0 {
+                size := if arg0 == 0 { 1 as u32 } else { arg0 }
+                out.append("uint8_t stack_").append_u32(value).append("[").append_u32(size).append(
+                    "] __attribute__((aligned("
+                ).append_u32(arg1).push_str(")));\n")
+            } else {
+                abi_name(out, air, arg0)
+                out.append(" stack_").append_u32(value).push_str(";\n")
+            }
+            out.append("v").append_u32(value).append(" = &stack_").append_u32(value).push_str(";\n")
+        }
+        address {
+            out.append("v").append_u32((value) as u32).push_str(" = (void *)&")
+            symbol := arg0 as Symbol
+            if air.get(symbol).abi_signature == 0 { internal_name(out, symbol) } else {
+                foreign_name(out, air, symbol)
+            }
+            out.push_str(";\n")
+        }
+        offset {
+            out.append("v").append_u32(value).append(" = (void *)((uintptr_t)v").append_u32(
+                lhs
+            ).append(" + (uintptr_t)v").append_u32(rhs).append(" * ").append_u32(arg2).push_str(
+                "U);\n"
+            )
+        }
+        load {
+            out.append("keel_scalar(&v").append_u32(value).append(", v").append_u32(lhs).append(
+                ", sizeof(v"
+            ).append_u32(value).push_str("));\n")
+        }
+        store {
+            out.append("keel_scalar(v").append_u32(lhs).append(", &v").append_u32(rhs).append(
+                ", sizeof(v"
+            ).append_u32(rhs).push_str("));\n")
+        }
+        copy {
+            if arg2 != 0 {
+                out.append("keel_copy(v").append_u32((lhs) as u32).append(", v").append_u32(
+                    (rhs) as u32
+                ).append(", ").append_u32((arg2) as u32).push_str("U);\n")
+            }
+        }
+        copy_bytes {
+            out.append("keel_copy(v").append_u32((lhs) as u32).append(", v").append_u32(
+                (rhs) as u32
+            ).append(", v").append_u32((body.operand(inst, 2) as u32) as u32).push_str(");\n")
+        }
+        zero {
+            if arg2 != 0 {
+                out.append("keel_zero(v").append_u32(lhs).push_str(", sizeof(")
+                abi_name(out, air, arg1)
+                out.push_str("));\n")
+            } else if arg1 != 0 {
+                out.append("keel_zero(v").append_u32(lhs).append(", ").append_u32(arg1).push_str(
+                    "U);\n"
+                )
+            }
+        }
+        abi_size {
+            assignment(out, result)
+            out.push_str("sizeof(")
+            abi_name(out, air, arg0)
+            out.push_str(");\n")
+        }
+        abi_field {
+            assignment(out, result)
+            out.push_str("offsetof(")
+            abi_name(out, air, arg0)
+            out.push_str(", ")
+            if arg2 == 0 {
+                out.push_str(air.names.get(arg1 as u64))
+            } else if arg2 == 1 {
+                out.append("f").push_u32(arg1)
+            } else {
+                out.push_str("payload")
+            }
+            out.push_str(");\n")
+        }
+        c_value {
+            assignment(out, result)
+            out.append("(").append(type_name(ty)).append(")(").append(
+                air.names.get(arg1 as u64)
+            ).push_str(");\n")
+        }
+        call, call_indirect {
+            symbol := if op == Op.call { arg0 as Symbol } else { Symbol.none }
+            if symbol == Symbol.none and arg0 != 0 {
+                abi_call(out, air, body, inst, symbol, arg0)
+                ret
+            }
+            if symbol != Symbol.none and air.get(symbol).kind == program.Kind.external {
+                abi_call(out, air, body, inst, symbol, air.get(symbol).abi_signature)
+                ret
+            }
+            assignment(out, result)
+            pos: u64 = 0
+            if op == Op.call {
+                internal_name(out, symbol)
+            } else {
+                out.append("((").append(type_name(ty)).push_str(" (*)(")
+                if arg2 == 1 { out.push_str("void") }
+                pos = 1
+                while pos < arg2 as u64 {
+                    if pos > 1 { out.push_str(", ") }
+                    out.push_str(type_name(body.value_type(body.operand(inst, pos))))
+                    pos = pos + 1
+                }
+                out.append("))v").append_u32((lhs) as u32).push_str(")")
+                pos = 1
+            }
+            out.push_char('(')
+            start := pos
+            while pos < arg2 as u64 {
+                if pos > start { out.push_str(", ") }
+                number(out, body.operand(inst, pos))
+                pos = pos + 1
+            }
+            out.push_str(");\n")
+        }
+        jump {
+            out.push_str("{\n")
+            edge(out, body, body.successor(inst, 0))
+            out.push_str("}\n")
+        }
+        branch {
+            out.append("if (v").append_u32((lhs) as u32).push_str(") {\n")
+            edge(out, body, body.successor(inst, 0))
+            out.push_str("} else {\n")
+            edge(out, body, body.successor(inst, 1))
+            out.push_str("}\n")
+        }
+        ret_ {
+            if first == id.Val.none { out.push_str("return;\n") } else {
+                out.append("return v").append_u32((lhs) as u32).push_str(";\n")
+            }
+        }
+        trap { out.push_str("__builtin_trap();\n") }
+        else {}
+    }
+}
+
+signature :: fn(out &String, air &program.Program, symbol Symbol) {
+    decl := air.get(symbol)
+    out.push_str("static ")
+    out.push_str(type_name(decl.result))
+    out.push_char(' ')
+    internal_name(out, symbol)
+    out.push_char('(')
+    if decl.count == 0 { out.push_str("void") }
+    for index in Range.new(0, decl.count as i32) {
+        if index != 0 { out.push_str(", ") }
+        ty := air.types.get(decl.params as u64 + index as u64)
+        out.append(type_name(ty)).append(" v").append_u32((index + 1) as u32)
+    }
+    out.push_char(')')
+}
+
+emit :: fn(arena &Arena, air &program.Program, os Os, executable bool) Str {
+    out := String.new(arena)
+    out.push_str(
+        `#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#ifdef __TINYC__
+#define __int128 long long
+#define __builtin_trap() abort()
+void abort(void);
+#endif
+`
+    )
+    hosted := os != Os.wasi and os != Os.freestanding
+    if hosted {
+        out.push_str(
+            `#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define keel_copy memmove
+#define keel_zero(d, n) memset(d, 0, n)
+#ifdef __TINYC__
+#define keel_scalar memcpy
+#else
+#define keel_scalar __builtin_memcpy
+#endif
+`
+        )
+    } else {
+        out.push_str(
+            `#define keel_scalar keel_copy
+static void keel_copy(void *dest, const void *src, size_t n) {
+    unsigned char *d = dest;
+    const unsigned char *s = src;
+    if (d == s) return;
+    if ((uintptr_t)d > (uintptr_t)s && (uintptr_t)d - (uintptr_t)s < n) {
+        while (n) { --n; d[n] = s[n]; }
+    } else {
+        for (size_t i = 0; i < n; ++i) d[i] = s[i];
+    }
+}
+static void keel_zero(void *dest, size_t n) {
+    unsigned char *d = dest;
+    for (size_t i = 0; i < n; ++i) d[i] = 0;
+}
+`
+        )
+    }
+    headers := Vec(Str).new()
+    for decl in air.declarations.iter() { include(&out, &headers, decl.header) }
+    for ty in air.abi_types.iter() { include(&out, &headers, ty.header) }
+    for body in air.functions.iter_ref() {
+        for pos in Range.new(1, body.block_count() as i32 + 1) {
+            inst := body.first_inst(pos as id.Block)
+            while inst != id.Inst.none {
+                if body.opcode(inst) == Op.c_value {
+                    include(&out, &headers, air.names.get(body.payload(inst, 0) as u64))
+                }
+                inst = body.next_inst(inst)
+            }
+        }
+    }
+    headers.destroy()
+    abi_types(&out, air)
+    index: u32 = 0
+    for decl in air.declarations.iter() {
+        index = index + 1
+        symbol := index as Symbol
+        match decl.kind {
+            function, external {
+                if decl.kind == program.Kind.function {
+                    signature(&out, air, symbol)
+                    out.push_str(";\n")
+                }
+                if decl.abi_signature == 0 or decl.header.len != 0 { cont }
+                if (hosted or os == Os.wasi) and decl.kind == program.Kind.external and
+                    libc_symbol(decl.name) { cont }
+                if os == Os.wasi and
+                    (
+                        decl.name.eq("__builtin_wasm_memory_size") or
+                            decl.name.eq("__builtin_wasm_memory_grow")
+                    ) { cont }
+                if decl.foreign_module.len != 0 {
+                    out.append("__attribute__((import_module(\"").append(
+                        decl.foreign_module
+                    ).append("\"), import_name(\"").append(decl.name).push_str("\"))) ")
+                }
+                abi_signature(&out, air, symbol)
+                if os == Os.darwin {
+                    alias := if decl.name.eq("opendir") { "__DARWIN_ALIAS_I" } else if decl.name.eq(
+                        "readdir"
+                    ) { "__DARWIN_INODE64" } else if decl.name.eq("closedir") {
+                        "__DARWIN_ALIAS"
+                    } else { "" }
+                    if alias.len != 0 {
+                        out.append(" ").append(alias).append("(").append(decl.name).push_str(")")
+                    }
+                }
+                out.push_str(";\n")
+            }
+            global {
+                if decl.layout != 0 {
+                    out.push_str("static ")
+                    abi_name(&out, air, decl.layout)
+                    out.append(" k_").append_u32(index).push_str(";\n")
+                } else {
+                    size := if decl.size == 0 { 1 as u32 } else { decl.size }
+                    out.append("static uint8_t k_").append_u32(index).append("[").append_u32(
+                        size
+                    ).append("] __attribute__((aligned(").append_u32(decl.align).push_str(")));\n")
+                }
+            }
+            data {
+                out.append("static const uint8_t k_").append_u32(index).push_str("[] = \"")
+                for ch in Slice(u8).new(decl.bytes.ptr, decl.bytes.len) {
+                    if ch >= 32 and ch <= 126 and ch != 34 and ch != 92 and ch != '?' {
+                        out.push_char(ch)
+                    } else {
+                        out.push_char(92)
+                        out.push_char('0' + (ch >> 6))
+                        out.push_char('0' + ((ch >> 3) & 7))
+                        out.push_char('0' + (ch & 7))
+                    }
+                }
+                out.push_str("\";\n")
+            }
+        }
+    }
+    index = 0
+    for decl in air.declarations.iter() {
+        index = index + 1
+        if decl.kind != program.Kind.function { cont }
+        body := air.functions.ptr_at((decl.body - 1) as u64)
+        signature(&out, air, index as Symbol)
+        out.push_str(" {\n")
+        locals(&out, body)
+        for pos in Range.new(1, body.block_count() as i32 + 1) {
+            block := pos as id.Block
+            inst := body.first_inst(block)
+            if inst == id.Inst.none { cont }
+            out.append("b").append_u32((pos) as u32).push_str(": ;\n")
+            while inst != id.Inst.none {
+                instruction(&out, air, body, inst)
+                inst = body.next_inst(inst)
+            }
+        }
+        out.push_str("}\n")
+        if decl.abi_signature != 0 { abi_wrapper(&out, air, index as Symbol) }
+    }
+    if not executable and air.initializer != Symbol.none and os != Os.freestanding and
+        os != Os.wasi {
+        out.push_str(
+            "static void keel_init(void) __attribute__((constructor));\nstatic void keel_init(void) { "
+        )
+        internal_name(&out, air.initializer)
+        out.push_str("(); }\n")
+    }
+    if executable {
+        if os == Os.wasi {
+            out.push_str("int32_t abyss_main(void) { ")
+        } else {
+            out.push_str("int main(int argc, char **argv) { ")
+        }
+        if air.initializer != Symbol.none {
+            internal_name(&out, air.initializer)
+            out.push_str("(); ")
+        }
+        if os != Os.wasi {
+            out.push_str("abyss_process_set_args(argc, (uint8_t **)argv); ")
+        }
+        has_result := air.get(air.entry).result != Ty.void_
+        if has_result { out.push_str("return ") }
+        internal_name(&out, air.entry)
+        out.push_str("(); ")
+        if not has_result { out.push_str("return 0; ") }
+        out.push_str("}\n")
+    }
+    out.as_str()
+}

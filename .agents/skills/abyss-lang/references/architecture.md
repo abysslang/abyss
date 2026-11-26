@@ -18,11 +18,11 @@ abyss/
 │   ├── hir.a           # High-Level Intermediate Representation (HIR) nodes
 │   ├── parser/         # Recursive-descent parser producing HIR
 │   ├── typer/          # Type synthesis, unification, comptime & reflection
-│   ├── lower.a         # HIR lowering and desugaring passes
-│   ├── air/            # Experimental typed CFG and diagnostic dump
-│   ├── codegen.a       # C99 code generator
+│   ├── lower.a         # Direct HIR to bytecode lowering
+│   ├── air/            # Typed HIR to Keel AIR and ABI metadata
 │   └── vm/             # Native bytecode VM (vm.a) & VM codegen (codegen.a)
 ├── pods/               # Standard, library, and tool pods (managed by Sonar & toolchain)
+│   ├── keel/           # AIR, CFG editing, and C99 emission
 │   ├── core/           # Fundamental language primitives, slices, and reflection
 │   ├── std/            # Standard library (fs, allocator, string, path, collections, etc.)
 │   ├── json/           # Official JSON parser pod
@@ -53,14 +53,14 @@ HirTable, file declarations and lexical scopes
        ▼ [Typer]
 On-demand module loading, type checking, unification, comptime and splices
        │
-       ▼ [Lowering]
-Canonicalized HIR
+       ▼
+    Typed HIR
        ├───────────────────────────────┐
-       ▼ [C CodeGen]                   ▼ [VM CodeGen]
-   out.c (ISO C99)                  Bytecode Instructions
+       ▼ [AIR lowering]                ▼ [Bytecode lowering]
+   Keel AIR                         Bytecode Instructions
        │                               │
-       ▼ [GCC / TCC]                   ▼ [Abyss VM]
- Native Release Binary              Execution / JIT Run
+       ▼ [Keel C99]                    ▼ [Abyss VM]
+   out.c                            Execution
 ```
 
 ---
@@ -86,10 +86,10 @@ The single source of truth for the compilation session:
 - Evaluates compile-time expressions (`cmpt`) and AST reflection (`reflection.a`).
 
 ### 4. Backends
-- **C CodeGen** (`compiler/codegen.a`): Generates idiomatic, portable C99 with proper struct and function layouts.
-- **Bytecode VM** (`compiler/vm/`): Fast in-memory bytecode virtual machine used by `./abyss r` for instant execution without invoking an external C compiler.
+- **Keel C99** (`pods/keel/target/c99.a`): Emits C99 directly from AIR, using labels, SSA temporaries, and parallel copies for block arguments.
+- **Bytecode VM** (`compiler/lower.a`, `compiler/vm/`): Emits and executes bytecode directly for `cmpt` and `./abyss r`. It does not build AIR or run optimization passes.
 
-Keel (`pods/keel`) owns AIR storage, construction, and dumping. It has no compiler imports. The frontend adapter in `compiler/air/lower.a` builds functions through the Keel entry module. Call `block()` for an empty signature, `block_with_params(types)` for a typed signature, and `begin(block)` to emit its body. Use `jump` and `branch` for edges without arguments, or their `_with_args` variants for slices of values. The caller destroys the finished function.
+Keel (`pods/keel`) owns AIR storage, construction, dumping, and C99 emission. It has no compiler imports. The frontend adapter in `compiler/air/lower.a` builds functions through the Keel entry module. Call `block()` for an empty signature, `block_with_params(types)` for a typed signature, and `begin(block)` to emit its body. Use `jump` and `branch` for edges without arguments, or their `_with_args` variants for slices of values. The caller destroys the finished function.
 
 AIR keeps its SSA graph separate from instruction order. `Block`, `Inst`, `Val`, and `Edge` handles stay stable through unrelated edits. The layout keeps links in flat tables so inserting, moving, and unlinking an instruction does not shift its neighbors. Block parameters are values; terminators have no result. Keel tracks operand uses, including edge arguments, so `replace_uses` visits only the affected uses. `remove` rejects an instruction with a live result. `retarget` checks an edge's argument types and arity. Passes are responsible for preserving dominance and restoring a terminator if they remove one.
 
@@ -98,8 +98,10 @@ dependencies into a Keel `Program`. With no path the command dumps a small demo;
 optional function name selects a single root. Keel owns function bodies, declarations,
 static data, and symbol IDs. AIR values have fixed widths; the frontend lays out
 aggregates as byte storage and passes them by address. Mutable locals use stack slots;
-expression joins pass SSA values as block arguments. Production C99 and bytecode
-still use `compiler/lower.a`.
+expression joins pass SSA values as block arguments. The frontend supplies ABI
+signatures and target header references explicitly. Keel translates them into C
+declarations, wrappers, and symbolic layout queries. Native builds emit AIR
+without an optimization pass.
 
 ---
 
