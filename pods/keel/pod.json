@@ -1,0 +1,7 @@
+{
+  "name": "keel",
+  "version": "0.1.0",
+  "entry": "keel.a",
+  "description": "Abyss backend and AIR construction library",
+  "dependencies": {}
+}

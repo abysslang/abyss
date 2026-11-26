@@ -48,7 +48,7 @@ fi
 STAGE="${WORK_DIR}/legacy"
 mkdir -p "${STAGE}/pods"
 cp -R compiler "${STAGE}/compiler"
-cp -R pods/core pods/std "${STAGE}/pods/"
+cp -R pods/core pods/std pods/keel "${STAGE}/pods/"
 while IFS= read -r -d '' source; do
     awk -f "${ROOT_DIR}/scripts/seed_tuples.awk" "${source}" > "${source}.seed"
     if "${legacy_imports}"; then

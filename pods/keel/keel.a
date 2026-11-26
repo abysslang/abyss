@@ -1,0 +1,7 @@
+ir :: @import("./ir")
+
+Function :: ir.Function
+Block :: ir.Block
+Val :: ir.Val
+Ty :: ir.Ty
+dump :: @import("./dump").dump

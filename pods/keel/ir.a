@@ -1,10 +1,10 @@
 fall :: @import("std/sys").fall
 
-Val :: struct {
-    index u32
+Val :: enum u32 {
+    first
 }
-Block :: struct {
-    index u32
+Block :: enum u32 {
+    entry
 }
 
 Ty :: enum u8 {
@@ -38,9 +38,9 @@ Function :: struct {
     value_start  Vec(u32)
     param_start  Vec(u32)
     param_types  Vec(Ty)
-    edge_targets Vec(u32)
+    edge_targets Vec(Block)
     edge_starts  Vec(u32)
-    edge_args    Vec(u32)
+    edge_args    Vec(Val)
     current      Maybe(Block)
 
     new :: fn() Self {
@@ -54,9 +54,9 @@ Function :: struct {
             value_start: Vec(u32).new()
             param_start: Vec(u32).new()
             param_types: Vec(Ty).new()
-            edge_targets: Vec(u32).new()
+            edge_targets: Vec(Block).new()
             edge_starts: Vec(u32).new()
-            edge_args: Vec(u32).new()
+            edge_args: Vec(Val).new()
             current: Maybe(Block).none()
         }
     }
@@ -76,8 +76,16 @@ Function :: struct {
         self.edge_args.destroy()
     }
 
-    block :: fn(self &Self, params Slice(Ty)) Block {
-        id: Block = .{ index: index(self.block_start.len) }
+    block :: fn(self &Self) Block {
+        self.block_with_params(Slice(Ty).empty())
+    }
+
+    block_with_param :: fn(self &Self, ty Ty) Block {
+        self.block_with_params(Slice(Ty).new(&ty, 1))
+    }
+
+    block_with_params :: fn(self &Self, params Slice(Ty)) Block {
+        id := index(self.block_start.len) as Block
         index(self.param_types.len + params.len)
         for ty in params {
             if ty == Ty.void_ { #fall }
@@ -91,7 +99,7 @@ Function :: struct {
     }
 
     parameters :: fn(self &Self, id Block) Slice(Ty) {
-        at := id.index as u64
+        at := id as u64
         if at >= self.param_start.len { #fall }
         first := self.param_start.get(at) as u64
         last := if at + 1 < self.param_start.len { self.param_start.get(at + 1) as u64 } else {
@@ -101,7 +109,7 @@ Function :: struct {
     }
 
     begin :: fn(self &Self, id Block) {
-        at := id.index as u64
+        at := id as u64
         if self.current.is_some() or at >= self.block_start.len { #fall }
         if self.block_end.get(at) != 0 { #fall }
         params := self.parameters(id)
@@ -114,15 +122,15 @@ Function :: struct {
 
     parameter :: fn(self &Self, id Block, position u32) Val {
         if position as u64 >= self.parameters(id).len { #fall }
-        at := id.index as u64
+        at := id as u64
         if self.block_end.get(at) == 0 {
-            if self.current.is_none() or self.current.unwrap().index != id.index { #fall }
+            if self.current.is_none() or self.current.unwrap() != id { #fall }
         }
-        .{ index: self.value_start.get(at) + position }
+        (self.value_start.get(at) + position) as Val
     }
 
     code_value_start :: fn(self &Self, id Block) u32 {
-        self.value_start.get(id.index as u64) + self.parameters(id).len as u32
+        self.value_start.get(id as u64) + self.parameters(id).len as u32
     }
 
     emit :: fn(self &Self, op Op, ty Ty, words Slice(u32)) Val {
@@ -135,30 +143,30 @@ Function :: struct {
         self.starts.push(self.pool.len as u32)
         self.pool.extend(words.ptr, words.len)
         if op == Op.jump or op == Op.branch or op == Op.ret_ {
-            self.block_end.set(self.current.unwrap().index as u64, next)
+            self.block_end.set(self.current.unwrap() as u64, next)
             self.current = Maybe(Block).none()
         }
-        .{ index: value }
+        value as Val
     }
 
     iadd :: fn(self &Self, lhs, rhs Val) Val {
         if self.value_type(lhs) != Ty.i32_ or self.value_type(rhs) != Ty.i32_ { #fall }
-        args := .[ lhs.index, rhs.index ]
+        args := .[ lhs as u32, rhs as u32 ]
         self.emit(Op.iadd, Ty.i32_, Slice(u32).new(&args as &u32, 2))
     }
 
     value_type :: fn(self &Self, value Val) Ty {
-        if value.index as u64 >= self.types.len { #fall }
-        self.types.get(value.index as u64)
+        if value as u64 >= self.types.len { #fall }
+        self.types.get(value as u64)
     }
 
-    accepts :: fn(self &Self, target Block, args Slice(u32)) bool {
-        if target.index as u64 >= self.block_start.len { ret false }
+    accepts :: fn(self &Self, target Block, args Slice(Val)) bool {
+        if target as u64 >= self.block_start.len { ret false }
         params := self.parameters(target)
         if args.len != params.len { ret false }
         pos: u64 = 0
-        for arg in args {
-            if arg as u64 >= self.types.len or self.types.get(arg as u64) != params.get(pos) {
+        for value in args {
+            if value as u64 >= self.types.len or self.types.get(value as u64) != params.get(pos) {
                 ret false
             }
             pos = pos + 1
@@ -166,43 +174,53 @@ Function :: struct {
         true
     }
 
-    add_edge :: fn(self &Self, target Block, args Slice(u32)) u32 {
+    add_edge :: fn(self &Self, target Block, args Slice(Val)) u32 {
         if self.current.is_none() or not self.accepts(target, args) { #fall }
         edge := index(self.edge_targets.len + 1) - 1
         index(self.edge_args.len + args.len)
-        self.edge_targets.push(target.index)
+        self.edge_targets.push(target)
         self.edge_starts.push(self.edge_args.len as u32)
         self.edge_args.extend(args.ptr, args.len)
         edge
     }
 
-    jump :: fn(self &Self, target Block, args Slice(u32)) {
+    jump :: fn(self &Self, target Block) {
+        self.jump_with_args(target, Slice(Val).empty())
+    }
+
+    jump_with_args :: fn(self &Self, target Block, args Slice(Val)) {
         edge := self.add_edge(target, args)
         self.emit(Op.jump, Ty.void_, Slice(u32).new(&edge, 1))
     }
 
     jump_value :: fn(self &Self, target Block, value Val) {
-        self.jump(target, Slice(u32).new(&value.index, 1))
+        self.jump_with_args(target, Slice(Val).new(&value, 1))
     }
 
-    branch :: fn(
+    branch :: fn(self &Self, cond Val, yes, no Block) {
+        empty := Slice(Val).empty()
+        self.branch_with_args(cond, yes, empty, no, empty)
+    }
+
+    branch_with_args :: fn(
         self &Self
         cond Val
         yes Block
-        yes_args Slice(u32)
+        yes_args Slice(Val)
         no Block
-        no_args Slice(u32)
+        no_args Slice(Val)
     ) {
         if self.value_type(cond) != Ty.i1 { #fall }
         first := self.add_edge(yes, yes_args)
         self.add_edge(no, no_args)
-        args := .[ cond.index, first ]
+        args := .[ cond as u32, first ]
         self.emit(Op.branch, Ty.void_, Slice(u32).new(&args as &u32, 2))
     }
 
     ret_value :: fn(self &Self, value Val) {
         if self.value_type(value) == Ty.void_ { #fall }
-        self.emit(Op.ret_, Ty.void_, Slice(u32).new(&value.index, 1))
+        word := value as u32
+        self.emit(Op.ret_, Ty.void_, Slice(u32).new(&word, 1))
     }
 
     words :: fn(self &Self, at u64) Slice(u32) {
@@ -214,7 +232,7 @@ Function :: struct {
     }
 
     outgoing :: fn(self &Self, id Block) BlockRange {
-        end := self.block_end.get(id.index as u64)
+        end := self.block_end.get(id as u64)
         if end == 0 { ret .{ start: 0, end: 0 } }
         at := (end - 1) as u64
         op := self.ops.get(at)
@@ -229,12 +247,12 @@ Function :: struct {
         .{ start: 0, end: 0 }
     }
 
-    successors :: fn(self &Self, id Block) Slice(u32) {
+    successors :: fn(self &Self, id Block) Slice(Block) {
         edges := self.outgoing(id)
         self.edge_targets.as_slice().sub(edges.start as u64, (edges.end - edges.start) as u64)
     }
 
-    arguments :: fn(self &Self, edge u64) Slice(u32) {
+    arguments :: fn(self &Self, edge u64) Slice(Val) {
         first := self.edge_starts.get(edge) as u64
         last := if edge + 1 < self.edge_starts.len { self.edge_starts.get(edge + 1) as u64 } else {
             self.edge_args.len
@@ -243,7 +261,7 @@ Function :: struct {
     }
 
     range :: fn(self &Self, id Block) BlockRange {
-        at := id.index as u64
+        at := id as u64
         .{ start: self.block_start.get(at), end: self.block_end.get(at) }
     }
 }

@@ -1,4 +1,4 @@
-ir :: @import("./ir")
+keel :: @import("pods/keel")
 hir :: @import("compiler/hir")
 Nexus :: @import("compiler/nexus/nexus").Nexus
 types :: @import("compiler/types")
@@ -9,26 +9,31 @@ single :: fn(db &Nexus, node u32) u32 {
     items.get(0)
 }
 
-expr :: fn(db &Nexus, out &ir.Function, params &HashMap(u32, ir.Val), node u32, ty ir.Ty) ir.Val {
+expr :: fn(
+    db &Nexus
+    out &keel.Function
+    params &HashMap(u32, keel.Val)
+    node u32
+    ty keel.Ty
+) keel.Val {
     table := &db.hir
     kind := table.kind(node)
     if kind == hir.hir_kind.ident {
         found := params.get(db.get_hir_symbol(node))
-        if found != 0 as &ir.Val and out.value_type(*found) == ty { ret *found }
+        if found != 0 as &keel.Val and out.value_type(*found) == ty { ret *found }
     }
-    if kind == hir.hir_kind.binary_add and ty == ir.Ty.i32_ {
+    if kind == hir.hir_kind.binary_add and ty == keel.Ty.i32_ {
         lhs := expr(db, out, params, table.lhs(node), ty)
         rhs := expr(db, out, params, table.rhs(node), ty)
         ret out.iadd(lhs, rhs)
     }
     if kind == hir.hir_kind.block { ret expr(db, out, params, single(db, node), ty) }
     if kind == hir.hir_kind.k_if and table.extra(node) != hir.hir_none() {
-        cond := expr(db, out, params, table.lhs(node), ir.Ty.i1)
-        empty := Slice(u32).empty()
-        yes := out.block(Slice(ir.Ty).empty())
-        no := out.block(Slice(ir.Ty).empty())
-        join := out.block(Slice(ir.Ty).new(&ty, 1))
-        out.branch(cond, yes, empty, no, empty)
+        cond := expr(db, out, params, table.lhs(node), keel.Ty.i1)
+        yes := out.block()
+        no := out.block()
+        join := out.block_with_param(ty)
+        out.branch(cond, yes, no)
         out.begin(yes)
         on_yes := expr(db, out, params, table.rhs(node), ty)
         out.jump_value(join, on_yes)
@@ -39,10 +44,10 @@ expr :: fn(db &Nexus, out &ir.Function, params &HashMap(u32, ir.Val), node u32, 
         ret out.parameter(join, 0)
     }
     db.type_error(node, "AIR expects a parameter, addition, or if expression")
-    .{ index: 0 }
+    keel.Val.first
 }
 
-lower :: fn(db &Nexus, func u32) ir.Function {
+lower :: fn(db &Nexus, func u32) keel.Function {
     table := &db.hir
     sig := db.get_node_type(func)
     int := db.types.alloc_int(32)
@@ -56,28 +61,28 @@ lower :: fn(db &Nexus, func u32) ir.Function {
     node := single(db, root)
     if table.kind(node) == hir.hir_kind.k_ret { node = table.lhs(node) }
 
-    out := ir.Function.new()
+    out := keel.Function.new()
     args := db.get_list(table.lhs(func))
-    signature := Vec(ir.Ty).with_cap(args.len)
+    signature := Vec(keel.Ty).with_cap(args.len)
     for arg in args {
         ty := db.get_node_type(table.lhs(arg))
-        if ty == int { signature.push(ir.Ty.i32_) } else if ty == types.ty_id_bool() {
-            signature.push(ir.Ty.i1)
+        if ty == int { signature.push(keel.Ty.i32_) } else if ty == types.ty_id_bool() {
+            signature.push(keel.Ty.i1)
         } else {
             db.type_error(arg, "AIR expects i32 or bool parameters")
         }
     }
-    entry := out.block(signature.as_slice())
+    entry := out.block_with_params(signature.as_slice())
     signature.destroy()
     out.begin(entry)
-    params := HashMap(u32, ir.Val).new()
+    params := HashMap(u32, keel.Val).new()
     position: u32 = 0
     for arg in args {
         name := table.lhs(arg)
         params.insert(db.get_hir_symbol(name), out.parameter(entry, position))
         position = position + 1
     }
-    result := expr(db, &out, &params, node, ir.Ty.i32_)
+    result := expr(db, &out, &params, node, keel.Ty.i32_)
     out.ret_value(result)
     params.destroy()
     out

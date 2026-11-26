@@ -1,0 +1,126 @@
+keel :: @import("keel")
+fall :: @import("std/sys").fall
+
+require :: fn(ok bool) {
+    if not ok { #fall }
+}
+
+diamond :: fn() {
+    func := keel.Function.new()
+    signature := .[ keel.Ty.i32_, keel.Ty.i1 ]
+    entry := func.block_with_params(Slice(keel.Ty).new(&signature as &keel.Ty, 2))
+    left := func.block()
+    right := func.block()
+    exit := func.block_with_param(keel.Ty.i32_)
+
+    func.begin(entry)
+    value := func.parameter(entry, 0)
+    flag := func.parameter(entry, 1)
+    require(not func.accepts(exit, Slice(keel.Val).empty()))
+    require(not func.accepts(exit, Slice(keel.Val).new(&flag, 1)))
+    missing := 1234 as keel.Val
+    require(not func.accepts(exit, Slice(keel.Val).new(&missing, 1)))
+    func.branch(flag, left, right)
+
+    func.begin(right)
+    doubled := func.iadd(value, value)
+    func.jump_value(exit, doubled)
+    func.begin(left)
+    func.jump_value(exit, value)
+    func.begin(exit)
+    result := func.parameter(exit, 0)
+    func.ret_value(result)
+
+    require(func.range(entry).end == 1)
+    require(func.range(right).start == 1)
+    require(func.range(left).start == 3)
+    targets := func.successors(entry)
+    require(
+        targets.len == 2 and targets.get(0) == left and targets.get(1) == right
+    )
+    require(func.successors(right).get(0) == exit)
+    require(func.arguments(func.outgoing(right).start as u64).get(0) == doubled)
+    require(func.arguments(func.outgoing(left).start as u64).get(0) == value)
+    require(func.outgoing(exit).start == func.outgoing(exit).end)
+    func.destroy()
+}
+
+swap_loop :: fn() {
+    func := keel.Function.new()
+    signature := .[ keel.Ty.i32_, keel.Ty.i32_, keel.Ty.i1, keel.Ty.i1 ]
+    loop_types := Slice(keel.Ty).new(&signature as &keel.Ty, 3)
+    entry := func.block_with_params(Slice(keel.Ty).new(&signature as &keel.Ty, 4))
+    header := func.block_with_params(loop_types)
+    exit := func.block()
+    func.begin(entry)
+    first := func.parameter(entry, 0)
+    second := func.parameter(entry, 1)
+    again := func.parameter(entry, 2)
+    stop := func.parameter(entry, 3)
+    initial := .[ first, second, again ]
+    func.jump_with_args(header, Slice(keel.Val).new(&initial as &keel.Val, 3))
+    func.begin(header)
+    left := func.parameter(header, 0)
+    right := func.parameter(header, 1)
+    swapped := .[ right, left, stop ]
+    func.branch_with_args(
+        func.parameter(header, 2)
+        header
+        Slice(keel.Val).new(&swapped as &keel.Val, 3)
+        exit
+        Slice(keel.Val).empty()
+    )
+    func.begin(exit)
+    func.ret_value(right)
+
+    targets := func.successors(header)
+    require(
+        targets.len == 2 and targets.get(0) == header and targets.get(1) == exit
+    )
+    edges := func.outgoing(header)
+    back_args := func.arguments(edges.start as u64)
+    require(
+        back_args.len == 3 and back_args.get(0) == right and back_args.get(1) == left and
+            back_args.get(2) == stop
+    )
+    require(func.arguments((edges.start + 1) as u64).len == 0)
+    func.destroy()
+}
+
+parallel_edges :: fn() {
+    func := keel.Function.new()
+    signature := .[ keel.Ty.i32_, keel.Ty.i32_, keel.Ty.i1 ]
+    entry := func.block_with_params(Slice(keel.Ty).new(&signature as &keel.Ty, 3))
+    join := func.block_with_param(keel.Ty.i32_)
+    func.begin(entry)
+    first := func.parameter(entry, 0)
+    second := func.parameter(entry, 1)
+    flag := func.parameter(entry, 2)
+    func.branch_with_args(
+        flag
+        join
+        Slice(keel.Val).new(&first, 1)
+        join
+        Slice(keel.Val).new(&second, 1)
+    )
+    func.begin(join)
+    func.ret_value(func.parameter(join, 0))
+
+    targets := func.successors(entry)
+    require(
+        targets.len == 2 and targets.get(0) == join and targets.get(1) == join
+    )
+    edge := func.outgoing(entry).start as u64
+    yes_args := func.arguments(edge)
+    no_args := func.arguments(edge + 1)
+    require(yes_args.len == 1 and yes_args.get(0) == first)
+    require(no_args.len == 1 and no_args.get(0) == second)
+    func.destroy()
+}
+
+main :: fn() {
+    diamond()
+    swap_loop()
+    parallel_edges()
+    print("AIR CFG OK")
+}

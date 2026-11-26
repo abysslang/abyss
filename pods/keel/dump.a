@@ -2,14 +2,14 @@ ir :: @import("./ir")
 write_str :: @import("std/io").write_str
 
 edge_text :: fn(func &ir.Function, edge u64) {
-    printf("b{}", .(func.edge_targets.get(edge)))
+    printf("b{}", .(func.edge_targets.get(edge) as u32))
     args := func.arguments(edge)
     if args.len == 0 { ret }
     write_str("(")
     pos: u64 = 0
     for arg in args {
         if pos > 0 { write_str(", ") }
-        printf("v{}", .(arg))
+        printf("v{}", .(arg as u32))
         pos = pos + 1
     }
     write_str(")")
@@ -19,7 +19,7 @@ dump :: fn(name Str, func &ir.Function) {
     printf("air {}\n", .(name))
     block: u64 = 0
     while block < func.block_start.len {
-        id: ir.Block = .{ index: block as u32 }
+        id := block as ir.Block
         printf("b{}", .(block))
         params := func.parameters(id)
         if params.len > 0 {
@@ -28,7 +28,7 @@ dump :: fn(name Str, func &ir.Function) {
             for ty in params {
                 if pos > 0 { write_str(", ") }
                 label := if ty == ir.Ty.i1 { "i1" } else { "i32" }
-                printf("v{}: {}", .(func.parameter(id, pos).index, label))
+                printf("v{}: {}", .(func.parameter(id, pos) as u32, label))
                 pos = pos + 1
             }
             write_str(")")

@@ -89,7 +89,9 @@ The single source of truth for the compilation session:
 - **C CodeGen** (`compiler/codegen.a`): Generates idiomatic, portable C99 with proper struct and function layouts.
 - **Bytecode VM** (`compiler/vm/`): Fast in-memory bytecode virtual machine used by `./abyss r` for instant execution without invoking an external C compiler.
 
-Run `./abyss emit --dump-air` to inspect the experimental AIR lowering of an embedded `add` function, or pass a source path and function name. AIR uses dense SSA value indices with typed block parameters and flat edge arguments; it has no phi instructions. Block parameters precede their block's instruction results in the value table and do not occupy instruction rows. Each branch arm owns its arguments, even when both arms target the same block. The preview lowers simple `i32` functions with addition and conditional expressions. The production backends still use `compiler/lower.a`.
+Keel (`pods/keel`) owns AIR storage, construction, and dumping. It has no compiler imports. The frontend adapter in `compiler/air/lower.a` uses the Keel entry module and builds functions through typed `Block` and `Val` handles. Call `block()` for an empty signature, `block_with_params(types)` for a typed signature, and `begin(block)` to emit its body. Use `jump` and `branch` for edges without arguments, or their `_with_args` variants to pass slices of values. Keel copies the slices into its flat edge pool at emission. Block parameters occupy value slots and do not occupy instruction rows. The caller destroys the finished function.
+
+Run `./abyss emit --dump-air` to inspect the experimental AIR lowering of an embedded `add` function, or pass a source path and function name. The preview lowers simple `i32` functions with addition and conditional expressions. Production C99 and bytecode still use `compiler/lower.a`.
 
 ---
 
