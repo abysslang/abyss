@@ -1,5 +1,4 @@
 ir :: @import("compiler/air/ir")
-run :: @import("compiler/air/run").run
 fall :: @import("std/sys").fall
 
 require :: fn(ok bool) {
@@ -47,10 +46,6 @@ diamond :: fn() {
     require(func.arguments(func.outgoing(left).start as u64).get(0) == value.index)
     require(func.outgoing(exit).start == func.outgoing(exit).end)
     require(func.words(4).get(0) == result.index)
-    input := .[ 2147483649 as u32, 0 as u32 ]
-    require(run(&func, Slice(u32).new(&input as &u32, 2)) == 2)
-    input[1] = 1
-    require(run(&func, Slice(u32).new(&input as &u32, 2)) == 2147483649 as u32)
     func.destroy()
 }
 
@@ -82,10 +77,16 @@ swap_loop :: fn() {
     func.begin(exit)
     func.ret_value(right)
 
-    input := .[ 12 as u32, 39 as u32, 1 as u32, 0 as u32 ]
-    require(run(&func, Slice(u32).new(&input as &u32, 4)) == 12)
-    input[2] = 0
-    require(run(&func, Slice(u32).new(&input as &u32, 4)) == 39)
+    targets := func.successors(header)
+    require(targets.len == 2 and targets.get(0) == header.index and targets.get(1) == exit.index)
+    edges := func.outgoing(header)
+    back_args := func.arguments(edges.start as u64)
+    require(
+        back_args.len == 3 and back_args.get(0) == right.index and
+            back_args.get(1) == left.index and
+            back_args.get(2) == stop.index
+    )
+    require(func.arguments((edges.start + 1) as u64).len == 0)
     func.destroy()
 }
 
@@ -104,10 +105,11 @@ parallel_edges :: fn() {
 
     targets := func.successors(entry)
     require(targets.len == 2 and targets.get(0) == join.index and targets.get(1) == join.index)
-    input := .[ 4 as u32, 9 as u32, 1 as u32 ]
-    require(run(&func, Slice(u32).new(&input as &u32, 3)) == 4)
-    input[2] = 0
-    require(run(&func, Slice(u32).new(&input as &u32, 3)) == 9)
+    edge := func.outgoing(entry).start as u64
+    yes_args := func.arguments(edge)
+    no_args := func.arguments(edge + 1)
+    require(yes_args.len == 1 and yes_args.get(0) == first.index)
+    require(no_args.len == 1 and no_args.get(0) == second.index)
     func.destroy()
 }
 

@@ -29,20 +29,19 @@ BlockRange :: struct {
 }
 
 Function :: struct {
-    ops           Vec(Op)
-    types         Vec(Ty)
-    starts        Vec(u32)
-    pool          Vec(u32)
-    block_start   Vec(u32)
-    block_end     Vec(u32)
-    value_start   Vec(u32)
-    param_start   Vec(u32)
-    param_types   Vec(Ty)
-    edge_targets  Vec(u32)
-    edge_starts   Vec(u32)
-    edge_args     Vec(u32)
-    max_edge_args u64
-    current       Maybe(Block)
+    ops          Vec(Op)
+    types        Vec(Ty)
+    starts       Vec(u32)
+    pool         Vec(u32)
+    block_start  Vec(u32)
+    block_end    Vec(u32)
+    value_start  Vec(u32)
+    param_start  Vec(u32)
+    param_types  Vec(Ty)
+    edge_targets Vec(u32)
+    edge_starts  Vec(u32)
+    edge_args    Vec(u32)
+    current      Maybe(Block)
 
     new :: fn() Self {
         .{
@@ -58,7 +57,6 @@ Function :: struct {
             edge_targets: Vec(u32).new()
             edge_starts: Vec(u32).new()
             edge_args: Vec(u32).new()
-            max_edge_args: 0
             current: Maybe(Block).none()
         }
     }
@@ -175,7 +173,6 @@ Function :: struct {
         self.edge_targets.push(target.index)
         self.edge_starts.push(self.edge_args.len as u32)
         self.edge_args.extend(args.ptr, args.len)
-        if args.len > self.max_edge_args { self.max_edge_args = args.len }
         edge
     }
 
