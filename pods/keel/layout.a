@@ -1,0 +1,83 @@
+id :: @import("./id")
+fall :: @import("std/sys").fall
+Inst :: id.Inst
+Block :: id.Block
+
+Layout :: struct {
+    first Vec(Inst)
+    last  Vec(Inst)
+    prev  Vec(Inst)
+    next  Vec(Inst)
+    owner Vec(Block)
+
+    new :: fn() Self {
+        .{
+            first: Vec(Inst).new()
+            last: Vec(Inst).new()
+            prev: Vec(Inst).new()
+            next: Vec(Inst).new()
+            owner: Vec(Block).new()
+        }
+    }
+
+    destroy :: fn(self &Self) {
+        self.first.destroy()
+        self.last.destroy()
+        self.prev.destroy()
+        self.next.destroy()
+        self.owner.destroy()
+    }
+
+    add_block :: fn(self &Self) {
+        self.first.push(Inst.none)
+        self.last.push(Inst.none)
+    }
+
+    add_inst :: fn(self &Self) {
+        self.prev.push(Inst.none)
+        self.next.push(Inst.none)
+        self.owner.push(Block.none)
+    }
+
+    connect :: fn(self &Self, block Block, left, right Inst) {
+        if left == Inst.none {
+            self.first.set(id.slot(block), right)
+        } else {
+            self.next.set(id.slot(left), right)
+        }
+        if right == Inst.none {
+            self.last.set(id.slot(block), left)
+        } else {
+            self.prev.set(id.slot(right), left)
+        }
+    }
+
+    link :: fn(self &Self, inst Inst, block Block, left, right Inst) {
+        at := id.slot(inst)
+        if self.owner.get(at) != Block.none { #fall }
+        self.owner.set(at, block)
+        self.connect(block, left, inst)
+        self.connect(block, inst, right)
+    }
+
+    append :: fn(self &Self, block Block, inst Inst) {
+        self.link(inst, block, self.last.get(id.slot(block)), Inst.none)
+    }
+
+    insert_before :: fn(self &Self, before, inst Inst) {
+        at := id.slot(before)
+        block := self.owner.get(at)
+        if block == Block.none { #fall }
+        self.link(inst, block, self.prev.get(at), before)
+    }
+
+    unlink :: fn(self &Self, inst Inst) {
+        at := id.slot(inst)
+        block := self.owner.get(at)
+        if block == Block.none { #fall }
+        self.connect(block, self.prev.get(at), self.next.get(at))
+        self.owner.set(at, Block.none)
+        self.prev.set(at, Inst.none)
+        self.next.set(at, Inst.none)
+    }
+}

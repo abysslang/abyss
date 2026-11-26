@@ -1,0 +1,31 @@
+fall :: @import("std/sys").fall
+
+Val :: enum u32 {
+    none
+    first
+}
+Inst :: enum u32 {
+    none
+    first
+}
+Block :: enum u32 {
+    none
+    entry
+}
+Edge :: enum u32 {
+    none
+    first
+}
+Use :: enum u32 {
+    none
+    first
+}
+
+slot :: fn(T type, id T) u64 {
+    (id as u64) - 1
+}
+
+next_id :: fn(T type, len u64) T {
+    if len >= 4294967295 as u64 { #fall }
+    (len + 1) as T
+}

@@ -38,8 +38,8 @@ b1:
   jump b3(v4)
 b2:
   jump b3(v2)
-b3(v7: i32):
-  ret v7
+b3(v3: i32):
+  ret v3
 AIR
 
 if "$compiler" --dump-air "$work/functions.a" sub > "$work/unsupported.log" 2>&1; then

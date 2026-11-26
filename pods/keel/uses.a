@@ -1,0 +1,77 @@
+id :: @import("./id")
+Use :: id.Use
+Val :: id.Val
+
+Uses :: struct {
+    heads  Vec(Use)
+    values Vec(Val)
+    prev   Vec(Use)
+    next   Vec(Use)
+
+    new :: fn() Self {
+        .{
+            heads: Vec(Use).new()
+            values: Vec(Val).new()
+            prev: Vec(Use).new()
+            next: Vec(Use).new()
+        }
+    }
+
+    destroy :: fn(self &Self) {
+        self.heads.destroy()
+        self.values.destroy()
+        self.prev.destroy()
+        self.next.destroy()
+    }
+
+    head :: fn(self &Self, value Val) Use {
+        self.heads.get(id.slot(value))
+    }
+
+    set :: fn(self &Self, use Use, value Val) {
+        at := id.slot(use)
+        old := self.values.get(at)
+        if old == value { ret }
+        if old != Val.none {
+            left := self.prev.get(at)
+            right := self.next.get(at)
+            if left == Use.none {
+                self.heads.set(id.slot(old), right)
+            } else {
+                self.next.set(id.slot(left), right)
+            }
+            if right != Use.none { self.prev.set(id.slot(right), left) }
+        }
+        self.values.set(at, value)
+        self.prev.set(at, Use.none)
+        self.next.set(at, Use.none)
+        if value != Val.none {
+            first := self.head(value)
+            if first != Use.none { self.prev.set(id.slot(first), use) }
+            self.next.set(at, first)
+            self.heads.set(id.slot(value), use)
+        }
+    }
+
+    add :: fn(self &Self, value Val) u32 {
+        use := id.next_id(Use, self.values.len)
+        self.values.push(Val.none)
+        self.prev.push(Use.none)
+        self.next.push(Use.none)
+        self.set(use, value)
+        use as u32
+    }
+
+    value :: fn(self &Self, use u32) Val {
+        self.values.get(id.slot(use))
+    }
+
+    replace :: fn(self &Self, from, to Val) {
+        if from == to { ret }
+        use := self.head(from)
+        while use != Use.none {
+            self.set(use, to)
+            use = self.head(from)
+        }
+    }
+}

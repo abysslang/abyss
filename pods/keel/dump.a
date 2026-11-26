@@ -1,15 +1,16 @@
 ir :: @import("./ir")
+id :: @import("./id")
 write_str :: @import("std/io").write_str
 
-edge_text :: fn(func &ir.Function, edge u64) {
-    printf("b{}", .(func.edge_targets.get(edge) as u32))
-    args := func.arguments(edge)
-    if args.len == 0 { ret }
+edge_text :: fn(func &ir.Function, edge id.Edge) {
+    printf("b{}", .(id.slot(func.edge_target(edge))))
+    count := func.argument_count(edge)
+    if count == 0 { ret }
     write_str("(")
-    pos: u64 = 0
-    for arg in args {
+    pos: u32 = 0
+    while pos < count {
         if pos > 0 { write_str(", ") }
-        printf("v{}", .(arg as u32))
+        printf("v{}", .(id.slot(func.argument(edge, pos))))
         pos = pos + 1
     }
     write_str(")")
@@ -18,47 +19,51 @@ edge_text :: fn(func &ir.Function, edge u64) {
 dump :: fn(name Str, func &ir.Function) {
     printf("air {}\n", .(name))
     block: u64 = 0
-    while block < func.block_start.len {
-        id := block as ir.Block
+    while block < func.block_count() {
+        key := (block + 1) as id.Block
         printf("b{}", .(block))
-        params := func.parameters(id)
-        if params.len > 0 {
+        count := func.parameter_count(key)
+        if count > 0 {
             write_str("(")
             pos: u32 = 0
-            for ty in params {
+            while pos < count {
                 if pos > 0 { write_str(", ") }
-                label := if ty == ir.Ty.i1 { "i1" } else { "i32" }
-                printf("v{}: {}", .(func.parameter(id, pos) as u32, label))
+                value := func.parameter(key, pos)
+                label := if func.value_type(value) == ir.Ty.i1 { "i1" } else { "i32" }
+                printf("v{}: {}", .(id.slot(value), label))
                 pos = pos + 1
             }
             write_str(")")
         }
         write_str(":\n")
-        range := func.range(id)
-        at := range.start as u64
-        end := range.end as u64
-        value := func.code_value_start(id)
-        while at < end {
-            args := func.words(at)
-            match func.ops.get(at) {
-                iadd { printf("  v{} = iadd i32 v{}, v{}\n", .(value, args.get(0), args.get(1))) }
+        inst := func.first_inst(key)
+        while inst != id.Inst.none {
+            match func.opcode(inst) {
+                iadd {
+                    printf(
+                        "  v{} = iadd i32 v{}, v{}\n"
+                        .(
+                            id.slot(func.result(inst))
+                            id.slot(func.operand(inst, 0))
+                            id.slot(func.operand(inst, 1))
+                        )
+                    )
+                }
                 jump {
                     write_str("  jump ")
-                    edge_text(func, args.get(0) as u64)
+                    edge_text(func, func.successor(inst, 0))
                     write_str("\n")
                 }
                 branch {
-                    first := args.get(1) as u64
-                    printf("  branch v{}, ", .(args.get(0)))
-                    edge_text(func, first)
+                    printf("  branch v{}, ", .(id.slot(func.operand(inst, 0))))
+                    edge_text(func, func.successor(inst, 0))
                     write_str(", ")
-                    edge_text(func, first + 1)
+                    edge_text(func, func.successor(inst, 1))
                     write_str("\n")
                 }
-                ret_ { printf("  ret v{}\n", .(args.get(0))) }
+                ret_ { printf("  ret v{}\n", .(id.slot(func.operand(inst, 0)))) }
             }
-            at = at + 1
-            value = value + 1
+            inst = func.next_inst(inst)
         }
         block = block + 1
     }
