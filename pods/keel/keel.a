@@ -1,11 +1,15 @@
 ir :: @import("./ir")
 id :: @import("./id")
+program :: @import("./program")
 
 Function :: ir.Function
 Block :: id.Block
 Val :: id.Val
 Inst :: id.Inst
 Edge :: id.Edge
+Symbol :: id.Symbol
 Ty :: ir.Ty
 Op :: ir.Op
+Program :: program.Program
 dump :: @import("./dump").dump
+dump_program :: @import("./dump").dump_program

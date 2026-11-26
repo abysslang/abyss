@@ -1,70 +1,234 @@
+Ty :: ir.Ty
+Op :: ir.Op
+Function :: ir.Function
+Edge :: id.Edge
+Inst :: id.Inst
+Program :: program.Program
 ir :: @import("./ir")
 id :: @import("./id")
+program :: @import("./program")
+Fmt :: @import("std/fmt").Fmt
+Arena :: @import("std/allocator").Arena
 write_str :: @import("std/io").write_str
 
-edge_text :: fn(func &ir.Function, edge id.Edge) {
-    printf("b{}", .(id.slot(func.edge_target(edge))))
-    count := func.argument_count(edge)
-    if count == 0 { ret }
-    write_str("(")
-    pos: u32 = 0
-    while pos < count {
-        if pos > 0 { write_str(", ") }
-        printf("v{}", .(id.slot(func.argument(edge, pos))))
-        pos = pos + 1
-    }
-    write_str(")")
+ty_text :: fn(ty Ty) Str {
+    names: [15]Str = .[
+        "void"
+        "i1"
+        "i8"
+        "i16"
+        "i32"
+        "i64"
+        "i128"
+        "u8"
+        "u16"
+        "u32"
+        "u64"
+        "u128"
+        "f32"
+        "f64"
+        "ptr"
+    ]
+    names[ty as u64]
 }
 
-dump :: fn(name Str, func &ir.Function) {
-    printf("air {}\n", .(name))
+op_text :: fn(op Op) Str {
+    names: [34]Str = .[
+        "iadd"
+        "sub"
+        "mul"
+        "div"
+        "rem"
+        "eq"
+        "ne"
+        "lt"
+        "le"
+        "gt"
+        "ge"
+        "and"
+        "or"
+        "xor"
+        "shl"
+        "shr"
+        "neg"
+        "invert"
+        "cast"
+        "const"
+        "stack"
+        "addr"
+        "offset"
+        "load"
+        "store"
+        "copy"
+        "copy_bytes"
+        "zero"
+        "call"
+        "call_indirect"
+        "jump"
+        "branch"
+        "ret"
+        "trap"
+    ]
+    names[op as u64]
+}
+
+edge_text :: fn(out &Fmt, func &Function, edge Edge) {
+    out.str("b").uint64((id.slot(func.edge_target(edge))) as u64)
+    count := func.argument_count(edge)
+    if count == 0 { ret }
+    out.char('(')
+    pos: u32 = 0
+    while pos < count {
+        if pos > 0 { out.str(", ") }
+        out.str("v").uint64((id.slot(func.argument(edge, pos))) as u64)
+        pos = pos + 1
+    }
+    out.char(')')
+}
+
+instruction :: fn(out &Fmt, func &Function, inst Inst) {
+    out.str("  ")
+    op := func.opcode(inst)
+    val := func.result(inst)
+    first := func.operand(inst, 0)
+    if val != id.Val.none { out.str("v").uint64((id.slot(val)) as u64).str(" = ") }
+    out.str(op_text(op))
+    match op {
+        jump { out.char(' '), edge_text(out, func, func.successor(inst, 0)), ret }
+        branch {
+            out.str(" v").uint64((id.slot(first)) as u64).str(", ")
+            edge_text(out, func, func.successor(inst, 0))
+            out.str(", ")
+            edge_text(out, func, func.successor(inst, 1))
+            ret
+        }
+        constant {
+            bits := (func.payload(inst, 1) as u64 << 32) | func.payload(inst, 0) as u64
+            out.str(" ").str(ty_text(func.value_type(val))).str(" ").uint64((bits) as u64)
+            ret
+        }
+        stack {
+            out.str(" ").uint64((func.payload(inst, 0)) as u64).str(", align ").uint64(
+                (func.payload(inst, 1)) as u64
+            )
+            ret
+        }
+        address { out.str(" @").uint64((func.payload(inst, 0)) as u64), ret }
+        call, call_indirect {
+            if val != id.Val.none { out.str(" ").str(ty_text(func.value_type(val))) }
+            pos: u64 = 0
+            if op == Op.call {
+                out.str(" @").uint64((func.payload(inst, 0)) as u64)
+            } else {
+                out.str(" v").uint64((id.slot(first)) as u64)
+                pos = 1
+            }
+            out.char('(')
+            start := pos
+            while pos < func.payload(inst, 2) as u64 {
+                if pos != start { out.str(", ") }
+                out.str("v").uint64((id.slot(func.operand(inst, pos))) as u64)
+                pos = pos + 1
+            }
+            out.char(')')
+            ret
+        }
+        else {
+            if ir.binary(op) { out.str(" ").str(ty_text(func.value_type(first))) }
+            if op == Op.load or op == Op.cast {
+                out.str(" ").str(ty_text(func.value_type(val)))
+            }
+            if first != id.Val.none { out.str(" v").uint64((id.slot(first)) as u64) }
+            second := func.operand(inst, 1)
+            if second != id.Val.none { out.str(", v").uint64((id.slot(second)) as u64) }
+            if op == Op.copy_bytes {
+                out.str(", v").uint64((id.slot(func.operand(inst, 2))) as u64)
+            }
+            if op == Op.copy or op == Op.offset {
+                out.str(", ").uint64((func.payload(inst, 2)) as u64)
+            }
+            if op == Op.zero { out.str(", ").uint64((func.payload(inst, 1)) as u64) }
+            ret
+        }
+    }
+}
+
+blocks :: fn(out &Fmt, func &Function) {
     block: u64 = 0
     while block < func.block_count() {
         key := (block + 1) as id.Block
-        printf("b{}", .(block))
+        out.str("b").uint64((block) as u64)
         count := func.parameter_count(key)
         if count > 0 {
-            write_str("(")
+            out.char('(')
             pos: u32 = 0
             while pos < count {
-                if pos > 0 { write_str(", ") }
+                if pos > 0 { out.str(", ") }
                 value := func.parameter(key, pos)
-                label := if func.value_type(value) == ir.Ty.i1 { "i1" } else { "i32" }
-                printf("v{}: {}", .(id.slot(value), label))
+                out.str("v").uint64((id.slot(value)) as u64).str(": ").str(
+                    ty_text(func.value_type(value))
+                )
                 pos = pos + 1
             }
-            write_str(")")
+            out.char(')')
         }
-        write_str(":\n")
+        out.str(":\n")
         inst := func.first_inst(key)
-        while inst != id.Inst.none {
-            match func.opcode(inst) {
-                iadd {
-                    printf(
-                        "  v{} = iadd i32 v{}, v{}\n"
-                        .(
-                            id.slot(func.result(inst))
-                            id.slot(func.operand(inst, 0))
-                            id.slot(func.operand(inst, 1))
-                        )
-                    )
-                }
-                jump {
-                    write_str("  jump ")
-                    edge_text(func, func.successor(inst, 0))
-                    write_str("\n")
-                }
-                branch {
-                    printf("  branch v{}, ", .(id.slot(func.operand(inst, 0))))
-                    edge_text(func, func.successor(inst, 0))
-                    write_str(", ")
-                    edge_text(func, func.successor(inst, 1))
-                    write_str("\n")
-                }
-                ret_ { printf("  ret v{}\n", .(id.slot(func.operand(inst, 0)))) }
-            }
+        while inst != Inst.none {
+            instruction(out, func, inst)
+            out.newline()
             inst = func.next_inst(inst)
         }
         block = block + 1
     }
+}
+
+dump :: fn(name Str, func &Function) {
+    arena := Arena.new(4096)
+    out := Fmt.new(&arena)
+    out.str("air ").str(name).str("\n")
+    blocks(&out, func)
+    write_str(out.buf.as_str())
+    arena.destroy()
+}
+
+dump_program :: fn(module &Program) {
+    arena := Arena.new(4096)
+    out := Fmt.new(&arena)
+    if module.entry != id.Symbol.none {
+        out.str("entry @").uint64((module.entry as u32) as u64).str("\n")
+    }
+    if module.initializer != id.Symbol.none {
+        out.str("init @").uint64((module.initializer as u32) as u64).str("\n")
+    }
+    index: u32 = 0
+    for decl in module.declarations {
+        index = index + 1
+        if decl.kind == program.Kind.function or decl.kind == program.Kind.external {
+            word := if decl.kind == program.Kind.function { "air" } else { "extern" }
+            out.str(word).str(" @").uint64((index) as u64).str(" ").str(decl.name).str("(")
+            pos: u32 = 0
+            while pos < decl.count {
+                if pos != 0 { out.str(", ") }
+                out.str(ty_text(module.types.get((decl.params + pos) as u64)))
+                pos = pos + 1
+            }
+            out.str(") -> ").str(ty_text(decl.result)).str("\n")
+            if decl.body != 0 { blocks(&out, module.functions.ptr_at(decl.body as u64 - 1)) }
+        } else if decl.kind == program.Kind.global {
+            out.str("global @").uint64((index) as u64).str(" ").str(decl.name).str(": ").uint64(
+                (decl.size) as u64
+            ).str(", align ").uint64((decl.align) as u64).str("\n")
+        } else {
+            out.str("data @").uint64((index) as u64).str(" =")
+            for byte in Slice(u8).new(decl.bytes.ptr, decl.bytes.len) {
+                out.str(" ").uint64((byte) as u64)
+            }
+            out.char(10)
+        }
+        write_str(out.buf.as_str())
+        out.buf.reset(0)
+    }
+    write_str(out.buf.as_str())
+    arena.destroy()
 }

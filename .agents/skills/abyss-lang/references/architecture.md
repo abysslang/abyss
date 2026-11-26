@@ -93,7 +93,13 @@ Keel (`pods/keel`) owns AIR storage, construction, and dumping. It has no compil
 
 AIR keeps its SSA graph separate from instruction order. `Block`, `Inst`, `Val`, and `Edge` handles stay stable through unrelated edits. The layout keeps links in flat tables so inserting, moving, and unlinking an instruction does not shift its neighbors. Block parameters are values; terminators have no result. Keel tracks operand uses, including edge arguments, so `replace_uses` visits only the affected uses. `remove` rejects an instruction with a live result. `retarget` checks an edge's argument types and arity. Passes are responsible for preserving dominance and restoring a terminator if they remove one.
 
-Run `./abyss emit --dump-air` to inspect the experimental AIR lowering of an embedded `add` function, or pass a source path and function name. The preview lowers simple `i32` functions with addition and conditional expressions. Production C99 and bytecode still use `compiler/lower.a`.
+Run `./abyss emit --dump-air path.a` to lower a checked source file and its runtime
+dependencies into a Keel `Program`. With no path the command dumps a small demo; an
+optional function name selects a single root. Keel owns function bodies, declarations,
+static data, and symbol IDs. AIR values have fixed widths; the frontend lays out
+aggregates as byte storage and passes them by address. Mutable locals use stack slots;
+expression joins pass SSA values as block arguments. Production C99 and bytecode
+still use `compiler/lower.a`.
 
 ---
 

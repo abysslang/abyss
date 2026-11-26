@@ -12,7 +12,7 @@ dump_air :: fn(arena &Arena) {
         engine.dump_air("air-demo.a", "add :: fn(a, b i32) i32 { a + b }", "add")
     } else {
         path := Env.arg(2)
-        name := if count > 3 { Str.of(Env.arg(3)) } else { "add" }
+        name := if count > 3 { Str.of(Env.arg(3)) } else { Str.empty() }
         engine.dump_air(Str.of(path), fs.read_file(arena, path), name)
     }
     engine.destroy()

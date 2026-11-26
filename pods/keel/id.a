@@ -20,6 +20,10 @@ Use :: enum u32 {
     none
     first
 }
+Symbol :: enum u32 {
+    none
+    first
+}
 
 slot :: fn(T type, id T) u64 {
     (id as u64) - 1

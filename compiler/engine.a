@@ -76,16 +76,28 @@ Engine :: struct {
     dump_air :: fn(self &Self, path, source, name Str) {
         file := self.add_file(path, source)
         db := &self.nexus
-        symbol := db.find_local_symbol(file, db.interner.intern(name))
-        self.ensure_resolved(symbol)
-        func := db.get_fn_node(symbol)
-        if func == id_none() {
-            printf("[air error] function '{}' not found\n", .(name))
-            #fall
+        if name.len != 0 {
+            symbol := db.find_local_symbol(file, db.interner.intern(name))
+            self.ensure_resolved(symbol)
+            if db.get_fn_node(symbol) == id_none() {
+                printf("[air error] function '{}' not found\n", .(name))
+                #fall
+            }
+            tyck.process_mono_funcs(self)
+            module := air_lower.lower(db, self.arena, file, id_none(), symbol)
+            if module.air_single() {
+                keel.dump(name, module.functions.ptr_at(0))
+            } else {
+                keel.dump_program(&module)
+            }
+            module.destroy()
+        } else {
+            main := db.find_local_symbol(file, db.interner.intern("main"))
+            entry := self.build_entry(file, main != id_none())
+            module := air_lower.lower(db, self.arena, file, entry, id_none())
+            keel.dump_program(&module)
+            module.destroy()
         }
-        body := air_lower.lower(db, func)
-        keel.dump(name, &body)
-        body.destroy()
     }
 
     type_check :: fn(self &Self, sym_id u32) {

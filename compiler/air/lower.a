@@ -1,89 +1,1283 @@
+HirExprKind :: hir.HirExprKind
+Program :: keel.Program
 keel :: @import("pods/keel")
 hir :: @import("compiler/hir")
-Nexus :: @import("compiler/nexus/nexus").Nexus
+storage :: @import("./layout")
 types :: @import("compiler/types")
+Nexus :: @import("compiler/nexus/nexus").Nexus
+String :: @import("std/string").String
+Arena :: @import("std/allocator").Arena
+legacy :: @import("compiler/lower")
+parse_float :: @import("compiler/vm/codegen").parse_float
+vm :: @import("compiler/vm/codegen")
+func_has_self :: @import("compiler/typer/fn").func_has_self
+k :: hir.hir_kind
+Kind :: types.TyKind
+Ty :: keel.Ty
+Op :: keel.Op
+Val :: keel.Val
+Block :: keel.Block
+Symbol :: keel.Symbol
+none :: @import("compiler/hir").hir_none
 
-single :: fn(db &Nexus, node u32) u32 {
-    items := db.get_list(db.hir.lhs(node))
-    if items.len != 1 { db.type_error(node, "AIR expects one return expression") }
-    items.get(0)
+Pending :: struct {
+    source u32
+    target Symbol
 }
 
-expr :: fn(
-    db &Nexus
-    out &keel.Function
-    params &HashMap(u32, keel.Val)
-    node u32
-    ty keel.Ty
-) keel.Val {
-    table := &db.hir
-    kind := table.kind(node)
-    if kind == hir.hir_kind.ident {
-        found := params.get(db.get_hir_symbol(node))
-        if found != 0 as &keel.Val and out.value_type(*found) == ty { ret *found }
-    }
-    if kind == hir.hir_kind.binary_add and ty == keel.Ty.i32_ {
-        lhs := expr(db, out, params, table.lhs(node), ty)
-        rhs := expr(db, out, params, table.rhs(node), ty)
-        ret out.iadd(lhs, rhs)
-    }
-    if kind == hir.hir_kind.block { ret expr(db, out, params, single(db, node), ty) }
-    if kind == hir.hir_kind.k_if and table.extra(node) != hir.hir_none() {
-        cond := expr(db, out, params, table.lhs(node), keel.Ty.i1)
-        yes := out.block()
-        no := out.block()
-        join := out.block_with_param(ty)
-        out.branch(cond, yes, no)
-        out.begin(yes)
-        on_yes := expr(db, out, params, table.rhs(node), ty)
-        out.jump_value(join, on_yes)
-        out.begin(no)
-        on_no := expr(db, out, params, table.extra(node), ty)
-        out.jump_value(join, on_no)
-        out.begin(join)
-        ret out.parameter(join, 0)
-    }
-    db.type_error(node, "AIR expects a parameter, addition, or if expression")
-    keel.Val.first
+Metadata :: struct {
+    source          u64
+    ty, count, node u32
+    target          Symbol
 }
 
-lower :: fn(db &Nexus, func u32) keel.Function {
-    table := &db.hir
-    sig := db.get_node_type(func)
-    int := db.types.alloc_int(32)
-    root := table.extra(func)
-    if db.types.kind(sig) != types.TyKind.func or db.types.func_return(sig) != int or
-        db.is_extern_fn(func) or
-        root == hir.hir_none() {
-        db.type_error(func, "AIR expects a defined function returning i32")
-    }
+Module :: struct {
+    db        &Nexus
+    arena     &Arena
+    air       Program
+    symbols   HashMap(u32, Symbol)
+    strings   HashMap(u32, Symbol)
+    pending   Vec(Pending)
+    globals   Vec(Pending)
+    metadata  Vec(Metadata)
+    reflected HashMap(u64, Symbol)
 
-    node := single(db, root)
-    if table.kind(node) == hir.hir_kind.k_ret { node = table.lhs(node) }
-
-    out := keel.Function.new()
-    args := db.get_list(table.lhs(func))
-    signature := Vec(keel.Ty).with_cap(args.len)
-    for arg in args {
-        ty := db.get_node_type(table.lhs(arg))
-        if ty == int { signature.push(keel.Ty.i32_) } else if ty == types.ty_id_bool() {
-            signature.push(keel.Ty.i1)
-        } else {
-            db.type_error(arg, "AIR expects i32 or bool parameters")
+    new :: fn(db &Nexus, arena &Arena) Self {
+        .{
+            db: db
+            arena: arena
+            air: Program.new()
+            symbols: HashMap(u32, Symbol).new()
+            strings: HashMap(u32, Symbol).new()
+            pending: Vec(Pending).new()
+            globals: Vec(Pending).new()
+            metadata: Vec(Metadata).new()
+            reflected: HashMap(u64, Symbol).new()
         }
     }
-    entry := out.block_with_params(signature.as_slice())
-    signature.destroy()
-    out.begin(entry)
-    params := HashMap(u32, keel.Val).new()
-    position: u32 = 0
-    for arg in args {
-        name := table.lhs(arg)
-        params.insert(db.get_hir_symbol(name), out.parameter(entry, position))
+
+    reflect :: fn(self &Self, source u64, ty, count, node u32) Symbol {
+        found := self.reflected.get(source)
+        if found != (0 as &Symbol) { ret *found }
+        shape := storage.shape(self.db, ty, node)
+        size := shape.size * (if count == 0 { 1 as u32 } else { count })
+        target := self.air.global("$typeinfo", size, shape.align)
+        self.reflected.insert(source, target)
+        self.metadata.push(.{ source: source, ty: ty, count: count, node: node, target: target })
+        target
+    }
+
+    register :: fn(self &Self, sym, node u32) Symbol {
+        db := self.db
+        real := db.resolve_sym(sym)
+        found := self.symbols.get(real)
+        if found != (0 as &Symbol) { ret *found }
+        global := db.global_var(real)
+        if global != none() {
+            ty := db.get_node_type(db.hir.lhs(global))
+            shape := storage.shape(db, ty, global)
+            key := self.air.global(db.interner.get(db.sym_name(real)), shape.size, shape.align)
+            self.symbols.insert(real, key)
+            if db.hir.extra(global) != none() {
+                self.globals.push(.{ source: global, target: key })
+            }
+            ret key
+        }
+        func := db.get_fn_node(real)
+        if func == none() { storage.error(db, node, "unresolved function or global") }
+        signature := func_type(db, real, func)
+        if db.types.kind(signature) != Kind.func {
+            storage.error(db, func, "function has no resolved signature")
+        }
+        result := db.types.func_return(signature)
+        external := db.is_extern_fn(func) and db.hir.extra(func) == none()
+        params := Vec(Ty).new()
+        if storage.aggregate(db, result) {
+            if external { storage.error(db, func, "aggregate C return values need ABI lowering") }
+            params.push(Ty.ptr)
+        }
+        args := db.types.func_params(signature)
+        position: u64 = 0
+        while position < args.len {
+            ty := args.get(position)
+            if runtime_arg(db, func, position, ty) {
+                if external and storage.aggregate(db, ty) {
+                    storage.error(db, func, "aggregate C arguments need ABI lowering")
+                }
+                params.push(storage.scalar(db, ty, func))
+            }
+            position = position + 1
+        }
+        name := if db.is_extern_fn(func) { db.extern_link_name(real, func) } else {
+            db.sym_name(real)
+        }
+        output := if storage.aggregate(db, result) { Ty.void_ } else {
+            storage.scalar(db, result, func)
+        }
+        key := self.air.declare(db.interner.get(name), params.as_slice(), output, external)
+        params.destroy()
+        self.symbols.insert(real, key)
+        if not external { self.pending.push(.{ source: real, target: key }) }
+        key
+    }
+}
+
+func_type :: fn(db &Nexus, sym, func u32) u32 {
+    if db.is_mono_sym(sym) { ret db.get_mono_type(sym) }
+    db.get_node_type(func)
+}
+
+items :: fn(db &Nexus, list u32) Slice(u32) {
+    if list == none() { ret Slice(u32).empty() }
+    db.get_list(list)
+}
+
+runtime_arg :: fn(db &Nexus, func u32, position u64, ty u32) bool {
+    if ty == types.ty_id_type() { ret false }
+    if func == none() { ret true }
+    args := items(db, db.hir.lhs(func))
+    if position >= args.len { ret true }
+    arg := args.get(position)
+    annotation := db.hir.rhs(arg)
+    if db.hir.extra(arg) == 1 or db.get_const_type(annotation) == types.ty_id_type() { ret false }
+    annotation == none() or db.hir.kind(annotation) != k.ident or
+        not db.interner.get(db.hir.lhs(annotation)).eq("type")
+}
+
+Context :: struct {
+    module                &Module
+    db                    &Nexus
+    out                   keel.Function
+    locals                HashMap(u32, Val)
+    break_to, continue_to Block
+    return_ty             u32
+    return_slot           Val
+
+    new :: fn(module &Module, result u32) Self {
+        .{
+            module: module
+            db: module.db
+            out: keel.Function.new()
+            locals: HashMap(u32, Val).new()
+            break_to: Block.none
+            continue_to: Block.none
+            return_ty: result
+            return_slot: Val.none
+        }
+    }
+
+    open :: fn(self &Self) bool {
+        self.out.current != Block.none
+    }
+
+    offset :: fn(self &Self, base Val, bytes u32) Val {
+        if bytes == 0 { ret base }
+        index := self.out.constant(Ty.u32_, bytes as u64)
+        self.out.offset(base, index, 1)
+    }
+
+    slot :: fn(self &Self, ty, node u32) Val {
+        shape := storage.shape(self.db, ty, node)
+        self.out.stack(shape.size, shape.align)
+    }
+
+    read :: fn(self &Self, ty, node u32, address Val) Val {
+        if storage.aggregate(self.db, ty) {
+            value := self.slot(ty, node)
+            self.out.copy(value, address, storage.shape(self.db, ty, node).size)
+            ret value
+        }
+        self.out.load(storage.scalar(self.db, ty, node), address)
+    }
+
+    write :: fn(self &Self, ty, node u32, address, value Val) {
+        if storage.aggregate(self.db, ty) {
+            self.out.copy(address, value, storage.shape(self.db, ty, node).size)
+        } else {
+            self.out.store(address, self.out.cast(storage.scalar(self.db, ty, node), value))
+        }
+    }
+
+    local :: fn(self &Self, name, ty u32, value Val) {
+        address := self.slot(ty, name)
+        self.locals.insert(self.db.get_hir_symbol(name), address)
+        if value != Val.none { self.write(ty, name, address, value) }
+    }
+
+    finish :: fn(self &Self, value Val, node u32) {
+        if not self.open() { ret }
+        if self.return_slot != Val.none {
+            self.write(self.return_ty, node, self.return_slot, value)
+            self.out.ret_void()
+        } else if self.return_ty == types.ty_id_unit() {
+            self.out.ret_void()
+        } else if self.return_ty == types.ty_id_never() {
+            self.out.trap()
+        } else {
+            if value == Val.none { storage.error(self.db, node, "missing return value") }
+            self.out.ret_value(self.out.cast(storage.scalar(self.db, self.return_ty, node), value))
+        }
+    }
+}
+
+jump_to :: fn(ctx &Context, target Block, ty Ty, value Val) {
+    if not ctx.open() { ret }
+    if ty == Ty.void_ { ctx.out.jump(target) } else {
+        ctx.out.jump_value(target, ctx.out.cast(ty, value))
+    }
+}
+
+join :: fn(ctx &Context, ty Ty) Block {
+    if ty == Ty.void_ { ret ctx.out.block() }
+    ctx.out.block_with_param(ty)
+}
+
+open_join :: fn(ctx &Context, block Block, ty Ty) Val {
+    ctx.out.begin(block)
+    if ty != Ty.void_ { ret ctx.out.parameter(block, 0) }
+    Val.none
+}
+
+conditional :: fn(ctx &Context, node, left, right, extra u32) Val {
+    result_ty := ctx.db.get_node_type(node)
+    ty := if extra == none() or result_ty == types.ty_id_none() {
+        Ty.void_
+    } else {
+        storage.scalar(ctx.db, result_ty, node)
+    }
+    cond := expr(ctx, left)
+    if not ctx.open() { ret Val.none }
+    yes := ctx.out.block()
+    no := ctx.out.block()
+    end := join(ctx, ty)
+    ctx.out.branch(cond, yes, no)
+    ctx.out.begin(yes)
+    on_yes := expr(ctx, right)
+    yes_open := ctx.open()
+    jump_to(ctx, end, ty, on_yes)
+    ctx.out.begin(no)
+    on_no := expr(ctx, extra)
+    no_open := ctx.open()
+    jump_to(ctx, end, ty, on_no)
+    result := open_join(ctx, end, ty)
+    if not yes_open and not no_open { ctx.out.trap() }
+    result
+}
+
+logical :: fn(ctx &Context, kind HirExprKind, left, right u32) Val {
+    lhs := expr(ctx, left)
+    if not ctx.open() { ret Val.none }
+    rhs := ctx.out.block()
+    end := join(ctx, Ty.i1)
+    pass := Slice(Val).new(&lhs, 1)
+    empty := Slice(Val).empty()
+    if kind == k.binary_and {
+        ctx.out.branch_with_args(lhs, rhs, empty, end, pass)
+    } else {
+        ctx.out.branch_with_args(lhs, end, pass, rhs, empty)
+    }
+    ctx.out.begin(rhs)
+    value := expr(ctx, right)
+    jump_to(ctx, end, Ty.i1, value)
+    open_join(ctx, end, Ty.i1)
+}
+
+while_loop :: fn(ctx &Context, cond, body u32) {
+    head := ctx.out.block()
+    end := ctx.out.block()
+    saved := .(ctx.break_to, ctx.continue_to)
+    ctx.break_to = end
+    ctx.continue_to = head
+    ctx.out.jump(head)
+    ctx.out.begin(head)
+    test := expr(ctx, cond)
+    if ctx.open() {
+        run := ctx.out.block()
+        ctx.out.branch(test, run, end)
+        ctx.out.begin(run)
+        expr(ctx, body)
+        jump_to(ctx, head, Ty.void_, Val.none)
+    }
+    ctx.break_to = saved.0
+    ctx.continue_to = saved.1
+    ctx.out.begin(end)
+}
+
+binary_op :: fn(kind HirExprKind) Op {
+    match kind {
+        binary_add { Op.iadd }
+        binary_sub { Op.sub }
+        binary_mul { Op.mul }
+        binary_div { Op.div }
+        binary_mod { Op.rem }
+        binary_eq_eq { Op.eq }
+        binary_neq { Op.ne }
+        binary_lt { Op.lt }
+        binary_lt_eq { Op.le }
+        binary_gt { Op.gt }
+        binary_gt_eq { Op.ge }
+        binary_bit_and { Op.band }
+        binary_bit_or { Op.bor }
+        binary_bit_xor { Op.bxor }
+        binary_shl { Op.shl }
+        binary_shr { Op.shr }
+        else { Op.trap }
+    }
+}
+
+binary_expr :: fn(ctx &Context, node, left, right u32) Val {
+    db := ctx.db
+    op := binary_op(db.hir.kind(node))
+    lhs := expr(ctx, left)
+    rhs := expr(ctx, right)
+    if not ctx.open() { ret Val.none }
+    ty := ctx.out.value_type(lhs)
+    if ty == Ty.ptr and (op == Op.iadd or op == Op.sub) {
+        elem := db.types.payload(db.get_node_type(left))
+        index := if op == Op.sub { ctx.out.unary(Op.neg, rhs) } else { rhs }
+        ret ctx.out.offset(lhs, index, storage.shape(db, elem, node).size)
+    }
+    rhs_ty := ctx.out.value_type(rhs)
+    if ty != rhs_ty and
+        (
+            db.get_node_type(left) == types.ty_id_untyped_int() or
+                db.get_node_type(left) == types.ty_id_untyped_float()
+        ) {
+        lhs = ctx.out.cast(rhs_ty, lhs)
+        ty = rhs_ty
+    }
+    ctx.out.binary(op, lhs, ctx.out.cast(ty, rhs))
+}
+
+number :: fn(ctx &Context, ty Ty, value f64) Val {
+    if ty == Ty.f32_ {
+        narrow := value as f32
+        bits: u32 = 0
+        @memcpy(&bits as &u8, &narrow as &u8, 4)
+        ret ctx.out.constant(ty, bits as u64)
+    }
+    bits: u64 = 0
+    @memcpy(&bits as &u8, &value as &u8, 8)
+    ctx.out.constant(ty, bits)
+}
+
+find_address :: fn(ctx &Context, sym, node u32) Val {
+    if sym == none() { ret Val.none }
+    local := ctx.locals.get(sym)
+    if local != (0 as &Val) { ret *local }
+    if ctx.db.global_var(sym) != none() {
+        ret ctx.out.address(ctx.module.register(sym, node))
+    }
+    Val.none
+}
+
+record_field :: fn(ctx &Context, address Val, ty, name, node u32) Val {
+    ctx.offset(address, storage.field(ctx.db, ty, name, node).offset)
+}
+
+addressable :: fn(ctx &Context, node u32) bool {
+    db := ctx.db
+    match db.hir.kind(node) {
+        ident {
+            ret ctx.locals.contains_key(db.get_hir_symbol(node)) or
+                db.global_var(db.get_hir_symbol(node)) != none()
+        }
+        member {
+            base := db.hir.lhs(node)
+            ret db.global_var(db.get_hir_symbol(node)) != none() or
+                db.types.kind(db.get_node_type(base)) == Kind.ptr or
+                addressable(ctx, base)
+        }
+        index {
+            base := db.hir.lhs(node)
+            ret db.types.kind(db.get_node_type(base)) == Kind.ptr or addressable(ctx, base)
+        }
+        unary_deref { ret true }
+        else { ret false }
+    }
+}
+
+record_base :: fn(ctx &Context, node u32) Val {
+    if ctx.db.types.kind(ctx.db.get_node_type(node)) == Kind.ptr { ret expr(ctx, node) }
+    if addressable(ctx, node) { ret place(ctx, node) }
+    expr(ctx, node)
+}
+
+place :: fn(ctx &Context, node u32) Val {
+    db := ctx.db
+    table := &db.hir
+    left := table.lhs(node)
+    match table.kind(node) {
+        ident, member {
+            found := find_address(ctx, db.get_hir_symbol(node), node)
+            if found != Val.none { ret found }
+            if table.kind(node) == k.member {
+                ty := db.get_node_type(left)
+                base := record_base(ctx, left)
+                while db.types.kind(ty) == Kind.ptr {
+                    ty = db.types.payload(ty)
+                    if db.types.kind(ty) == Kind.ptr { base = ctx.out.load(Ty.ptr, base) }
+                }
+                ret record_field(ctx, base, ty, table.lhs(table.rhs(node)), node)
+            }
+            storage.error(db, node, "expression has no AIR address")
+            ret Val.none
+        }
+        unary_deref { ret expr(ctx, left) }
+        index {
+            base := record_base(ctx, left)
+            source := db.get_node_type(left)
+            if db.types.kind(source) == Kind.nominal or db.types.kind(source) == Kind.struct_ {
+                base = ctx.out.load(
+                    Ty.ptr
+                    record_field(ctx, base, source, db.interner.intern("ptr"), node)
+                )
+            }
+            ty := db.get_node_type(node)
+            index := expr(ctx, table.rhs(node))
+            ret ctx.out.offset(base, index, storage.shape(db, ty, node).size)
+        }
+        else { storage.error(db, node, "expression has no AIR address"), ret Val.none }
+    }
+    Val.none
+}
+
+resolve_call :: fn(db &Nexus, node, callee u32) u32 {
+    sym := db.resolve_sym(db.get_hir_symbol(callee))
+    if sym == none() or db.global_var(sym) != none() or db.get_fn_node(sym) == none() { ret none() }
+    concrete := db.get_const_type(node)
+    if concrete != types.ty_id_none() {
+        found := db.find_mono_sym(sym, concrete, db.mono_owner(callee, sym))
+        if found != none() { ret found }
+    }
+    sym
+}
+
+receiver :: fn(ctx &Context, node, want u32) Val {
+    db := ctx.db
+    actual := db.get_node_type(node)
+    have_depth: u32 = 0
+    want_depth: u32 = 0
+    db.types.unwrap_ptr_depth(actual, &have_depth)
+    db.types.unwrap_ptr_depth(want, &want_depth)
+    value := if have_depth < want_depth and addressable(ctx, node) {
+        have_depth = have_depth + 1
+        actual = db.types.alloc_ptr(actual)
+        place(ctx, node)
+    } else {
+        expr(ctx, node)
+    }
+    while have_depth < want_depth {
+        if not storage.aggregate(db, actual) {
+            temp := ctx.slot(actual, node)
+            ctx.write(actual, node, temp, value)
+            value = temp
+        }
+        actual = db.types.alloc_ptr(actual)
+        have_depth = have_depth + 1
+    }
+    while have_depth > want_depth {
+        actual = db.types.payload(actual)
+        value = ctx.read(actual, node, value)
+        have_depth = have_depth - 1
+    }
+    value
+}
+
+string_value :: fn(ctx &Context, bytes Str, pointer_only bool, node u32) Val {
+    key := ctx.db.interner.intern(bytes)
+    found := ctx.module.strings.get(key)
+    sym := if found != (0 as &Symbol) { *found } else {
+        added := ctx.module.air.data(ctx.db.interner.get(key))
+        ctx.module.strings.insert(key, added)
+        added
+    }
+    pointer := ctx.out.address(sym)
+    if pointer_only { ret pointer }
+    ty := ctx.db.str_type
+    result := ctx.slot(ty, node)
+    ctx.out.store(record_field(ctx, result, ty, ctx.db.interner.intern("ptr"), node), pointer)
+    length := ctx.out.constant(Ty.u64_, bytes.len)
+    ctx.out.store(record_field(ctx, result, ty, ctx.db.interner.intern("len"), node), length)
+    result
+}
+
+literal_text :: fn(ctx &Context, node u32, c_string bool) Val {
+    quoted := ctx.db.interner.get(ctx.db.hir.lhs(node))
+    source := if c_string and quoted.starts_with("c\"") { quoted.sub(1, quoted.len - 1) } else {
+        quoted
+    }
+    raw := source.trim_quotes()
+    backtick := source.len != 0 and source.ptr[0] == 96
+    decoded := String.new(ctx.module.arena)
+    index: u64 = 0
+    while index < raw.len {
+        ch := raw.ptr[index]
+        index = index + 1
+        if ch == 92 and index < raw.len {
+            escape := raw.ptr[index]
+            if escape == 96 and backtick {
+                ch = 96
+                index = index + 1
+            } else if not backtick {
+                index = index + 1
+                if escape == 'n' { ch = 10 } else if escape == 'r' { ch = 13 } else if escape ==
+                    't' { ch = 9 } else if escape == '0' { ch = 0 } else if escape == 'x' and
+                    index + 1 < raw.len {
+                    ch = hex(raw.ptr[index]) * 16 + hex(raw.ptr[index + 1])
+                    index = index + 2
+                } else { ch = escape }
+            }
+        }
+        decoded.push_char(ch)
+    }
+    if c_string { decoded.push_char(0) }
+    string_value(ctx, decoded.as_str(), c_string, node)
+}
+
+hex :: fn(ch u8) u8 {
+    if ch >= '0' and ch <= '9' { ret ch - '0' }
+    (ch | 32) - 'a' + 10
+}
+
+record_init :: fn(ctx &Context, node, ty u32) Val {
+    db := ctx.db
+    target := ctx.slot(ty, node)
+    ctx.out.zero(target, storage.shape(db, ty, node).size)
+    values := items(db, db.hir.rhs(node))
+    if db.hir.kind(node) == k.array_init {
+        elem := db.types.get_array_type(ty)
+        size := storage.shape(db, elem, node).size
+        offset: u32 = 0
+        for item in items(db, db.hir.lhs(node)) {
+            value := expr(ctx, item)
+            if not ctx.open() { ret Val.none }
+            ctx.write(elem, item, ctx.offset(target, offset), value)
+            offset = offset + size
+        }
+    } else {
+        fields := items(db, db.hir.lhs(node))
+        pos: u64 = 0
+        while pos < fields.len and pos < values.len {
+            name := db.hir.lhs(fields.get(pos))
+            item := values.get(pos)
+            field := storage.field(db, ty, name, item)
+            value := expr(ctx, item)
+            if not ctx.open() { ret Val.none }
+            ctx.write(field.ty, item, ctx.offset(target, field.offset), value)
+            pos = pos + 1
+        }
+    }
+    target
+}
+
+unpack :: fn(ctx &Context, list, ty u32, value Val) {
+    db := ctx.db
+    index: u32 = 0
+    for item in items(db, list) {
+        kind := db.hir.kind(item)
+        if kind == k.empty or db.get_hir_symbol(item) != none() {
+            name := db.tuple_field_name(index)
+            field := storage.field(db, ty, name, item)
+            part := ctx.read(field.ty, item, ctx.offset(value, field.offset))
+            if kind == k.empty or kind == k.tuple_type {
+                unpack(ctx, db.hir.lhs(item), field.ty, part)
+            } else {
+                ctx.local(item, field.ty, part)
+            }
+        }
+        index = index + 1
+    }
+}
+
+constant_value :: fn(ctx &Context, node, ty u32, bits u64) Val {
+    db := ctx.db
+    if ty == db.str_type {
+        if bits == 0 { ret string_value(ctx, Str.empty(), false, node) }
+        ptr := reflection.reflection_read(db, bits, ty, "ptr") as &u8
+        len := reflection.reflection_read(db, bits, ty, "len")
+        ret string_value(ctx, Str.new(ptr, len), false, node)
+    }
+    if storage.aggregate(db, ty) {
+        target := ctx.slot(ty, node)
+        ctx.out.zero(target, storage.shape(db, ty, node).size)
+        if bits == 0 { ret target }
+        kind := db.types.kind(ty)
+        if kind == Kind.array {
+            elem := db.types.get_array_type(ty)
+            value_size := storage.shape(db, elem, node).size
+            stride := vm.vm_element_size(&db.types, elem)
+            for index in Range.new(0, db.types.get_array_len(ty) as i32) {
+                raw := legacy.read_vm_constant((bits + index as u64 * stride) as &u8, stride)
+                value := constant_value(ctx, node, elem, raw)
+                ctx.write(elem, node, ctx.offset(target, index as u32 * value_size), value)
+            }
+        } else if kind == Kind.union_ {
+            tag := (bits as &u64)[0] as u32
+            member := db.types.union_members(ty).get(tag as u64)
+            ctx.out.store(target, ctx.out.constant(Ty.u32_, tag as u64))
+            value := constant_value(ctx, node, member, (bits as &u64)[1])
+            ctx.write(member, node, ctx.offset(target, storage.union_align(db, ty, node)), value)
+        } else {
+            fields := db.types.get_struct_fields(ty)
+            offset: u32 = 0
+            position: u64 = 0
+            while position < fields.len / 2 {
+                item := fields.get(position * 2 + 1)
+                shape := storage.shape(db, item, node)
+                offset = storage.align_up(offset, shape.align)
+                value := constant_value(ctx, node, item, (bits as &u64)[position])
+                ctx.write(item, node, ctx.offset(target, offset), value)
+                offset = offset + shape.size
+                position = position + 1
+            }
+        }
+        ret target
+    }
+    if bits != 0 and (db.types.kind(ty) == Kind.ptr or db.types.kind(ty) == Kind.func) {
+        storage.error(db, node, "compile-time addresses cannot escape to AIR")
+    }
+    ctx.out.constant(storage.scalar(db, ty, node), bits)
+}
+
+name_value :: fn(ctx &Context, node, ty u32) Val {
+    db := ctx.db
+    table := &db.hir
+    if table.kind(node) == k.member { module_effect(ctx, table.lhs(node)) }
+    if not ctx.open() { ret Val.none }
+    sym := db.resolve_sym(db.get_hir_symbol(node))
+    address := find_address(ctx, sym, node)
+    if address != Val.none { ret ctx.read(ty, node, address) }
+    if db.types.kind(ty) == Kind.func and db.get_fn_node(sym) != none() {
+        chosen := resolve_call(db, node, node)
+        ret ctx.out.address(ctx.module.register(chosen, node))
+    }
+    if db.has_const_val(node) and not storage.aggregate(db, ty) {
+        ret constant_value(ctx, node, ty, db.get_const_val(node))
+    }
+    if table.kind(node) == k.member {
+        lhs := table.lhs(node)
+        lhs_type := db.get_node_type(lhs)
+        if lhs_type == types.ty_id_type() and db.types.kind(ty) == Kind.enum_ {
+            value := db.types.enum_variant_val(ty, table.lhs(table.rhs(node)))
+            ret ctx.out.constant(storage.scalar(db, ty, node), value as u64)
+        }
+        if lhs_type != types.ty_id_type() and db.module_receiver(lhs) == none() {
+            address = place(ctx, node)
+            if not ctx.open() { ret Val.none }
+            ret ctx.read(ty, node, address)
+        }
+    }
+    if db.is_sym_const(sym) {
+        declaration := db.get_sym_hir(sym)
+        if declaration != none() and db.has_const_val(declaration) {
+            ret constant_value(ctx, node, ty, db.get_const_val(declaration))
+        }
+        init := db.binding_value(sym)
+        if init != none() {
+            value := expr(ctx, init)
+            if not ctx.open() { ret Val.none }
+            ret ctx.out.cast(storage.scalar(db, ty, node), value)
+        }
+    }
+    storage.error(db, node, "unresolved runtime name")
+    Val.none
+}
+
+builtin :: fn(ctx &Context, node, ty u32) Val {
+    db := ctx.db
+    table := &db.hir
+    name := db.interner.get(table.lhs(node))
+    if name.eq("import") {
+        ret ctx.slot(ty, node)
+    }
+    if name.eq("trap") { ctx.out.trap(), ret Val.none }
+    if name.eq("sizeof") {
+        size := storage.shape(db, db.get_const_type(node), node).size
+        ret ctx.out.constant(storage.scalar(db, ty, node), size as u64)
+    }
+    if name.eq("type_name") or name.eq("source_location") { ret expr(ctx, table.extra(node)) }
+    if name.eq("type_info") { ret reflection_address(ctx, node) }
+    args := items(db, table.rhs(node))
+    if name.eq("memcpy") {
+        dest := expr(ctx, args.get(0))
+        source := expr(ctx, args.get(1))
+        count := expr(ctx, args.get(2))
+        ctx.out.copy_bytes(dest, source, count)
+        ret Val.none
+    }
+    if name.eq("is") or name.eq("tag") {
+        target := db.get_const_type(node)
+        arg := args.get(0)
+        source := db.get_node_type(arg)
+        union := db.types.kind(source) == Kind.union_
+        value := expr(ctx, arg)
+        tag := if union { ctx.out.load(Ty.u32_, value) } else { ctx.out.constant(Ty.u32_, 0) }
+        if name.eq("tag") { ret ctx.out.cast(storage.scalar(db, ty, node), tag) }
+        if not union or not db.types.union_contains(source, target) {
+            ret ctx.out.constant(Ty.i1, (source == target) as u64)
+        }
+        index := ctx.out.constant(Ty.u32_, db.types.union_member_index(source, target) as u64)
+        ret ctx.out.binary(Op.eq, tag, index)
+    }
+    storage.error(db, node, "builtin has no AIR lowering")
+    Val.none
+}
+
+expr :: fn(ctx &Context, node u32) Val {
+    if node == none() or not ctx.open() { ret Val.none }
+    db := ctx.db
+    ty := db.get_node_type(node)
+    if ty == types.ty_id_type() and not db.has_const_val(node) { ret Val.none }
+    if db.has_union_coerce(node) {
+        target := db.get_union_coerce_ty(node)
+        index := db.get_union_coerce_idx(node)
+        member := db.types.union_members(target).get(index as u64)
+        value := raw_expr(ctx, node, member)
+        if not ctx.open() { ret Val.none }
+        ret pack_union(ctx, node, target, index, member, value)
+    }
+    raw_expr(ctx, node, ty)
+}
+
+pack_union :: fn(ctx &Context, node, target, index, member u32, value Val) Val {
+    db := ctx.db
+    result := ctx.slot(target, node)
+    ctx.out.zero(result, storage.shape(db, target, node).size)
+    ctx.out.store(result, ctx.out.constant(Ty.u32_, index as u64))
+    ctx.write(member, node, ctx.offset(result, storage.union_align(db, target, node)), value)
+    result
+}
+
+raw_expr :: fn(ctx &Context, node, ty u32) Val {
+    db := ctx.db
+    table := &db.hir
+    kind := table.kind(node)
+    left := table.lhs(node)
+    right := table.rhs(node)
+    extra := table.extra(node)
+    match kind {
+        empty, binding, struct_, enum_, nominal_tuple, tuple_type { ret Val.none }
+        lit_bool_true, lit_bool_false {
+            ret ctx.out.constant(Ty.i1, (kind == k.lit_bool_true) as u64)
+        }
+        lit_int, lit_char {
+            value := if kind == k.lit_int { left as u64 } else { db.get_const_val(node) }
+            target := storage.scalar(db, ty, node)
+            if target == Ty.f32_ or target == Ty.f64_ { ret number(ctx, target, value as f64) }
+            ret ctx.out.constant(target, value)
+        }
+        lit_float {
+            ret number(ctx, storage.scalar(db, ty, node), parse_float(db.interner.get(left)))
+        }
+        lit_str, lit_cstr {
+            ret literal_text(ctx, node, kind == k.lit_cstr or db.types.kind(ty) == Kind.ptr)
+        }
+        ident, member { ret name_value(ctx, node, ty) }
+        function {
+            if db.types.func_has_type_param(ty) { ret Val.none }
+            ret ctx.out.address(ctx.module.register(db.get_hir_symbol(node), node))
+        }
+        call { ret call(ctx, node, left, Val.none) }
+        block {
+            result := Val.none
+            for child in items(db, left) {
+                result = expr(ctx, child)
+                if not ctx.open() { break }
+            }
+            ret result
+        }
+        var {
+            decl_ty := db.get_node_type(left)
+            if decl_ty == types.ty_id_type() or db.types.func_has_type_param(decl_ty) {
+                ret Val.none
+            }
+            value := expr(ctx, extra)
+            if ctx.open() { ctx.local(left, decl_ty, value) }
+            ret Val.none
+        }
+        destructure {
+            value := expr(ctx, extra)
+            if ctx.open() { unpack(ctx, table.lhs(left), db.get_node_type(extra), value) }
+            ret Val.none
+        }
+        binary_assign {
+            address := place(ctx, left)
+            value := expr(ctx, right)
+            if not ctx.open() { ret Val.none }
+            ctx.write(db.get_node_type(left), node, address, value)
+            ret value
+        }
+        binary_add, binary_sub, binary_mul, binary_div, binary_mod, binary_eq_eq, binary_neq, binary_lt, binary_lt_eq, binary_gt, binary_gt_eq, binary_bit_and, binary_bit_or, binary_bit_xor, binary_shl, binary_shr {
+            ret binary_expr(ctx, node, left, right)
+        }
+        binary_and, binary_or { ret logical(ctx, kind, left, right) }
+        unary_neg, unary_not, unary_bit_not {
+            value := expr(ctx, left)
+            if not ctx.open() { ret Val.none }
+            op := if kind == k.unary_neg { Op.neg } else { Op.invert }
+            ret ctx.out.unary(op, value)
+        }
+        unary_addr_of { ret place(ctx, left) }
+        unary_deref, index {
+            address := place(ctx, node)
+            if not ctx.open() { ret Val.none }
+            ret ctx.read(ty, node, address)
+        }
+        cast {
+            value := expr(ctx, left)
+            if not ctx.open() { ret Val.none }
+            source := db.get_node_type(left)
+            if db.types.kind(source) == Kind.union_ and source != ty {
+                tag := ctx.out.load(Ty.u32_, value)
+                chosen := db.types.union_member_index(source, ty)
+                pass := ctx.out.block()
+                fail := ctx.out.block()
+                ctx.out.branch(
+                    ctx.out.binary(Op.eq, tag, ctx.out.constant(Ty.u32_, chosen as u64))
+                    pass
+                    fail
+                )
+                ctx.out.begin(fail)
+                ctx.out.trap()
+                ctx.out.begin(pass)
+                ret ctx.read(ty, node, ctx.offset(value, storage.union_align(db, source, node)))
+            }
+            ret ctx.out.cast(storage.scalar(db, ty, node), value)
+        }
+        k_if { ret conditional(ctx, node, left, right, extra) }
+        k_while { while_loop(ctx, left, right), ret Val.none }
+        k_for { for_loop(ctx, node), ret Val.none }
+        k_match { ret match_expr(ctx, node, ty) }
+        k_ret { ctx.finish(expr(ctx, left), node), ret Val.none }
+        k_break { ctx.out.jump(ctx.break_to), ret Val.none }
+        k_cont { ctx.out.jump(ctx.continue_to), ret Val.none }
+        struct_init, array_init { ret record_init(ctx, node, ty) }
+        k_cmpt {
+            if db.has_const_val(node) {
+                bits := db.get_const_val(node)
+                if db.types.kind(ty) == Kind.union_ and db.types.kind(right) != Kind.union_ and
+                    db.has_union_coerce(left) {
+                    index := db.get_union_coerce_idx(left)
+                    member := db.types.union_members(ty).get(index as u64)
+                    item := constant_value(ctx, node, member, bits)
+                    ret pack_union(ctx, node, ty, index, member, item)
+                }
+                if db.types.kind(ty) == Kind.float and
+                    db.types.payload(ty) != db.types.payload(right) {
+                    if right == types.ty_id_untyped_float() or db.types.kind(right) == Kind.float {
+                        float := if db.types.payload(right) == 32 {
+                            (*(&bits as &f32)) as f64
+                        } else {
+                            *(&bits as &f64)
+                        }
+                        ret number(ctx, storage.scalar(db, ty, node), float)
+                    }
+                }
+                ret constant_value(ctx, node, ty, bits)
+            }
+            storage.error(db, node, "comptime expression has no evaluated value")
+            ret Val.none
+        }
+        splice {
+            if right == 1 { ret call(ctx, extra, table.lhs(extra), Val.none) }
+            ret expr(ctx, extra)
+        }
+        builtin_call { ret builtin(ctx, node, ty) }
+        else { storage.error(db, node, hir.hir_kind_name(kind)), ret Val.none }
+    }
+    Val.none
+}
+
+reflection :: @import("compiler/typer/reflection")
+
+reflection_address :: fn(ctx &Context, node u32) Val {
+    db := ctx.db
+    ty := db.types.payload(db.get_node_type(node))
+    source := reflection.reflection_value(db, node)
+    ctx.out.address(ctx.module.reflect(source, ty, 0, node))
+}
+
+lower_metadata :: fn(ctx &Context, data Metadata) {
+    db := ctx.db
+    table := &db.types
+    dest := ctx.out.address(data.target)
+    bits := data.source as &u64
+    if data.count != 0 {
+        width := @sizeof(&u8) as u32
+        record := table.payload(data.ty)
+        pointers := data.source as &&u8
+        for index in Range.new(0, data.count as i32) {
+            item := ctx.module.reflect(pointers[index] as u64, record, 0, data.node)
+            ctx.out.store(ctx.offset(dest, index as u32 * width), ctx.out.address(item))
+        }
+        ret
+    }
+    fields := table.get_struct_fields(data.ty)
+    position: u64 = 0
+    for index in Range.new(0, (fields.len / 2) as i32) {
+        name := fields.get(index as u64 * 2)
+        ty := fields.get(index as u64 * 2 + 1)
+        shape := storage.shape(db, ty, data.node)
+        offset := storage.align_up(position as u32, shape.align)
+        address := ctx.offset(dest, offset)
+        position = (offset + shape.size) as u64
+        raw := bits[index]
+        if raw == 0 { cont }
+        value := if table.kind(ty) == Kind.ptr {
+            text := db.interner.get(name)
+            count_name := if text.eq("fields") { "field_count" } else if text.eq("members") {
+                "member_count"
+            } else if text.eq("params") { "param_count" } else { Str.empty() }
+            count := if count_name.len == 0 { 0 as u32 } else {
+                reflection.reflection_read(db, data.source, data.ty, count_name) as u32
+            }
+            ctx.out.address(ctx.module.reflect(raw, table.payload(ty), count, data.node))
+        } else {
+            constant_value(ctx, data.node, ty, raw)
+        }
+        ctx.write(ty, data.node, address, value)
+    }
+}
+
+lower_body :: fn(module &Module, pending Pending) {
+    db := module.db
+    sym := pending.source
+    node := db.get_fn_node(sym)
+    if db.is_mono_sym(sym) { db.restore_mono_func(sym) }
+    sig := func_type(db, sym, node)
+    ctx := Context.new(module, db.types.func_return(sig))
+    decl := module.air.get(pending.target)
+    signature := if decl.count == 0 { Slice(Ty).empty() } else {
+        Slice(Ty).new(module.air.types.ptr_at(decl.params as u64), decl.count as u64)
+    }
+    entry := ctx.out.block_with_params(signature)
+    ctx.out.begin(entry)
+    index: u32 = 0
+    if storage.aggregate(db, ctx.return_ty) {
+        ctx.return_slot = ctx.out.parameter(entry, 0)
+        index = 1
+    }
+    args := items(db, db.hir.lhs(node))
+    params := db.types.func_params(sig)
+    pos: u64 = 0
+    while pos < args.len and pos < params.len {
+        arg := args.get(pos)
+        ty := params.get(pos)
+        if runtime_arg(db, node, pos, ty) {
+            name := db.hir.lhs(arg)
+            if name != none() { ctx.local(name, ty, ctx.out.parameter(entry, index)) }
+            index = index + 1
+        }
+        pos = pos + 1
+    }
+    body := db.hir.extra(node)
+    ctx.finish(expr(&ctx, body), body)
+    ctx.locals.destroy()
+    module.air.define(pending.target, ctx.out)
+}
+
+lower_globals :: fn(module &Module, lowered &u64) {
+    if module.globals.len == 0 and module.metadata.len == 0 { ret }
+    module.air.initializer = module.air.declare("$init", Slice(Ty).empty(), Ty.void_, false)
+    ctx := Context.new(module, types.ty_id_unit())
+    ctx.out.begin(ctx.out.block())
+    index: u64 = 0
+    prepared: u64 = 0
+    while index < module.globals.len or prepared < module.metadata.len or
+        *lowered < module.pending.len {
+        if *lowered < module.pending.len {
+            lower_body(module, module.pending.get(*lowered))
+            *lowered = *lowered + 1
+            cont
+        }
+        if prepared < module.metadata.len {
+            lower_metadata(&ctx, module.metadata.get(prepared))
+            prepared = prepared + 1
+            cont
+        }
+        init := module.globals.get(index)
+        name := module.db.hir.lhs(init.source)
+        node := module.db.hir.extra(init.source)
+        address := ctx.out.address(init.target)
+        value := expr(&ctx, node)
+        if not ctx.open() { storage.error(module.db, node, "global initializer cannot terminate") }
+        ctx.write(module.db.get_node_type(name), node, address, value)
+        index = index + 1
+    }
+    ctx.out.ret_void()
+    ctx.locals.destroy()
+    module.air.define(module.air.initializer, ctx.out)
+}
+
+lower :: fn(db &Nexus, arena &Arena, file, entry, selected u32) Program {
+    module := Module.new(db, arena)
+    if selected != none() {
+        module.air.entry = module.register(selected, db.get_fn_node(selected))
+    } else {
+        if entry != none() { module.air.entry = module.register(entry, db.get_fn_node(entry)) }
+        index: u32 = 0
+        while index < db.sym_count() {
+            sym := index
+            index = index + 1
+            if db.sym_tok_start(sym) == none() or db.resolve_sym(sym) != sym { cont }
+            global := db.global_var(sym)
+            if global != none() {
+                module.register(sym, global)
+                cont
+            }
+            node := db.get_fn_node(sym)
+            if node == none() { cont }
+            if db.sym_file(sym) != file and not db.is_extern_fn(node) { cont }
+            ty := db.get_node_type(node)
+            if db.types.kind(ty) != Kind.func or db.types.func_has_type_param(ty) or
+                db.types.func_return(ty) == types.ty_id_type() { cont }
+            if db.hir.extra(node) != none() or db.is_extern_fn(node) { module.register(sym, node) }
+        }
+    }
+    index: u64 = 0
+    while index < module.pending.len {
+        lower_body(&module, module.pending.get(index))
+        index = index + 1
+    }
+    lower_globals(&module, &index)
+    module.symbols.destroy()
+    module.strings.destroy()
+    module.pending.destroy()
+    module.globals.destroy()
+    module.reflected.destroy()
+    module.metadata.destroy()
+    module.air
+}
+
+for_loop :: fn(ctx &Context, node u32) {
+    db := ctx.db
+    table := &db.hir
+    iterators := items(db, table.rhs(node))
+    variables := items(db, table.lhs(node))
+    states := Vec(Val).with_cap(iterators.len)
+    addresses := Vec(Val).with_cap(variables.len)
+    for iter in iterators {
+        source := if table.kind(iter) == k.for_iter { table.lhs(iter) } else { iter }
+        states.push(expr(ctx, source))
+    }
+    for name in variables {
+        address := ctx.slot(db.get_node_type(name), name)
+        ctx.locals.insert(db.get_hir_symbol(name), address)
+        addresses.push(address)
+    }
+    head := ctx.out.block()
+    end := ctx.out.block()
+    ctx.out.jump(head)
+    ctx.out.begin(head)
+    present := db.interner.intern("present")
+    value_name := db.interner.intern("value")
+    ptr_name := db.interner.intern("ptr")
+    index_name := db.interner.intern("index")
+    len_name := db.interner.intern("len")
+    values := Vec(Val).with_cap(iterators.len)
+    position: u64 = 0
+    for iter in iterators {
+        state := states.get(position)
+        ty := db.get_node_type(iter)
+        run := ctx.out.block()
+        if table.kind(iter) == k.for_iter {
+            next := table.rhs(iter)
+            result := call(ctx, next, table.lhs(next), state)
+            ty = db.get_node_type(next)
+            condition := ctx.out.load(Ty.i1, record_field(ctx, result, ty, present, next))
+            ctx.out.branch(condition, run, end)
+            ctx.out.begin(run)
+            item := storage.field(db, ty, value_name, next)
+            values.push(ctx.read(item.ty, next, ctx.offset(result, item.offset)))
+        } else {
+            index := storage.field(db, ty, index_name, iter)
+            index_ty := storage.scalar(db, index.ty, iter)
+            index_slot := ctx.offset(state, index.offset)
+            offset := ctx.out.load(index_ty, index_slot)
+            length := ctx.out.load(index_ty, record_field(ctx, state, ty, len_name, iter))
+            ctx.out.branch(ctx.out.binary(Op.lt, offset, length), run, end)
+            ctx.out.begin(run)
+            ptr_type := storage.field(db, ty, ptr_name, iter).ty
+            pointer := ctx.out.load(Ty.ptr, record_field(ctx, state, ty, ptr_name, iter))
+            element := db.types.payload(ptr_type)
+            address := ctx.out.offset(pointer, offset, storage.shape(db, element, iter).size)
+            item_ty := db.get_node_type(variables.get(position))
+            value := if legacy.iterator_is_ref(db, ty) { address } else {
+                ctx.read(item_ty, iter, address)
+            }
+            values.push(value)
+            ctx.out.store(
+                index_slot
+                ctx.out.binary(Op.iadd, offset, ctx.out.constant(index_ty, 1))
+            )
+        }
         position = position + 1
     }
-    result := expr(db, &out, &params, node, keel.Ty.i32_)
-    out.ret_value(result)
-    params.destroy()
-    out
+    position = 0
+    for name in variables {
+        ctx.write(db.get_node_type(name), name, addresses.get(position), values.get(position))
+        position = position + 1
+    }
+    states.destroy()
+    addresses.destroy()
+    values.destroy()
+    saved := .(ctx.break_to, ctx.continue_to)
+    ctx.break_to = end
+    ctx.continue_to = head
+    expr(ctx, table.extra(node))
+    jump_to(ctx, head, Ty.void_, Val.none)
+    ctx.break_to = saved.0
+    ctx.continue_to = saved.1
+    ctx.out.begin(end)
+}
+
+match_expr :: fn(ctx &Context, node, result_ty u32) Val {
+    db := ctx.db
+    table := &db.hir
+    source := table.lhs(node)
+    value := expr(ctx, source)
+    if not ctx.open() { ret Val.none }
+    ty := db.get_node_type(source)
+    union := db.types.kind(ty) == Kind.union_
+    tag := if union { ctx.out.load(Ty.u32_, value) } else { value }
+    tag_ty := ctx.out.value_type(tag)
+    result := storage.scalar(db, result_ty, node)
+    end := join(ctx, result)
+    incoming := false
+    for arm in items(db, table.rhs(node)) {
+        patterns := items(db, table.lhs(arm))
+        if patterns.len != 0 {
+            pass := ctx.out.block()
+            for pattern in patterns {
+                index := if union {
+                    db.types.union_member_index(ty, db.get_const_type(pattern))
+                } else {
+                    name := if table.kind(pattern) == k.member {
+                        table.lhs(table.rhs(pattern))
+                    } else { table.lhs(pattern) }
+                    db.types.enum_variant_val(ty, name)
+                }
+                next := ctx.out.block()
+                test := ctx.out.binary(Op.eq, tag, ctx.out.constant(tag_ty, index as u64))
+                ctx.out.branch(test, pass, next)
+                ctx.out.begin(next)
+            }
+            resume := ctx.out.current
+            ctx.out.suspend()
+            ctx.out.begin(pass)
+            binder := table.extra(arm)
+            if binder != none() and table.extra(node) != none() and
+                table.kind(table.extra(node)) == k.match_binding {
+                item_ty := db.get_node_type(binder)
+                item := if union {
+                    ctx.read(item_ty, binder, ctx.offset(value, storage.union_align(db, ty, node)))
+                } else {
+                    value
+                }
+                ctx.local(binder, item_ty, item)
+            }
+            item := expr(ctx, table.rhs(arm))
+            if ctx.open() { incoming = true }
+            jump_to(ctx, end, result, item)
+            ctx.out.begin(resume)
+        } else {
+            item := expr(ctx, table.rhs(arm))
+            if ctx.open() { incoming = true }
+            jump_to(ctx, end, result, item)
+            break
+        }
+    }
+    if ctx.open() { ctx.out.trap() }
+    output := open_join(ctx, end, result)
+    if not incoming { ctx.out.trap() }
+    output
+}
+
+call :: fn(ctx &Context, node, callee u32, supplied Val) Val {
+    db := ctx.db
+    if db.hir.kind(callee) == k.member {
+        base := db.hir.lhs(callee)
+        array := db.types.unwrap_ptr(db.get_node_type(base))
+        if db.types.kind(array) == Kind.array {
+            ret array_iterator(ctx, node, callee, base, array)
+        }
+    }
+    sym := resolve_call(db, node, callee)
+    func := db.get_fn_node(sym)
+    sig := if sym == none() { db.get_node_type(callee) } else { func_type(db, sym, func) }
+    if db.types.kind(sig) != Kind.func { storage.error(db, node, "unresolved call signature") }
+    target := if sym == none() { Symbol.none } else { ctx.module.register(sym, node) }
+    address := if target == Symbol.none { expr(ctx, callee) } else { Val.none }
+    result := db.types.func_return(sig)
+    params := db.types.func_params(sig)
+    args := Vec(Val).new()
+    result_slot := if storage.aggregate(db, result) { ctx.slot(result, node) } else { Val.none }
+    if result_slot != Val.none { args.push(result_slot) }
+    if target != Symbol.none and db.hir.kind(callee) == k.member {
+        base := db.hir.lhs(callee)
+        if db.module_receiver(base) != none() {
+            module_effect(ctx, base)
+        } else if func_has_self(db, func) {
+            arg := if supplied != Val.none { supplied } else { receiver(ctx, base, params.get(0)) }
+            args.push(arg)
+        }
+        if not ctx.open() { args.destroy(), ret Val.none }
+    }
+    index: u32 = 0
+    for arg in items(db, db.hir.rhs(node)) {
+        ty := db.get_node_type(arg)
+        if not db.is_const_call_arg(node, index) and ty != types.ty_id_type() {
+            value := expr(ctx, arg)
+            if not ctx.open() { args.destroy(), ret Val.none }
+            if target != Symbol.none {
+                decl := ctx.module.air.get(target)
+                if args.len < decl.count as u64 {
+                    want := ctx.module.air.types.get(decl.params as u64 + args.len)
+                    value = ctx.out.cast(want, value)
+                }
+            }
+            args.push(value)
+        }
+        index = index + 1
+    }
+    ty := if result_slot != Val.none { Ty.void_ } else { storage.scalar(db, result, node) }
+    value := if target == Symbol.none {
+        ctx.out.call_indirect(address, ty, args.as_slice())
+    } else {
+        ctx.out.call(target, ty, args.as_slice())
+    }
+    args.destroy()
+    if result == types.ty_id_never() { ctx.out.trap() }
+    if result_slot != Val.none { ret result_slot }
+    value
+}
+
+module_effect :: fn(ctx &Context, node u32) {
+    if ctx.db.module_receiver(node) != none() and not ctx.db.is_const(node) {
+        expr(ctx, node)
+    }
+}
+
+array_iterator :: fn(ctx &Context, node, callee, base, array u32) Val {
+    db := ctx.db
+    pointer := record_base(ctx, base)
+    actual := db.get_node_type(base)
+    while db.types.kind(actual) == Kind.ptr {
+        actual = db.types.payload(actual)
+        if db.types.kind(actual) == Kind.ptr { pointer = ctx.out.load(Ty.ptr, pointer) }
+    }
+    signature := db.get_node_type(callee)
+    ty := db.types.func_return(signature)
+    iter := ctx.slot(ty, node)
+    ptr := db.interner.intern("ptr")
+    len := db.interner.intern("len")
+    index := db.interner.intern("index")
+    ctx.out.store(record_field(ctx, iter, ty, ptr, node), pointer)
+    ctx.out.store(
+        record_field(ctx, iter, ty, len, node)
+        ctx.out.constant(Ty.u64_, db.types.get_array_len(array) as u64)
+    )
+    ctx.out.store(record_field(ctx, iter, ty, index, node), ctx.out.constant(Ty.u64_, 0))
+    iter
 }

@@ -9,8 +9,14 @@ mkdir -p "$work"
 diff -u - "$work/demo.out" <<'AIR'
 air add
 b0(v0: i32, v1: i32):
-  v2 = iadd i32 v0, v1
-  ret v2
+  v2 = stack 4, align 4
+  store v2, v0
+  v3 = stack 4, align 4
+  store v3, v1
+  v4 = load i32 v2
+  v5 = load i32 v3
+  v6 = iadd i32 v4, v5
+  ret v6
 AIR
 
 cat > "$work/functions.a" <<'ABYSS'
@@ -23,29 +29,49 @@ ABYSS
 diff -u - "$work/custom.out" <<'AIR'
 air sum
 b0(v0: i32, v1: i32, v2: i32):
-  v3 = iadd i32 v2, v0
-  v4 = iadd i32 v1, v3
-  ret v4
+  v3 = stack 4, align 4
+  store v3, v0
+  v4 = stack 4, align 4
+  store v4, v1
+  v5 = stack 4, align 4
+  store v5, v2
+  v6 = load i32 v4
+  v7 = load i32 v5
+  v8 = load i32 v3
+  v9 = iadd i32 v7, v8
+  v10 = iadd i32 v6, v9
+  ret v10
 AIR
 
 "$compiler" --dump-air "$work/functions.a" select > "$work/select.out"
 diff -u - "$work/select.out" <<'AIR'
 air select
 b0(v0: i1, v1: i32, v2: i32):
-  branch v0, b1, b2
+  v3 = stack 1, align 1
+  store v3, v0
+  v4 = stack 4, align 4
+  store v4, v1
+  v5 = stack 4, align 4
+  store v5, v2
+  v6 = load i1 v3
+  branch v6, b1, b2
 b1:
-  v4 = iadd i32 v1, v2
-  jump b3(v4)
+  v8 = load i32 v4
+  v9 = load i32 v5
+  v10 = iadd i32 v8, v9
+  jump b3(v10)
 b2:
-  jump b3(v2)
-b3(v3: i32):
-  ret v3
+  v11 = load i32 v5
+  jump b3(v11)
+b3(v7: i32):
+  ret v7
 AIR
 
-if "$compiler" --dump-air "$work/functions.a" sub > "$work/unsupported.log" 2>&1; then
-    exit 1
-fi
-grep -Fq 'AIR expects a parameter, addition, or if expression' "$work/unsupported.log"
+"$compiler" --dump-air "$work/functions.a" > "$work/module.out"
+grep -Fq 'air @1 sum(i32, i32, i32) -> i32' "$work/module.out"
+grep -Fq 'air @2 sub(i32, i32) -> i32' "$work/module.out"
+grep -Fq 'sub i32' "$work/module.out"
+grep -Fq 'air @3 select(i1, i32, i32) -> i32' "$work/module.out"
 
 if "$compiler" --dump-air "$work/functions.a" missing > "$work/missing.log" 2>&1; then
     exit 1

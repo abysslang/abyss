@@ -1,0 +1,104 @@
+Ty :: ir.Ty
+Function :: ir.Function
+Symbol :: id.Symbol
+ir :: @import("./ir")
+id :: @import("./id")
+
+Kind :: enum u8 {
+    function
+    external
+    global
+    data
+}
+
+Decl :: struct {
+    kind          Kind
+    name          Str
+    params, count u32
+    result        Ty
+    body          u32
+    size, align   u32
+    bytes         Str
+
+    new :: fn(kind Kind, name Str) Self {
+        .{
+            kind: kind
+            name: name
+            params: 0
+            count: 0
+            result: Ty.void_
+            body: 0
+            size: 0
+            align: 0
+            bytes: Str.empty()
+        }
+    }
+}
+
+Program :: struct {
+    declarations       Vec(Decl)
+    types              Vec(Ty)
+    functions          Vec(Function)
+    entry, initializer Symbol
+
+    new :: fn() Self {
+        .{
+            declarations: Vec(Decl).new()
+            types: Vec(Ty).new()
+            functions: Vec(Function).new()
+            entry: Symbol.none
+            initializer: Symbol.none
+        }
+    }
+
+    destroy :: fn(self &Self) {
+        for body in self.functions.iter_ref() { body.destroy() }
+        self.functions.destroy()
+        self.declarations.destroy()
+        self.types.destroy()
+    }
+
+    add :: fn(self &Self, decl Decl) Symbol {
+        symbol := id.next_id(Symbol, self.declarations.len)
+        self.declarations.push(decl)
+        symbol
+    }
+
+    declare :: fn(self &Self, name Str, params Slice(Ty), result Ty, external bool) Symbol {
+        start := self.types.len as u32
+        self.types.extend(params.ptr, params.len)
+        kind := if external { Kind.external } else { Kind.function }
+        decl := Decl.new(kind, name)
+        decl.params = start
+        decl.count = params.len as u32
+        decl.result = result
+        self.add(decl)
+    }
+
+    global :: fn(self &Self, name Str, size, align u32) Symbol {
+        decl := Decl.new(Kind.global, name)
+        decl.size = size
+        decl.align = align
+        self.add(decl)
+    }
+
+    data :: fn(self &Self, bytes Str) Symbol {
+        decl := Decl.new(Kind.data, Str.empty())
+        decl.bytes = bytes
+        self.add(decl)
+    }
+
+    define :: fn(self &Self, symbol Symbol, body Function) {
+        decl := self.declarations.ptr_at(id.slot(symbol))
+        decl.body = (self.functions.len + 1) as u32
+        self.functions.push(body)
+    }
+
+    get :: fn(self &Self, symbol Symbol) Decl {
+        self.declarations.get(id.slot(symbol))
+    }
+
+    air_single :: fn(self &Self) bool {
+        self.declarations.len == 1 and self.functions.len == 1
+    }
+}

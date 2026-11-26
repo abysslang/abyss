@@ -60,6 +60,11 @@ gcc -std=gnu99 -D_POSIX_C_SOURCE=200809L -O3 out.c -o program
 
 Hosted targets use standard C99 declarations and standard library calls. WASI import declarations use compiler attributes (`__attribute__((import_module(...), import_name(...)))`), which is exactly how `clang` marks wasm imports.
 
+To inspect the experimental Abyss IR (AIR), run `abyssc --dump-air main.a`. The compiler
+finishes type checking, then prints function bodies as basic blocks and SSA values, along
+with globals and external declarations. Pass a function name after the path to inspect
+one function and its dependencies. AIR dumping does not execute the program.
+
 ## 5. Self-Hosting and Fixed-Point Determinism
 
 The compiler compiles itself:

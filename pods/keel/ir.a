@@ -7,21 +7,77 @@ Inst :: id.Inst
 Block :: id.Block
 Edge :: id.Edge
 Use :: id.Use
+Symbol :: id.Symbol
 
 Ty :: enum u8 {
     void_
     i1
+    i8_
+    i16_
     i32_
+    i64_
+    i128_
+    u8_
+    u16_
+    u32_
+    u64_
+    u128_
+    f32_
+    f64_
+    ptr
 }
 Op :: enum u8 {
     iadd
+    sub
+    mul
+    div
+    rem
+    eq
+    ne
+    lt
+    le
+    gt
+    ge
+    band
+    bor
+    bxor
+    shl
+    shr
+    neg
+    invert
+    cast
+    constant
+    stack
+    address
+    offset
+    load
+    store
+    copy
+    copy_bytes
+    zero
+    call
+    call_indirect
     jump
     branch
     ret_
+    trap
 }
 
 terminates :: fn(op Op) bool {
-    op != Op.iadd
+    op as u8 >= Op.jump as u8
+}
+
+binary :: fn(op Op) bool {
+    op as u8 <= Op.shr as u8
+}
+
+fixed_uses :: fn(op Op) u64 {
+    if op == Op.copy_bytes { ret 3 }
+    if binary(op) or op == Op.offset or op == Op.store or op == Op.copy { ret 2 }
+    match op {
+        neg, invert, cast, load, zero, branch, ret_ { 1 }
+        else { 0 }
+    }
 }
 
 Graph :: struct {
@@ -180,6 +236,10 @@ Function :: struct {
         self.current = block
     }
 
+    suspend :: fn(self &Self) {
+        self.current = Block.none
+    }
+
     first_inst :: fn(self &Self, block Block) Inst {
         self.layout.first.get(id.slot(block))
     }
@@ -221,8 +281,99 @@ Function :: struct {
 
     operand :: fn(self &Self, inst Inst, position u64) Val {
         op := self.opcode(inst)
-        if op == Op.jump or position > 1 or (position == 1 and op != Op.iadd) { ret Val.none }
+        if op == Op.call or op == Op.call_indirect {
+            if position >= self.graph.word(inst, 2) as u64 { ret Val.none }
+            ret self.graph.uses.value(self.graph.word(inst, 1) + position as u32)
+        }
+        if position >= fixed_uses(op) { ret Val.none }
         self.graph.uses.value(self.graph.word(inst, position))
+    }
+
+    payload :: fn(self &Self, inst Inst, position u64) u32 {
+        self.graph.word(inst, position)
+    }
+
+    emit :: fn(self &Self, op Op, ty Ty, left, right, extra u32) Val {
+        self.layout.add_inst()
+        inst := self.graph.inst(op, ty, left, right, extra)
+        self.append(inst)
+        self.result(inst)
+    }
+
+    binary :: fn(self &Self, op Op, lhs, rhs Val) Val {
+        ty := self.value_type(lhs)
+        if ty == Ty.void_ or self.value_type(rhs) != ty { #fall }
+        value := if (op as u8 >= Op.eq as u8) and (op as u8 <= Op.ge as u8) {
+            Ty.i1
+        } else {
+            ty
+        }
+        if not binary(op) { #fall }
+        self.emit(op, value, self.graph.uses.add(lhs), self.graph.uses.add(rhs), 0)
+    }
+
+    unary :: fn(self &Self, op Op, value Val) Val {
+        if op != Op.neg and op != Op.invert { #fall }
+        self.emit(op, self.value_type(value), self.graph.uses.add(value), 0, 0)
+    }
+
+    cast :: fn(self &Self, ty Ty, value Val) Val {
+        if self.value_type(value) == ty { ret value }
+        self.emit(Op.cast, ty, self.graph.uses.add(value), 0, 0)
+    }
+
+    constant :: fn(self &Self, ty Ty, bits u64) Val {
+        self.emit(Op.constant, ty, bits as u32, (bits >> 32) as u32, 0)
+    }
+
+    stack :: fn(self &Self, size, align u32) Val {
+        self.emit(Op.stack, Ty.ptr, size, align, 0)
+    }
+
+    address :: fn(self &Self, symbol Symbol) Val {
+        self.emit(Op.address, Ty.ptr, symbol as u32, 0, 0)
+    }
+
+    offset :: fn(self &Self, base, index Val, stride u32) Val {
+        self.emit(Op.offset, Ty.ptr, self.graph.uses.add(base), self.graph.uses.add(index), stride)
+    }
+
+    load :: fn(self &Self, ty Ty, address Val) Val {
+        self.emit(Op.load, ty, self.graph.uses.add(address), 0, 0)
+    }
+
+    store :: fn(self &Self, address, value Val) {
+        self.emit(Op.store, Ty.void_, self.graph.uses.add(address), self.graph.uses.add(value), 0)
+    }
+
+    copy :: fn(self &Self, dest, source Val, size u32) {
+        self.emit(Op.copy, Ty.void_, self.graph.uses.add(dest), self.graph.uses.add(source), size)
+    }
+
+    copy_bytes :: fn(self &Self, dest, source, count Val) {
+        self.emit(
+            Op.copy_bytes
+            Ty.void_
+            self.graph.uses.add(dest)
+            self.graph.uses.add(source)
+            self.graph.uses.add(count)
+        )
+    }
+
+    zero :: fn(self &Self, dest Val, size u32) {
+        self.emit(Op.zero, Ty.void_, self.graph.uses.add(dest), size, 0)
+    }
+
+    call :: fn(self &Self, symbol Symbol, ty Ty, args Slice(Val)) Val {
+        first := id.next_id(Use, self.graph.uses.values.len)
+        for value in args { self.graph.uses.add(value) }
+        self.emit(Op.call, ty, symbol as u32, first as u32, args.len as u32)
+    }
+
+    call_indirect :: fn(self &Self, address Val, ty Ty, args Slice(Val)) Val {
+        first := self.graph.uses.add(address)
+        for value in args { self.graph.uses.add(value) }
+        self.emit(Op.call_indirect, ty, 0, first, args.len as u32 + 1)
     }
 
     successor :: fn(self &Self, inst Inst, position u64) Edge {
@@ -252,11 +403,12 @@ Function :: struct {
     }
 
     make_iadd :: fn(self &Self, lhs, rhs Val) Inst {
-        if self.value_type(lhs) != Ty.i32_ or self.value_type(rhs) != Ty.i32_ { #fall }
+        ty := self.value_type(lhs)
+        if ty == Ty.void_ or self.value_type(rhs) != ty { #fall }
         left := self.graph.uses.add(lhs)
         right := self.graph.uses.add(rhs)
         self.layout.add_inst()
-        self.graph.inst(Op.iadd, Ty.i32_, left, right, 0)
+        self.graph.inst(Op.iadd, ty, left, right, 0)
     }
 
     iadd :: fn(self &Self, lhs, rhs Val) Val {
@@ -274,14 +426,15 @@ Function :: struct {
 
     rewrite_iadd :: fn(self &Self, inst Inst, lhs, rhs Val) bool {
         if self.inst_block(inst) == Block.none or self.opcode(inst) != Op.iadd { ret false }
-        if self.value_type(lhs) != Ty.i32_ or self.value_type(rhs) != Ty.i32_ { ret false }
+        ty := self.value_type(self.result(inst))
+        if self.value_type(lhs) != ty or self.value_type(rhs) != ty { ret false }
         self.graph.uses.set(self.graph.word(inst, 0) as Use, lhs)
         self.graph.uses.set(self.graph.word(inst, 1) as Use, rhs)
         true
     }
 
     move_before :: fn(self &Self, inst, before Inst) bool {
-        if self.inst_block(inst) == Block.none or self.opcode(inst) != Op.iadd { ret false }
+        if self.inst_block(inst) == Block.none or terminates(self.opcode(inst)) { ret false }
         if self.inst_block(before) == Block.none { ret false }
         if inst != before {
             self.layout.unlink(inst)
@@ -310,9 +463,19 @@ Function :: struct {
             self.graph.types.set(id.slot(value), Ty.void_)
             self.graph.defs.set(id.slot(value), Inst.none)
         }
-        if op != Op.jump { self.graph.uses.set(self.graph.word(inst, 0) as Use, Val.none) }
-        if op == Op.iadd { self.graph.uses.set(self.graph.word(inst, 1) as Use, Val.none) }
         pos: u64 = 0
+        if op == Op.call or op == Op.call_indirect {
+            while pos < self.graph.word(inst, 2) as u64 {
+                self.graph.uses.set((self.graph.word(inst, 1) + pos as u32) as Use, Val.none)
+                pos = pos + 1
+            }
+        } else {
+            while pos < fixed_uses(op) {
+                self.graph.uses.set(self.graph.word(inst, pos) as Use, Val.none)
+                pos = pos + 1
+            }
+        }
+        pos = 0
         edge := self.successor(inst, pos)
         while edge != Edge.none {
             self.graph.set_edge(edge, Block.none, Slice(Val).empty())
@@ -384,8 +547,14 @@ Function :: struct {
 
     ret_value :: fn(self &Self, value Val) {
         if self.value_type(value) == Ty.void_ { #fall }
-        use := self.graph.uses.add(value)
-        self.layout.add_inst()
-        self.append(self.graph.inst(Op.ret_, Ty.void_, use, 0, 0))
+        self.emit(Op.ret_, Ty.void_, self.graph.uses.add(value), 0, 0)
+    }
+
+    ret_void :: fn(self &Self) {
+        self.emit(Op.ret_, Ty.void_, 0, 0, 0)
+    }
+
+    trap :: fn(self &Self) {
+        self.emit(Op.trap, Ty.void_, 0, 0, 0)
     }
 }
