@@ -89,7 +89,7 @@ The single source of truth for the compilation session:
 - **C CodeGen** (`compiler/codegen.a`): Generates idiomatic, portable C99 with proper struct and function layouts.
 - **Bytecode VM** (`compiler/vm/`): Fast in-memory bytecode virtual machine used by `./abyss r` for instant execution without invoking an external C compiler.
 
-Run `./abyss emit --dump-air` to inspect the experimental AIR lowering of an embedded `add` function, or pass a source path and function name. AIR uses instruction indices as SSA values and flat operand storage. The preview lowers parameters, addition, and return for simple `i32` functions. The production backends still use `compiler/lower.a`.
+Run `./abyss emit --dump-air` to inspect the experimental AIR lowering of an embedded `add` function, or pass a source path and function name. AIR uses a dense register index space with typed block parameters and flat edge arguments; it has no phi instructions. Block parameters precede their block's instruction results in the register file and do not occupy executable rows. Each branch arm owns its arguments, even when both arms target the same block. The preview lowers simple `i32` functions with addition and conditional expressions. The prototype interpreter applies edge transfers in parallel; the production backends still use `compiler/lower.a`.
 
 ---
 

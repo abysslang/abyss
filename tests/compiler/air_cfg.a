@@ -1,39 +1,119 @@
 ir :: @import("compiler/air/ir")
+run :: @import("compiler/air/run").run
 fall :: @import("std/sys").fall
 
 require :: fn(ok bool) {
     if not ok { #fall }
 }
 
-main :: fn() {
+diamond :: fn() {
     func := ir.Function.new()
-    entry := func.block()
-    left := func.block()
-    right := func.block()
-    exit := func.block()
+    empty_types := Slice(ir.Ty).empty()
+    empty_args := Slice(u32).empty()
+    signature := .[ ir.Ty.i32_, ir.Ty.i1 ]
+    result_type := ir.Ty.i32_
+    entry := func.block(Slice(ir.Ty).new(&signature as &ir.Ty, 2))
+    left := func.block(empty_types)
+    right := func.block(empty_types)
+    exit := func.block(Slice(ir.Ty).new(&result_type, 1))
 
     func.begin(entry)
-    value := func.param(ir.Ty.i32_, 0)
-    flag := func.param(ir.Ty.i1, 1)
-    func.branch(flag, left, right)
+    value := func.parameter(entry, 0)
+    flag := func.parameter(entry, 1)
+    require(not func.accepts(exit, empty_args))
+    require(not func.accepts(exit, Slice(u32).new(&flag.index, 1)))
+    missing: u32 = 1234
+    require(not func.accepts(exit, Slice(u32).new(&missing, 1)))
+    func.branch(flag, left, empty_args, right, empty_args)
 
     func.begin(right)
-    func.jump(exit)
+    doubled := func.iadd(value, value)
+    func.jump_value(exit, doubled)
     func.begin(left)
-    func.jump(exit)
+    func.jump_value(exit, value)
     func.begin(exit)
-    func.ret_value(value)
+    result := func.parameter(exit, 0)
+    func.ret_value(result)
 
-    require(func.ops.len == 6)
-    require(func.range(entry).end == 3)
-    require(func.range(right).start == 3)
-    require(func.range(left).start == 4)
-    require(func.words(2).get(0) == flag.index)
+    require(func.ops.len == 5)
+    require(func.range(entry).end == 1)
+    require(func.range(right).start == 1)
+    require(func.range(left).start == 3)
+    require(func.words(0).get(0) == flag.index)
     targets := func.successors(entry)
     require(targets.len == 2 and targets.get(0) == left.index and targets.get(1) == right.index)
     require(func.successors(right).get(0) == exit.index)
-    require(func.successors(exit).len == 0)
-    require(func.words(5).get(0) == value.index)
+    require(func.arguments(func.outgoing(right).start as u64).get(0) == doubled.index)
+    require(func.arguments(func.outgoing(left).start as u64).get(0) == value.index)
+    require(func.outgoing(exit).start == func.outgoing(exit).end)
+    require(func.words(4).get(0) == result.index)
+    input := .[ 2147483649 as u32, 0 as u32 ]
+    require(run(&func, Slice(u32).new(&input as &u32, 2)) == 2)
+    input[1] = 1
+    require(run(&func, Slice(u32).new(&input as &u32, 2)) == 2147483649 as u32)
     func.destroy()
+}
+
+swap_loop :: fn() {
+    func := ir.Function.new()
+    signature := .[ ir.Ty.i32_, ir.Ty.i32_, ir.Ty.i1, ir.Ty.i1 ]
+    loop_types := Slice(ir.Ty).new(&signature as &ir.Ty, 3)
+    entry := func.block(Slice(ir.Ty).new(&signature as &ir.Ty, 4))
+    header := func.block(loop_types)
+    exit := func.block(Slice(ir.Ty).empty())
+    func.begin(entry)
+    first := func.parameter(entry, 0)
+    second := func.parameter(entry, 1)
+    again := func.parameter(entry, 2)
+    stop := func.parameter(entry, 3)
+    initial := .[ first.index, second.index, again.index ]
+    func.jump(header, Slice(u32).new(&initial as &u32, 3))
+    func.begin(header)
+    left := func.parameter(header, 0)
+    right := func.parameter(header, 1)
+    swapped := .[ right.index, left.index, stop.index ]
+    func.branch(
+        func.parameter(header, 2)
+        header
+        Slice(u32).new(&swapped as &u32, 3)
+        exit
+        Slice(u32).empty()
+    )
+    func.begin(exit)
+    func.ret_value(right)
+
+    input := .[ 12 as u32, 39 as u32, 1 as u32, 0 as u32 ]
+    require(run(&func, Slice(u32).new(&input as &u32, 4)) == 12)
+    input[2] = 0
+    require(run(&func, Slice(u32).new(&input as &u32, 4)) == 39)
+    func.destroy()
+}
+
+parallel_edges :: fn() {
+    func := ir.Function.new()
+    signature := .[ ir.Ty.i32_, ir.Ty.i32_, ir.Ty.i1 ]
+    entry := func.block(Slice(ir.Ty).new(&signature as &ir.Ty, 3))
+    join := func.block(Slice(ir.Ty).new(&signature as &ir.Ty, 1))
+    func.begin(entry)
+    first := func.parameter(entry, 0)
+    second := func.parameter(entry, 1)
+    flag := func.parameter(entry, 2)
+    func.branch(flag, join, Slice(u32).new(&first.index, 1), join, Slice(u32).new(&second.index, 1))
+    func.begin(join)
+    func.ret_value(func.parameter(join, 0))
+
+    targets := func.successors(entry)
+    require(targets.len == 2 and targets.get(0) == join.index and targets.get(1) == join.index)
+    input := .[ 4 as u32, 9 as u32, 1 as u32 ]
+    require(run(&func, Slice(u32).new(&input as &u32, 3)) == 4)
+    input[2] = 0
+    require(run(&func, Slice(u32).new(&input as &u32, 3)) == 9)
+    func.destroy()
+}
+
+main :: fn() {
+    diamond()
+    swap_loop()
+    parallel_edges()
     print("AIR CFG OK")
 }

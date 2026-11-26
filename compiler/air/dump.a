@@ -1,27 +1,64 @@
 ir :: @import("./ir")
+write_str :: @import("std/io").write_str
+
+edge_text :: fn(func &ir.Function, edge u64) {
+    printf("b{}", .(func.edge_targets.get(edge)))
+    args := func.arguments(edge)
+    if args.len == 0 { ret }
+    write_str("(")
+    pos: u64 = 0
+    for arg in args {
+        if pos > 0 { write_str(", ") }
+        printf("v{}", .(arg))
+        pos = pos + 1
+    }
+    write_str(")")
+}
 
 dump :: fn(name Str, func &ir.Function) {
     printf("air {}\n", .(name))
     block: u64 = 0
-    for start in func.block_start {
-        printf("b{}:\n", .(block))
-        at := start as u64
-        end := func.block_end.get(block) as u64
+    while block < func.block_start.len {
+        id: ir.Block = .{ index: block as u32 }
+        printf("b{}", .(block))
+        params := func.parameters(id)
+        if params.len > 0 {
+            write_str("(")
+            pos: u32 = 0
+            for ty in params {
+                if pos > 0 { write_str(", ") }
+                label := if ty == ir.Ty.i1 { "i1" } else { "i32" }
+                printf("v{}: {}", .(func.parameter(id, pos).index, label))
+                pos = pos + 1
+            }
+            write_str(")")
+        }
+        write_str(":\n")
+        range := func.range(id)
+        at := range.start as u64
+        end := range.end as u64
+        value := func.code_value_start(id)
         while at < end {
             args := func.words(at)
             match func.ops.get(at) {
-                param {
-                    ty := if func.types.get(at) == ir.Ty.i1 { "i1" } else { "i32" }
-                    printf("  v{} = param {} {}\n", .(at, ty, args.get(0)))
+                iadd { printf("  v{} = iadd i32 v{}, v{}\n", .(value, args.get(0), args.get(1))) }
+                jump {
+                    write_str("  jump ")
+                    edge_text(func, args.get(0) as u64)
+                    write_str("\n")
                 }
-                iadd { printf("  v{} = iadd i32 v{}, v{}\n", .(at, args.get(0), args.get(1))) }
-                jump { printf("  jump b{}\n", .(args.get(0))) }
                 branch {
-                    printf("  branch v{}, b{}, b{}\n", .(args.get(0), args.get(1), args.get(2)))
+                    first := args.get(1) as u64
+                    printf("  branch v{}, ", .(args.get(0)))
+                    edge_text(func, first)
+                    write_str(", ")
+                    edge_text(func, first + 1)
+                    write_str("\n")
                 }
                 ret_ { printf("  ret v{}\n", .(args.get(0))) }
             }
             at = at + 1
+            value = value + 1
         }
         block = block + 1
     }
