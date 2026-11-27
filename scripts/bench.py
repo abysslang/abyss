@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 NS_PER_MS = 1_000_000
 NS_PER_SECOND = 1_000_000_000
 BYTES_PER_MIB = 1_048_576
+LINK_OBJECT = ROOT / "scripts/link_object.sh"
 
 
 def nonnegative(value):
@@ -58,40 +59,58 @@ def checked(command):
 
 
 def parse_profile(stderr, detailed):
-    found = False
+    version = 0
     summary = None
     phases = {}
     for line in stderr.splitlines():
         row = line.split("\t")
         if row[0] == "abyss-profile":
-            if found or row != ["abyss-profile", "1"]:
+            if version or row[1:] not in (["1"], ["2"]):
                 raise ValueError("unsupported or repeated compiler profile header")
-            found = True
-        elif found and row[0] == "summary":
-            if summary is not None or len(row) != 6:
+            version = int(row[1])
+        elif version and row[0] == "summary":
+            keys = ("compile_ns", "lines", "files", "source_bytes", "peak_rss_bytes")
+            if version == 2:
+                keys += ("allocated_bytes",)
+            if summary is not None or len(row) != len(keys) + 1:
                 raise ValueError("invalid compiler profile summary")
-            summary = dict(zip(("compile_ns", "lines", "files", "source_bytes", "peak_rss_bytes"), map(int, row[1:])))
-        elif found and row[0] == "phase":
-            if len(row) != 5 or row[1] in phases:
+            summary = dict(zip(keys, map(int, row[1:])))
+        elif version and row[0] == "phase":
+            keys = ("self_ns", "inclusive_ns", "spans")
+            if version == 2:
+                keys += ("allocated_bytes",)
+            if len(row) != len(keys) + 2 or row[1] in phases:
                 raise ValueError("invalid compiler profile phase")
-            phases[row[1]] = dict(zip(("self_ns", "inclusive_ns", "spans"), map(int, row[2:])))
+            phases[row[1]] = dict(zip(keys, map(int, row[2:])))
     if summary is None or summary["compile_ns"] <= 0:
         raise ValueError("compiler did not report a valid profile; use a current abyssc")
     if detailed and sum(item["self_ns"] for item in phases.values()) != summary["compile_ns"]:
         raise ValueError("phase times do not sum to the profiled compile time")
+    if version == 2 and sum(item["allocated_bytes"] for item in phases.values()) != summary["allocated_bytes"]:
+        raise ValueError("phase allocations do not sum to the reported total")
     summary["phases"] = phases
     return summary
 
 
-def sample(compiler, flags, source, output, detailed=False):
-    mode = "tsv" if detailed else "summary"
-    command = [str(compiler), "b", *flags, f"--profile={mode}", str(source), str(output)]
+def timed(command):
     started = time.perf_counter_ns()
     result = checked(command)
-    elapsed = time.perf_counter_ns() - started
+    return result, time.perf_counter_ns() - started
+
+
+def link_object(obj, executable):
+    return timed(["bash", str(LINK_OBJECT), str(obj), "-o", str(executable)])[1]
+
+
+def sample(compiler, flags, source, output, detailed=False, executable=None):
+    mode = "tsv" if detailed else "summary"
+    command = [str(compiler), "b", *flags, f"--profile={mode}", str(source), str(output)]
+    result, elapsed = timed(command)
     measurement = parse_profile(result.stderr, detailed)
     measurement["process_ns"] = elapsed
     measurement["output_bytes"] = output.stat().st_size
+    if executable is not None:
+        measurement["link_ns"] = link_object(output, executable)
     return measurement
 
 
@@ -103,27 +122,38 @@ def aggregate(runs, detailed_runs):
     totals["lines_per_second"] = statistics_for(
         [run["lines"] * NS_PER_SECOND / run["compile_ns"] for run in runs]
     )
+    if "link_ns" in runs[0]:
+        totals["link_ns"] = statistics_for([run["link_ns"] for run in runs])
     phases = {}
     groups = {}
     if detailed_runs:
+        allocation_available = all(run.get("allocated_bytes", 0) > 0 for run in detailed_runs)
+        if allocation_available:
+            totals["allocated_bytes"] = statistics_for([run["allocated_bytes"] for run in detailed_runs])
+        fields = ("self_ns", "inclusive_ns", "spans")
+        if allocation_available:
+            fields += ("allocated_bytes",)
         profiled_ns = sum(run["compile_ns"] for run in detailed_runs)
         totals["profiled_ns"] = statistics_for([run["compile_ns"] for run in detailed_runs])
         for name in sorted(set().union(*(run["phases"] for run in detailed_runs))):
             values = [run["phases"].get(name, {}) for run in detailed_runs]
             item = {key: statistics.fmean(value.get(key, 0) for value in values)
-                    for key in ("self_ns", "inclusive_ns", "spans")}
+                    for key in fields}
             item["share_percent"] = sum(value.get("self_ns", 0) for value in values) * 100 / profiled_ns
             phases[name] = item
             group = name.split("/", 1)[0]
             keys = [group]
-            if name.startswith("type/unify_"):
-                keys.append("unification (subset of type)")
+            for prefix, label in (("type/check", "checking"), ("type/infer", "inference")):
+                if name == prefix or name.startswith(prefix + "_"):
+                    keys.append(f"{label} (subset of type)")
             if group in ("type", "comptime"):
                 keys.append("type checker and comptime")
             for key in keys:
                 total = groups.setdefault(key, {"self_ns": 0.0, "share_percent": 0.0})
                 total["self_ns"] += item["self_ns"]
                 total["share_percent"] += item["share_percent"]
+                if allocation_available:
+                    total["allocated_bytes"] = total.get("allocated_bytes", 0) + item["allocated_bytes"]
     return totals, phases, groups
 
 
@@ -142,25 +172,55 @@ def write_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
+def daily_record(directory, day):
+    path = directory / f"{day}.json"
+    return json.loads(path.read_text()) if path.exists() else {"schema": 1, "date": day, "best": {}}
+
+
+def compare_history(directory, today, key, mean_ns):
+    day = datetime.date.fromisoformat(today["date"])
+    comparisons = []
+    for offset in range(4):
+        date = (day - datetime.timedelta(days=offset)).isoformat()
+        baseline = (daily_record(directory, date) if offset else today)["best"].get(key)
+        if baseline is None:
+            continue
+        previous = baseline["statistics"]["compile_ns"]["mean"]
+        if previous > 0:
+            comparisons.append({
+                "date": date,
+                "run_id": baseline["run_id"],
+                "mean_ns": previous,
+                "time_change_percent": (mean_ns - previous) * 100 / previous,
+            })
+    return comparisons
+
+
 def archive(directory, record):
     day = record["started_at"][:10]
     runs = directory / "runs" / day
     runs.mkdir(parents=True, exist_ok=True)
     run_path = runs / f"{record['run_id']}.json"
-    write_json(run_path, record)
     daily = directory / f"{day}.json"
     with (directory / ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        best = json.loads(daily.read_text()) if daily.exists() else {"schema": 1, "date": day, "best": {}}
+        best = daily_record(directory, day)
         key = json.dumps(record["workload"], sort_keys=True)
         current = best["best"].get(key)
-        if current is None or record["statistics"]["compile_ns"]["mean"] < current["statistics"]["compile_ns"]["mean"]:
+        mean_ns = record["statistics"]["compile_ns"]["mean"]
+        record["comparisons"] = compare_history(directory, best, key, mean_ns)
+        write_json(run_path, record)
+        if current is None or mean_ns < current["statistics"]["compile_ns"]["mean"]:
             best["best"][key] = {**record, "archive": str(run_path.relative_to(directory))}
             write_json(daily, best)
             improved = True
         else:
             improved = False
     return run_path, daily, improved
+
+
+def by_self_time(rows):
+    return sorted(rows.items(), key=lambda row: (-row[1]["self_ns"], row[0]))
 
 
 def display(record):
@@ -178,15 +238,38 @@ def display(record):
     rss = totals["peak_rss_bytes"]
     print(f"Peak RSS: {rss['max']/BYTES_PER_MIB:.2f} MiB max | {rss['mean']/BYTES_PER_MIB:.2f} MiB mean"
           if rss["max"] else "Peak RSS: unavailable on this compiler host")
+    if "link_ns" in totals:
+        link = totals["link_ns"]
+        print(f"ELF link: {link['mean']/NS_PER_MS:.3f} ms mean | "
+              f"{link['median']/NS_PER_MS:.3f} median | {link['p95']/NS_PER_MS:.3f} p95")
+    if "elf_producer" in record:
+        producer = record["elf_producer"]
+        print(f"ELF compiler setup: {producer['build_ns']/NS_PER_MS:.3f} ms build | "
+              f"{producer['link_ns']/NS_PER_MS:.3f} ms link")
+    for baseline in record.get("comparisons", []):
+        change = baseline["time_change_percent"]
+        direction = "less compile time" if change < 0 else "more compile time"
+        result = f"{abs(change):.2f}% {direction}" if change else "unchanged"
+        print(f"vs {baseline['date']} best ({baseline['mean_ns']/NS_PER_MS:.3f} ms): {result}")
     if record["phases"]:
         print(f"\nDetailed profile ({record['profile_runs']} separate runs, "
-              f"{totals['profiled_ns']['mean']/NS_PER_MS:.3f} ms mean)")
-        print(f"{'Phase':<30} {'Self ms':>12} {'Share':>9} {'Inclusive ms':>14} {'Mean spans':>12}")
-        for name, item in record["phases"].items():
+              f"{totals['profiled_ns']['mean']/NS_PER_MS:.3f} ms mean, "
+              f"{totals['profiled_ns']['mean']/compile_stats['mean']:.2f}× baseline)")
+        allocated = totals.get("allocated_bytes")
+        heap_header = f" {'Heap MiB':>12}" if allocated else ""
+        if allocated:
+            hottest, item = max(record["phases"].items(), key=lambda row: row[1]["allocated_bytes"])
+            print(f"Heap requested: {allocated['mean']/BYTES_PER_MIB:.2f} MiB mean | "
+                  f"{hottest} allocated the most ({item['allocated_bytes']/BYTES_PER_MIB:.2f} MiB)")
+        else:
+            print("Heap requested: unavailable from this compiler")
+        print(f"{'Phase':<30} {'Self ms':>12} {'Share':>9} {'Inclusive ms':>14} {'Mean spans':>12}{heap_header}")
+        for name, item in by_self_time(record["phases"]):
+            heap = f" {item['allocated_bytes']/BYTES_PER_MIB:12.2f}" if allocated else ""
             print(f"{name:<30} {item['self_ns']/NS_PER_MS:12.3f} {item['share_percent']:8.2f}% "
-                  f"{item['inclusive_ns']/NS_PER_MS:14.3f} {item['spans']:12.1f}")
+                  f"{item['inclusive_ns']/NS_PER_MS:14.3f} {item['spans']:12.1f}{heap}")
         print("\nGroup totals (exclusive)")
-        for name, item in record["groups"].items():
+        for name, item in by_self_time(record["groups"]):
             print(f"{name:<30} {item['self_ns']/NS_PER_MS:12.3f} {item['share_percent']:8.2f}%")
 
 
@@ -222,18 +305,20 @@ def main():
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with tempfile.TemporaryDirectory(prefix="bench.", dir=ROOT / "tmp") as directory:
         work = Path(directory)
+        elf_producer = None
         if args.elf:
             print("Building the benchmark compiler through ELF…", flush=True)
             obj = work / "compiler.o"
             native = work / "abyssc"
-            checked([str(compiler), "b", "--emit-obj", "--hosted", str(ROOT / "compiler/main.a"), str(obj)])
-            checked(["bash", str(ROOT / "scripts/link_object.sh"), str(obj), "-o", str(native)])
+            _, build_ns = timed([str(compiler), "b", "--emit-obj", "--hosted", str(ROOT / "compiler/main.a"), str(obj)])
+            elf_producer = {"build_ns": build_ns, "link_ns": link_object(obj, native)}
             compiler = native
         output = work / ("output.o" if target == "elf" else "output.c")
+        executable = work / "output" if target == "elf" and not args.library else None
         print(f"Running {args.warmup} warmups, {args.runs} timing runs, and {args.profile_runs} profile runs…", flush=True)
         for _ in range(args.warmup):
-            sample(compiler, flags, source, output)
-        runs = [sample(compiler, flags, source, output) for _ in range(args.runs)]
+            sample(compiler, flags, source, output, executable=executable)
+        runs = [sample(compiler, flags, source, output, executable=executable) for _ in range(args.runs)]
         detailed = [sample(compiler, flags, source, output, detailed=True) for _ in range(args.profile_runs)]
         for name in ("lines", "files", "source_bytes", "output_bytes"):
             if len({run[name] for run in runs + detailed}) != 1:
@@ -266,8 +351,10 @@ def main():
             "phases": phases,
             "groups": groups,
         }
-    display(record)
+        if elf_producer is not None:
+            record["elf_producer"] = elf_producer
     run_path, daily, improved = archive(records, record)
+    display(record)
     print(f"\nRun: {run_path}\nDaily record: {daily} ({'new best' if improved else 'best unchanged'})")
 
 

@@ -13,10 +13,11 @@ cat > "$work/main.a" <<'ABYSS'
 other :: @import("./value")
 identity :: fn(T type, value T) T { value }
 offset :: fn() i32 { 5 }
+answer_offset: i32 = 0
 
 main :: fn() {
     value := cmpt { offset() }
-    print(identity(other.value() + value))
+    print(identity(other.value() + value + answer_offset))
 }
 ABYSS
 "$compiler" b "$work/main.a" "$work/plain.c"
@@ -28,7 +29,8 @@ cmp "$work/plain.c" "$work/summary.c"
 "$compiler" b --profile "$work/main.a" "$work/human.c" 2>"$work/human.txt"
 rg -q '^Compile: .* ms .* lines/s' "$work/human.txt"
 rg -q 'type checker and comptime' "$work/human.txt"
-rg -q 'unification \(subset of type\)' "$work/human.txt"
+rg -q 'checking \(subset of type\)' "$work/human.txt"
+rg -q 'inference \(subset of type\)' "$work/human.txt"
 if "$compiler" b --profile=unknown "$work/main.a" "$work/invalid.c" 2>"$work/invalid.txt"; then
     exit 1
 fi
@@ -75,15 +77,22 @@ work = Path(sys.argv[1])
 profile = parse_profile((work / "detailed.tsv").read_text(), True)
 summary = parse_profile((work / "summary.tsv").read_text(), False)
 assert not summary["phases"]
+assert summary["allocated_bytes"] == 0
+assert profile["allocated_bytes"] > 0
 for key in ("lines", "files", "source_bytes"):
     assert profile[key] == summary[key] and profile[key] > 0
 assert profile["files"] >= 2
 assert set(profile["phases"]) >= {
     "frontend/lex", "frontend/parse", "frontend/modules", "type/check",
-    "type/unify_bind", "type/specialize", "comptime/vm", "backend/lower",
+    "type/check_match", "type/check_synth", "type/check_globals",
+    "type/infer_templates", "type/infer_apply", "type/infer_rebuild",
+    "type/specialize", "comptime/vm", "backend/lower",
     "backend/mem2reg", "backend/fold", "backend/dce", "backend/cfg", "backend/c99_body",
 }
 assert all(row["inclusive_ns"] >= row["self_ns"] for row in profile["phases"].values())
+assert not any(name.startswith("type/unify_") for name in profile["phases"])
+assert profile["phases"]["frontend/parse"]["allocated_bytes"] > 0
+assert parse_profile("abyss-profile\t1\nsummary\t1\t1\t1\t1\t0\n", False)["compile_ns"] == 1
 vm = parse_profile((work / "vm.tsv").read_text(), True)
 assert set(vm["phases"]) >= {"backend/vm_lower", "backend/vm_link"}
 assert "backend/c99" not in vm["phases"]
@@ -91,18 +100,27 @@ elf = work / "elf.tsv"
 if elf.exists():
     native = parse_profile(elf.read_text(), True)
     assert set(native["phases"]) >= {"backend/elf_body", "backend/regalloc", "backend/elf_write"}
+    assert native["allocated_bytes"] > 0
 PY
 
 for _ in 1 2; do
     python3 "$root/scripts/bench.py" "$work/main.a" --runs 2 --warmup 1 --profile-runs 1 \
         --compiler "$compiler" --records "$work/records" >"$work/bench.log"
 done
-python3 - "$work/records" <<'PY'
+if [[ ${ABYSS_TEST_OBJECT:-false} == true ]]; then
+    python3 "$root/scripts/bench.py" "$work/main.a" --runs 2 --warmup 0 --profile-runs 0 --target elf \
+        --compiler "$compiler" --records "$work/elf-records" >"$work/elf-bench.log"
+    rg -q '^ELF link: ' "$work/elf-bench.log"
+fi
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$root/scripts" python3 - "$work" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-records = Path(sys.argv[1])
+from bench import archive
+
+work = Path(sys.argv[1])
+records = work / "records"
 runs = [json.loads(path.read_text()) for path in records.glob("runs/*/*.json")]
 assert len(runs) == 2 and len({row["run_id"] for row in runs}) == 2
 daily = [json.loads(path.read_text()) for path in records.glob("????-??-??.json")]
@@ -112,4 +130,33 @@ for day in daily:
     assert best["run_id"] == min(scores, key=lambda row: row["statistics"]["compile_ns"]["mean"])["run_id"]
     assert (records / best["archive"]).is_file()
 assert all(len(row["samples"]) == 2 and len(row["profile_samples"]) == 1 for row in runs)
+assert all(row["statistics"]["allocated_bytes"]["mean"] > 0 for row in runs)
+assert sum(len(row["comparisons"]) for row in runs) == (1 if len(daily) == 1 else 0)
+
+history = work / "history"
+workload = runs[0]["workload"]
+for date, elapsed, identity in (
+    ("2026-11-23", 100, workload),
+    ("2026-11-24", 125, workload),
+    ("2026-11-25", 80, workload),
+    ("2026-11-26", 70, {**workload, "target": "elf"}),
+    ("2026-11-27", 100, workload),
+    ("2026-11-27", 100, workload),
+):
+    record = {
+        "run_id": str(date) + "-" + str(len(list(history.glob("runs/*/*.json")))),
+        "started_at": date,
+        "workload": identity,
+        "statistics": {"compile_ns": {"mean": elapsed}},
+    }
+    archive(history, record)
+assert [(row["date"], row["time_change_percent"]) for row in record["comparisons"]] == [
+    ("2026-11-27", 0), ("2026-11-25", 25), ("2026-11-24", -20),
+]
+
+elf_runs = list((work / "elf-records").glob("runs/*/*.json"))
+if elf_runs:
+    native, = [json.loads(path.read_text()) for path in elf_runs]
+    assert all(sample["link_ns"] > 0 for sample in native["samples"])
+    assert native["statistics"]["link_ns"]["mean"] > 0
 PY

@@ -1,4 +1,5 @@
 Engine :: @import("compiler/engine").Engine
+profile :: @import("pods/keel/profile")
 hir :: @import("compiler/hir")
 Nexus :: @import("compiler/nexus/nexus").Nexus
 id_none :: @import("compiler/nexus/pool").id_none
@@ -68,6 +69,21 @@ specialize_nominal_from_creator :: fn(eng &Engine, callee_sym u32, concrete_args
     if db.type_specialization_depth >= 128 {
         db.type_error(func_node, Str.of("generic type specialization exceeded recursion limit"))
     }
+    timing := profile.enter(profile.Phase.type_specialize_nominal)
+    result := specialize_nominal_impl(eng, callee_sym, concrete_args, func_node)
+    profile.leave(timing)
+    result
+}
+
+specialize_nominal_impl :: fn(
+    eng &Engine
+    callee_sym u32
+    concrete_args &Vec(u32)
+    func_node u32
+) u32 {
+    db := &eng.nexus
+    tbl := &db.hir
+    types_ptr := &db.types
     db.type_specialization_depth = db.type_specialization_depth + 1
 
     fn_params_list := tbl.lhs(func_node)
@@ -710,5 +726,24 @@ resolve_ty_id :: fn(
     types &type_defs.TypeStorage
     ty u32
 ) u32 {
+    if profile.inferring() {
+        kind := types.kind(ty)
+        if kind == type_defs.TyKind.struct_ or kind == type_defs.TyKind.nominal or
+            kind == type_defs.TyKind.func or
+            kind == type_defs.TyKind.union_ {
+            timing := profile.enter(profile.Phase.type_infer_rebuild)
+            result := transform_type(
+                eng
+                ty
+                0 as &Vec(u32)
+                0 as &Vec(u32)
+                unify_ptr
+                types
+                false
+            )
+            profile.leave(timing)
+            ret result
+        }
+    }
     transform_type(eng, ty, 0 as &Vec(u32), 0 as &Vec(u32), unify_ptr, types, false)
 }

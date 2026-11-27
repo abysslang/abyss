@@ -9,6 +9,21 @@ x86_64 :: @import("pods/keel/target/x86_64")
 air :: @import("compiler/air/lower")
 profile :: @import("pods/keel/profile")
 Phase :: profile.Phase
+
+system_malloc :: extern "malloc" fn(size u64) &u8
+system_realloc :: extern "realloc" fn(ptr &u8, size u64) &u8
+
+profile_malloc :: extern "abyss_compiler_profile_malloc" fn(size u64) &u8 {
+    ptr := system_malloc(size)
+    profile.allocation(size, ptr)
+    ptr
+}
+
+profile_realloc :: extern "abyss_compiler_profile_realloc" fn(ptr &u8, size u64) &u8 {
+    result := system_realloc(ptr, size)
+    profile.allocation(size, result)
+    result
+}
 Engine :: @import("compiler/engine").Engine
 id_none :: @import("compiler/nexus/pool").id_none
 platform :: @import("compiler/platform")

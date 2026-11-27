@@ -332,7 +332,10 @@ type_check :: fn(eng &Engine, start u32, len u32) {
     db := &eng.nexus
     tbl := &db.hir
     k := hir.hir_kind
+    matches := profile.enter(Phase.type_check_match)
     control.prepare_match_bindings(eng, start, len)
+    profile.leave(matches)
+    synthesis := profile.enter(Phase.type_check_synth)
     i := start
     while i < len {
         curr := tbl.kind(i)
@@ -349,6 +352,7 @@ type_check :: fn(eng &Engine, start u32, len u32) {
         }
         i = i + 1
     }
+    profile.leave(synthesis)
 }
 
 vec_contains :: fn(v &Vec(u32), val u32) bool {
@@ -441,6 +445,7 @@ finalize_inferred_types_impl :: fn(eng &Engine, func_id u32) {
     if body == hir.hir_none() {
         ret
     }
+    templates := profile.enter(Phase.type_infer_templates)
     skipped := Vec(u32).new()
     scan := func_id + 1
     while scan <= body {
@@ -462,6 +467,8 @@ finalize_inferred_types_impl :: fn(eng &Engine, func_id u32) {
         }
         scan = scan + 1
     }
+    profile.leave(templates)
+    apply := profile.enter(Phase.type_infer_apply)
     node := func_id + 1
     while node <= body {
         skip_i: u64 = 0
@@ -506,6 +513,7 @@ finalize_inferred_types_impl :: fn(eng &Engine, func_id u32) {
             }
         }
         if db.has_union_coerce(node) {
+            coercion := profile.enter(Phase.type_infer_union)
             target := db.get_union_coerce_ty(node)
             members := db.types.union_members(target)
             member := *(members.ptr + (db.get_union_coerce_idx(node) as u64))
@@ -517,10 +525,12 @@ finalize_inferred_types_impl :: fn(eng &Engine, func_id u32) {
             } else {
                 db.set_union_coerce(node, type_defs.ty_id_none(), 0)
             }
+            profile.leave(coercion)
         }
         node = node + 1
     }
     skipped.destroy()
+    profile.leave(apply)
 }
 
 tyck_mono_function :: fn(eng &Engine, sym_id u32) {

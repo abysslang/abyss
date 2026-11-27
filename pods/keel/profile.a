@@ -24,13 +24,17 @@ Phase :: enum u8 {
     frontend_modules
     type_resolve
     type_check
+    type_check_match
+    type_check_synth
+    type_check_globals
     type_infer
-    type_unify_union
-    type_unify_bind
-    type_unify_types
-    type_unify_resolve
+    type_infer_templates
+    type_infer_apply
+    type_infer_rebuild
+    type_infer_union
     type_calls
     type_specialize
+    type_specialize_nominal
     type_reflection
     comptime_splice
     comptime_evaluate
@@ -71,13 +75,17 @@ label :: fn(phase Phase) Str {
         frontend_modules { "frontend/modules" }
         type_resolve { "type/resolve" }
         type_check { "type/check" }
+        type_check_match { "type/check_match" }
+        type_check_synth { "type/check_synth" }
+        type_check_globals { "type/check_globals" }
         type_infer { "type/infer" }
-        type_unify_union { "type/unify_union" }
-        type_unify_bind { "type/unify_bind" }
-        type_unify_types { "type/unify_types" }
-        type_unify_resolve { "type/unify_resolve" }
+        type_infer_templates { "type/infer_templates" }
+        type_infer_apply { "type/infer_apply" }
+        type_infer_rebuild { "type/infer_rebuild" }
+        type_infer_union { "type/infer_union" }
         type_calls { "type/calls" }
         type_specialize { "type/specialize" }
+        type_specialize_nominal { "type/specialize_nominal" }
         type_reflection { "type/reflection" }
         comptime_splice { "comptime/splice" }
         comptime_evaluate { "comptime/evaluate" }
@@ -110,7 +118,7 @@ label :: fn(phase Phase) Str {
 
 Sample :: struct {
     exclusive, inclusive, calls, depth u64
-    entered u64
+    entered, allocated                 u64
 }
 
 Span :: struct {
@@ -127,7 +135,6 @@ Session :: struct {
 }
 
 state: Session
-tracing: bool
 
 clock_expr :: fn() Str {
     if native_output { "clock.monotonic()" } else { "0 as u64" }
@@ -152,15 +159,28 @@ start :: fn(mode Mode) {
         sys.write_stderr("Profiling requires a monotonic host clock\n")
         sys.exit_process(1)
     }
+    fresh: Session
+    state = fresh
     state.mode = mode
     state.sources = Vec(Str).new()
-    tracing = mode != Mode.summary
-    state.active = if tracing { Phase.other } else { Phase.off }
+    if mode != Mode.summary {
+        state.active = Phase.other
+    }
     state.started = timestamp()
     state.switched = state.started
 }
 
 enabled :: fn() bool { state.mode != Mode.off }
+
+inferring :: fn() bool { state.active == Phase.type_infer_apply }
+
+allocation :: fn(size u64, result &u8) {
+    active := state.active
+    if active != Phase.off and result != (0 as &u8) {
+        slot := &state.samples[active as u64]
+        slot.allocated = slot.allocated + size
+    }
+}
 
 enter :: fn(phase Phase) Span {
     parent := state.active
@@ -208,10 +228,11 @@ stop :: fn() {
     if not enabled() { ret }
     now := timestamp()
     state.total = now - state.started
-    if tracing {
+    if state.active != Phase.off {
         other := &state.samples[Phase.other as u64]
         other.exclusive = other.exclusive + (now - state.switched)
         other.inclusive = other.exclusive
+        state.active = Phase.off
     }
 }
 
@@ -228,34 +249,52 @@ group :: fn(name Str) Str {
     name.sub(0, length)
 }
 
-group_row :: fn(out &String, name Str, nanos u64) {
-    if nanos != 0 {
-        fmt.fmt_into(out, "  {}\t{} ms\t{}%\n", .(name, millis(nanos), share(nanos)))
+ReportRow :: struct {
+    name  Str
+    nanos u64
+    phase Phase
+}
+
+rank :: fn(rows &Vec(ReportRow), item ReportRow) {
+    index := rows.len
+    rows.push(item)
+    while index > 0 {
+        previous := rows.get(index - 1)
+        if previous.nanos >= item.nanos { break }
+        rows.set(index, previous)
+        index = index - 1
     }
+    rows.set(index, item)
+}
+
+rank_group :: fn(rows &Vec(ReportRow), name Str, nanos u64) {
+    if nanos != 0 { rank(rows, .{ name: name, nanos: nanos, phase: Phase.off }) }
 }
 
 row :: fn(out &String, name Str, sample Sample) {
     if state.mode == Mode.tsv {
         fmt.fmt_into(
             out
-            "phase\t{}\t{}\t{}\t{}\n"
+            "phase\t{}\t{}\t{}\t{}\t{}\n"
             .(
                 name
                 sample.exclusive
                 sample.inclusive
                 sample.calls
+                sample.allocated
             )
         )
     } else {
         fmt.fmt_into(
             out
-            "  {}\t{} ms\t{}%\t{} ms inclusive\t{} spans\n"
+            "  {}\t{} ms\t{}%\t{} ms inclusive\t{} spans\t{} MiB allocated\n"
             .(
                 name
                 millis(sample.exclusive)
                 share(sample.exclusive)
                 millis(sample.inclusive)
                 sample.calls
+                sample.allocated as f64 / 1048576.0
             )
         )
     }
@@ -266,6 +305,10 @@ report :: fn(arena &Arena) {
     rss := #rss_expr()
     for source in state.sources { count_source(source) }
     state.sources.destroy()
+    allocated: u64 = 0
+    for index in Range.new(Phase.other as i32, Phase.end_ as i32) {
+        allocated = allocated + state.samples[index as u64].allocated
+    }
     out := String.new(arena)
     if state.mode == Mode.text {
         throughput := if state.total == 0 { 0.0 } else {
@@ -284,53 +327,79 @@ report :: fn(arena &Arena) {
         if rss != 0 {
             fmt.fmt_into(&out, "Peak RSS: {} MiB\n", .(rss as f64 / 1048576.0))
         } else { out.push_str("Peak RSS: unavailable\n") }
-        out.push_str("Phase\tExclusive time\tShare of compile\tInclusive time\tSpans\n")
+        fmt.fmt_into(&out, "Heap requested: {} MiB\n", .(allocated as f64 / 1048576.0))
+        out.push_str(
+            "Phase\tExclusive time\tShare of compile\tInclusive time\tSpans\tHeap requested\n"
+        )
     } else {
         fmt.fmt_into(
             &out
-            "abyss-profile\t1\nsummary\t{}\t{}\t{}\t{}\t{}\n"
+            "abyss-profile\t2\nsummary\t{}\t{}\t{}\t{}\t{}\t{}\n"
             .(
                 state.total
                 state.lines
                 state.files
                 state.bytes
                 rss
+                allocated
             )
         )
     }
     if state.mode != Mode.summary {
         first := Phase.other as i32
         end := Phase.end_ as i32
+        rows := Vec(ReportRow).new()
         for index in Range.new(first, end) {
             item := state.samples[index as u64]
-            if item.calls != 0 or index == first { row(&out, label(index as Phase), item) }
+            if item.calls == 0 and index != first { cont }
+            phase := index as Phase
+            name := label(phase)
+            if state.mode == Mode.text {
+                rank(&rows, .{ name: name, nanos: item.exclusive, phase: phase })
+            } else { row(&out, name, item) }
         }
         if state.mode == Mode.text {
+            for item in rows { row(&out, item.name, state.samples[item.phase as u64]) }
+            rows.clear()
             out.push_str("Group totals (exclusive):\n")
             previous := Str.empty()
             nanos: u64 = 0
             typer: u64 = 0
-            unify: u64 = 0
+            check: u64 = 0
+            infer: u64 = 0
             for index in Range.new(first, end) {
                 phase := label(index as Phase)
                 name := group(phase)
                 elapsed := state.samples[index as u64].exclusive
                 if not previous.eq(name) {
-                    group_row(&out, previous, nanos)
+                    rank_group(&rows, previous, nanos)
                     previous = name
                     nanos = 0
                 }
                 if name.eq("type") or name.eq("comptime") { typer = typer + elapsed }
-                if phase.starts_with("type/unify_") { unify = unify + elapsed }
+                if phase.eq("type/check") or phase.starts_with("type/check_") {
+                    check = check + elapsed
+                }
+                if phase.eq("type/infer") or phase.starts_with("type/infer_") {
+                    infer = infer + elapsed
+                }
                 nanos = nanos + elapsed
             }
-            group_row(&out, previous, nanos)
-            group_row(&out, "type checker and comptime", typer)
-            group_row(&out, "unification (subset of type)", unify)
+            rank_group(&rows, previous, nanos)
+            rank_group(&rows, "type checker and comptime", typer)
+            rank_group(&rows, "checking (subset of type)", check)
+            rank_group(&rows, "inference (subset of type)", infer)
+            for item in rows {
+                fmt.fmt_into(
+                    &out
+                    "  {}\t{} ms\t{}%\n"
+                    .(item.name, millis(item.nanos), share(item.nanos))
+                )
+            }
         }
+        rows.destroy()
     }
     sys.write_stderr(out.as_str())
     state.mode = Mode.off
     state.active = Phase.off
-    tracing = false
 }

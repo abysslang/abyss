@@ -1,5 +1,3 @@
-profile :: @import("pods/keel/profile")
-Phase :: profile.Phase
 fall :: @import("std/sys").fall
 
 calc_pos :: @import("./nexus/nexus").calc_pos
@@ -199,14 +197,6 @@ UnifyStorage :: struct {
     }
 
     union :: fn(self &Self, types &TypeStorage, a u32, b u32) u32 {
-        if not profile.tracing { ret self.union_impl(types, a, b) }
-        timing := profile.enter(Phase.type_unify_union)
-        result := self.union_impl(types, a, b)
-        profile.leave(timing)
-        result
-    }
-
-    union_impl :: fn(self &Self, types &TypeStorage, a u32, b u32) u32 {
         root_a := self.find(a)
         root_b := self.find(b)
 
@@ -261,14 +251,6 @@ UnifyStorage :: struct {
     }
 
     bind_type :: fn(self &Self, types &TypeStorage, slot u32, ty u32) u32 {
-        if not profile.tracing { ret self.bind_type_impl(types, slot, ty) }
-        timing := profile.enter(Phase.type_unify_bind)
-        result := self.bind_type_impl(types, slot, ty)
-        profile.leave(timing)
-        result
-    }
-
-    bind_type_impl :: fn(self &Self, types &TypeStorage, slot u32, ty u32) u32 {
         root := self.find(slot)
         existing := self.types.get(root as u64)
         if types.kind(ty) == type_defs.TyKind.infer {
@@ -296,14 +278,6 @@ UnifyStorage :: struct {
     }
 
     unify_types :: fn(self &Self, types &TypeStorage, a u32, b u32) u32 {
-        if not profile.tracing { ret self.unify_types_impl(types, a, b) }
-        timing := profile.enter(Phase.type_unify_types)
-        result := self.unify_types_impl(types, a, b)
-        profile.leave(timing)
-        result
-    }
-
-    unify_types_impl :: fn(self &Self, types &TypeStorage, a u32, b u32) u32 {
         if (a == type_defs.ty_id_none()) or (b == type_defs.ty_id_none()) or
             (a == type_defs.ty_id_unknown()) or
             (b == type_defs.ty_id_unknown()) {
@@ -522,14 +496,6 @@ UnifyStorage :: struct {
     }
 
     resolve_type_deep :: fn(self &Self, types &TypeStorage, slot u32) u32 {
-        if not profile.tracing { ret self.resolve_type_deep_impl(types, slot) }
-        timing := profile.enter(Phase.type_unify_resolve)
-        result := self.resolve_type_deep_impl(types, slot)
-        profile.leave(timing)
-        result
-    }
-
-    resolve_type_deep_impl :: fn(self &Self, types &TypeStorage, slot u32) u32 {
         tyid := self.resolve_type(slot)
         if tyid == type_defs.ty_id_none() {
             ret type_defs.ty_id_none()

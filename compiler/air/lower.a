@@ -49,6 +49,7 @@ Module :: struct {
     reflected   HashMap(u64, Symbol)
     abi_types   HashMap(u32, u32)
     abi_layouts HashMap(u32, bool)
+    heap        HeapHooks
 
     new :: fn(db &Nexus, arena &Arena) Self {
         .{
@@ -63,6 +64,7 @@ Module :: struct {
             reflected: HashMap(u64, Symbol).new()
             abi_types: HashMap(u32, u32).new()
             abi_layouts: HashMap(u32, bool).new()
+            heap: HeapHooks.find(db)
         }
     }
 
@@ -102,6 +104,12 @@ Module :: struct {
         real := db.resolve_sym(sym)
         found := self.symbols.get(real)
         if found != (0 as &Symbol) { ret *found }
+        replacement := self.heap.replacement(db, real)
+        if replacement != none() {
+            key := self.register(replacement, node)
+            self.symbols.insert(real, key)
+            ret key
+        }
         global := db.global_var(real)
         if global != none() {
             ty := db.get_node_type(db.hir.lhs(global))
@@ -156,6 +164,37 @@ Module :: struct {
         self.symbols.insert(real, key)
         if not external { self.pending.push(.{ source: real, target: key }) }
         key
+    }
+}
+
+HeapHooks :: struct {
+    source, malloc, realloc u32
+
+    find :: fn(db &Nexus) Self {
+        hooks: Self = .{ source: none(), malloc: none(), realloc: none() }
+        driver := none()
+        for index in Range.new(0, db.file_paths.len as i32) {
+            path := db.get_file_path(index as u32)
+            if path.eq("std/mem.a") { hooks.source = index as u32 }
+            if path.eq("compiler/driver.a") or path.ends_with("/compiler/driver.a") {
+                driver = index as u32
+            }
+        }
+        if driver != none() {
+            hooks.malloc = db.find_local_symbol(driver, db.interner.intern("profile_malloc"))
+            hooks.realloc = db.find_local_symbol(driver, db.interner.intern("profile_realloc"))
+        }
+        hooks
+    }
+
+    replacement :: fn(self &Self, db &Nexus, sym u32) u32 {
+        if self.malloc == none() or self.realloc == none() or db.sym_file(sym) != self.source {
+            ret none()
+        }
+        name := db.interner.get(db.sym_name(sym))
+        if name.eq("malloc") { ret self.malloc }
+        if name.eq("realloc") { ret self.realloc }
+        none()
     }
 }
 

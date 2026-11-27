@@ -127,7 +127,9 @@ Engine :: struct {
         tyck.type_check(self, hir_start, hir_end)
         global := self.nexus.global_var(sym_id)
         if global != hir.hir_none() {
+            timing := profile.enter(Phase.type_check_globals)
             check_global_var(self, global)
+            profile.leave(timing)
         }
         fn_node := self.nexus.get_fn_node(sym_id)
         if fn_node != id_none() {
@@ -175,12 +177,6 @@ Engine :: struct {
     }
 
     ensure_resolved :: fn(self &Self, sym_id u32) {
-        timing := profile.enter(Phase.type_resolve)
-        self.ensure_resolved_impl(sym_id)
-        profile.leave(timing)
-    }
-
-    ensure_resolved_impl :: fn(self &Self, sym_id u32) {
         if sym_id == id_none() {
             ret
         }
@@ -205,6 +201,7 @@ Engine :: struct {
         if db.is_sym_resolving(real_sym) {
             ret
         }
+        timing := profile.enter(Phase.type_resolve)
         if decl_hir != id_none() {
             s := (&db.unify).get_slot(decl_hir)
             if s == slot_none() {
@@ -216,6 +213,7 @@ Engine :: struct {
         db.set_sym_resolving(real_sym, true)
         self.type_check(real_sym)
         db.set_sym_resolving(real_sym, false)
+        profile.leave(timing)
     }
 
     slot_of :: fn(self &Self, sym_id u32) u32 {
