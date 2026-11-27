@@ -1,0 +1,77 @@
+Arena :: @import("std/allocator").Arena
+Convert :: @import("std/convert").Convert
+String :: @import("std/string").String
+
+style :: fn(out &String, color bool, text, ansi Str) {
+    if color and ansi.len != 0 {
+        out.push_str(ansi)
+        out.push_str(text)
+        out.push_str("\x1b[0m")
+    } else { out.push_str(text) }
+}
+
+spaces :: fn(out &String, count u64) {
+    for _ in Range.new(0, count as i32) { out.push_char(' ') }
+}
+
+Table :: struct {
+    out    &String
+    widths Slice(u64)
+    color  bool
+
+    row :: fn(self &Self, cells Slice(Str), accent Str) {
+        self.out.push_str("  ")
+        for index in Range.new(0, self.widths.len as i32) {
+            column := index as u64
+            cell := cells.get(column)
+            width := self.widths.get(column)
+            length := cell.char_count()
+            padding := if length < width { width - length } else { 0 }
+            if index != 0 {
+                style(self.out, self.color, if self.color { " │ " } else { " | " }, "\x1b[2m")
+                spaces(self.out, padding)
+            }
+            style(self.out, self.color, cell, accent)
+            if index == 0 { spaces(self.out, padding) }
+        }
+        self.out.push_char('\n')
+    }
+
+    rule :: fn(self &Self) {
+        self.out.push_str("  ")
+        if self.color { self.out.push_str("\x1b[2m") }
+        for index in Range.new(0, self.widths.len as i32) {
+            if index != 0 { self.out.push_str(if self.color { "─┼─" } else { "-+-" }) }
+            for _ in Range.new(0, self.widths.get(index as u64) as i32) {
+                self.out.push_str(if self.color { "─" } else { "-" })
+            }
+        }
+        if self.color { self.out.push_str("\x1b[0m") }
+        self.out.push_char('\n')
+    }
+}
+
+decimal :: fn(arena &Arena, value f64, scale u64, suffix Str) Str {
+    out := String.new(arena)
+    scaled := (value * scale as f64 + 0.5) as u64
+    Convert.unsigned64(&out, scaled / scale)
+    out.push_char('.')
+    digit := scale / 10
+    while digit != 0 {
+        out.push_char('0' + ((scaled / digit % 10) as u8))
+        digit = digit / 10
+    }
+    out.push_str(suffix)
+    out.as_str()
+}
+
+bar :: fn(arena &Arena, percent f64, color bool) Str {
+    out := String.new(arena)
+    filled := (percent * 0.12 + 0.5) as i32
+    for index in Range.new(0, 12) {
+        if color {
+            out.push_str(if index < filled { "█" } else { "░" })
+        } else { out.push_char(if index < filled { '#' } else { '.' }) }
+    }
+    out.as_str()
+}

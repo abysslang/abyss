@@ -1,0 +1,25 @@
+target :: @import("core/target")
+sys :: @import("std/sys")
+
+isatty :: extern fn(fd i32) i32
+GetStdHandle :: extern fn(kind u32) &u8
+GetConsoleMode :: extern fn(handle &u8, mode &u32) i32
+
+windows_color :: fn(fd i32) bool {
+    mode: u32 = 0
+    GetConsoleMode(GetStdHandle((-10 - fd) as u32), &mode) != 0 and (mode & 4) != 0
+}
+
+color_expr :: fn() Str {
+    match target.target_os {
+        linux, darwin { "isatty(fd) == 1" }
+        windows { "windows_color(fd)" }
+        else { "false" }
+    }
+}
+
+supports_color :: fn(fd i32) bool {
+    if not (#color_expr()) { ret false }
+    Str.of(sys.environment(c"NO_COLOR")).len == 0 and
+        not Str.of(sys.environment(c"TERM")).eq("dumb")
+}

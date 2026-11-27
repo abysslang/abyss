@@ -52,6 +52,7 @@ Abyss is a statically typed, expression-oriented systems programming language fe
    - **Build text with `std/fmt`**: Use `fmt(arena, pattern, args)` for a new `String` and `fmt_into(&buffer, pattern, args)` to append to an existing one. Both specialize the template at compile time. Pass arguments as tuples: `.(name, value)`, or `.()` for an empty argument list. For single fragments, call `String` methods directly; use `Fmt` to chain small writes into a new fragment.
    - **Run native threads with `std/thread`**: Pass pointer-free captures by value with `spawn_with`. Use `spawn_shared` for explicit borrows, `Mutex(T)` to synchronize mutable state, and `join()` to collect a typed result.
    - **Measure elapsed time with `std/time`**: Capture `Instant.now()` and call `.elapsed().as_nanos()` or `.as_millis()`. Use `Instant.try_now()` if the host may lack a monotonic clock.
+   - **Check terminal color with `std/sys/terminal`**: Call `supports_color(fd)` with the output descriptor (1 for stdout, 2 for stderr). It respects `NO_COLOR` and `TERM=dumb`.
    - **Prefer High-Level Abstractions**: Never write low-level C-style null checks, ad-hoc arrays, or manual loop copies when standard collections (`Vec`, `HashMap`, `HashSet`) or abstractions (`Maybe`) can make the code clean, concise, and expressive.
    - **Embrace `Maybe` (Abyss's `Option`)**: Use `Maybe` for any optional or fallible value instead of sentinel values (`-1`, null pointers). Use `.is_some()`, `.is_none()`, `.unwrap()`, and `.unwrap_or(default)`.
 

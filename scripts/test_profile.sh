@@ -27,6 +27,7 @@ cmp "$work/plain.c" "$work/detailed.c"
 cmp "$work/plain.c" "$work/summary.c"
 [[ $("$compiler" r --profile=tsv "$work/main.a" 2>"$work/vm.tsv") == 22 ]]
 "$compiler" b --profile "$work/main.a" "$work/human.c" 2>"$work/human.txt"
+cmp "$work/plain.c" "$work/human.c"
 rg -q '^Compile: .* ms .* lines/s' "$work/human.txt"
 rg -q 'type checker and comptime' "$work/human.txt"
 rg -q 'checking \(subset of type\)' "$work/human.txt"
@@ -74,6 +75,13 @@ import sys
 from bench import parse_profile
 
 work = Path(sys.argv[1])
+human = (work / "human.txt").read_text()
+first, groups = human.split("GROUP TOTALS  /  EXCLUSIVE TIME")
+assert "\x1b" not in human and "Heap MiB" in first
+for section in (first, groups):
+    values = [float(line.split("|")[1]) for line in section.splitlines()
+              if "|" in line and "%" in line]
+    assert values and values == sorted(values, reverse=True)
 profile = parse_profile((work / "detailed.tsv").read_text(), True)
 summary = parse_profile((work / "summary.tsv").read_text(), False)
 assert not summary["phases"]
@@ -121,6 +129,9 @@ from bench import archive
 
 work = Path(sys.argv[1])
 records = work / "records"
+display = (work / "bench.log").read_text()
+assert "\x1b" not in display
+assert all(title in display for title in ("ABYSS BENCHMARK", "DETAILED PROFILE", "GROUP TOTALS"))
 runs = [json.loads(path.read_text()) for path in records.glob("runs/*/*.json")]
 assert len(runs) == 2 and len({row["run_id"] for row in runs}) == 2
 daily = [json.loads(path.read_text()) for path in records.glob("????-??-??.json")]

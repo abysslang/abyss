@@ -223,17 +223,55 @@ def by_self_time(rows):
     return sorted(rows.items(), key=lambda row: (-row[1]["self_ns"], row[0]))
 
 
+class Terminal:
+    def __init__(self):
+        self.color = sys.stdout.isatty() and not os.environ.get("NO_COLOR") and os.environ.get("TERM") != "dumb"
+        self.graphics = self.color and (sys.stdout.encoding or "").lower() == "utf-8"
+
+    def paint(self, text, style):
+        return f"\x1b[{style}m{text}\x1b[0m" if self.color and style else text
+
+    def section(self, title):
+        print("\n" + self.paint(title, "1;36"))
+
+    def bar(self, percent):
+        filled = min(12, max(0, round(percent * 12 / 100)))
+        return "█" * filled + "░" * (12 - filled) if self.graphics else "#" * filled + "." * (12 - filled)
+
+    def table(self, headers, rows, left=(0,), styles=None):
+        styles = styles or {}
+        widths = [max(map(len, column)) for column in zip(headers, *rows)]
+        separator = " │ " if self.graphics else " | "
+
+        def row_text(row, index):
+            cells = []
+            for column, (cell, width) in enumerate(zip(row, widths)):
+                padded = cell.ljust(width) if column in left else cell.rjust(width)
+                style = "1" if index is None else styles.get((index, column))
+                cells.append(self.paint(padded, style))
+            return self.paint(separator, "2").join(cells)
+
+        print("  " + row_text(headers, None).rstrip())
+        line, crossing = ("─", "─┼─") if self.graphics else ("-", "-+-")
+        print("  " + self.paint(crossing.join(line * width for width in widths), "2"))
+        for index, row in enumerate(rows):
+            print("  " + row_text(row, index).rstrip())
+
+
 def display(record):
+    term = Terminal()
     totals = record["statistics"]
     compile_stats = totals["compile_ns"]
-    print(f"\n{record['workload']['source']} | {record['workload']['producer']} compiler → "
-          f"{record['workload']['target']} | {record['runs']} runs, {record['warmups']} warmups")
-    print(f"Compile: {compile_stats['mean']/NS_PER_MS:.3f} ms mean | "
-          f"{compile_stats['median']/NS_PER_MS:.3f} median | {compile_stats['min']/NS_PER_MS:.3f} min | "
-          f"{compile_stats['max']/NS_PER_MS:.3f} max | {compile_stats['p95']/NS_PER_MS:.3f} p95 | "
-          f"{compile_stats['stdev']/NS_PER_MS:.3f} stddev")
-    print(f"Process: {totals['process_ns']['mean']/NS_PER_MS:.3f} ms mean | "
-          f"{totals['lines_per_second']['mean']:,.0f} lines/s mean | "
+    term.section("ABYSS BENCHMARK")
+    arrow = "→" if term.graphics else "->"
+    print(f"  {record['workload']['source']} | {record['workload']['producer']} compiler {arrow} "
+          f"{record['workload']['target']} | {record['runs']} runs, {record['warmups']} warmups\n")
+    labels = ("mean", "median", "min", "max", "p95", "stdev")
+    term.table(("Timing (ms)", *(label.title() for label in labels)),
+               [(label, *(f"{stats[key]/NS_PER_MS:.3f}" for key in labels)) for label, stats in
+                (("Compile", compile_stats), ("Process", totals["process_ns"]))],
+               styles={(0, 1): "1;36"})
+    print(f"\nThroughput: {totals['lines_per_second']['mean']:,.0f} lines/s mean | "
           f"{record['lines']:,} lines in {record['files']} files | {record['output_bytes']:,} output bytes")
     rss = totals["peak_rss_bytes"]
     print(f"Peak RSS: {rss['max']/BYTES_PER_MIB:.2f} MiB max | {rss['mean']/BYTES_PER_MIB:.2f} MiB mean"
@@ -246,31 +284,47 @@ def display(record):
         producer = record["elf_producer"]
         print(f"ELF compiler setup: {producer['build_ns']/NS_PER_MS:.3f} ms build | "
               f"{producer['link_ns']/NS_PER_MS:.3f} ms link")
-    for baseline in record.get("comparisons", []):
-        change = baseline["time_change_percent"]
-        direction = "less compile time" if change < 0 else "more compile time"
-        result = f"{abs(change):.2f}% {direction}" if change else "unchanged"
-        print(f"vs {baseline['date']} best ({baseline['mean_ns']/NS_PER_MS:.3f} ms): {result}")
+    if record.get("comparisons"):
+        term.section("CHANGE VS. DAILY BEST")
+        rows, styles = [], {}
+        for index, baseline in enumerate(record["comparisons"]):
+            change = baseline["time_change_percent"]
+            direction = "less time" if change < 0 else "more time"
+            result = f"{abs(change):.2f}% {direction}" if change else "unchanged"
+            rows.append((baseline["date"], f"{baseline['mean_ns']/NS_PER_MS:.3f}", result))
+            styles[index, 2] = "32" if change < 0 else "31" if change > 0 else "2"
+        term.table(("UTC date", "Best ms", "Current run"), rows, left=(0, 2), styles=styles)
     if record["phases"]:
-        print(f"\nDetailed profile ({record['profile_runs']} separate runs, "
+        term.section("DETAILED PROFILE  /  SLOWEST FIRST")
+        print(f"  {record['profile_runs']} separate runs | "
               f"{totals['profiled_ns']['mean']/NS_PER_MS:.3f} ms mean, "
-              f"{totals['profiled_ns']['mean']/compile_stats['mean']:.2f}× baseline)")
+              f"{totals['profiled_ns']['mean']/compile_stats['mean']:.2f}x baseline")
         allocated = totals.get("allocated_bytes")
-        heap_header = f" {'Heap MiB':>12}" if allocated else ""
         if allocated:
             hottest, item = max(record["phases"].items(), key=lambda row: row[1]["allocated_bytes"])
             print(f"Heap requested: {allocated['mean']/BYTES_PER_MIB:.2f} MiB mean | "
                   f"{hottest} allocated the most ({item['allocated_bytes']/BYTES_PER_MIB:.2f} MiB)")
         else:
             print("Heap requested: unavailable from this compiler")
-        print(f"{'Phase':<30} {'Self ms':>12} {'Share':>9} {'Inclusive ms':>14} {'Mean spans':>12}{heap_header}")
+        print()
+        headers = ("Phase", "Self ms", "Share", "Incl. ms", "Mean spans")
+        if allocated:
+            headers += ("Heap MiB",)
+        rows = []
         for name, item in by_self_time(record["phases"]):
-            heap = f" {item['allocated_bytes']/BYTES_PER_MIB:12.2f}" if allocated else ""
-            print(f"{name:<30} {item['self_ns']/NS_PER_MS:12.3f} {item['share_percent']:8.2f}% "
-                  f"{item['inclusive_ns']/NS_PER_MS:14.3f} {item['spans']:12.1f}{heap}")
-        print("\nGroup totals (exclusive)")
+            row = (name, f"{item['self_ns']/NS_PER_MS:.3f}", f"{item['share_percent']:.2f}%",
+                   f"{item['inclusive_ns']/NS_PER_MS:.3f}", f"{item['spans']:.1f}")
+            if allocated:
+                row += (f"{item['allocated_bytes']/BYTES_PER_MIB:.2f}",)
+            rows.append(row)
+        term.table(headers, rows, styles={(index, 2): "1;33" for index in range(min(3, len(rows)))})
+        term.section("GROUP TOTALS  /  EXCLUSIVE TIME")
+        rows = []
         for name, item in by_self_time(record["groups"]):
-            print(f"{name:<30} {item['self_ns']/NS_PER_MS:12.3f} {item['share_percent']:8.2f}%")
+            percent = item["share_percent"]
+            rows.append((name, f"{item['self_ns']/NS_PER_MS:.3f}", f"{percent:.2f}%", term.bar(percent)))
+        term.table(("Group", "Self ms", "Share", "Of compile"), rows, left=(0, 3),
+                   styles={(index, 3): "36" for index in range(len(rows))})
 
 
 def main():
