@@ -28,6 +28,7 @@ header :: fn(ty abi.Type) Shape {
     }
     if ty.header.eq("stdlib.h") and ty.name.eq("div_t") { ret shape(8, 4) }
     if ty.header.eq("time.h") and ty.name.eq("struct timespec") { ret shape(16, 8) }
+    if ty.header.eq("sys/resource.h") and ty.name.eq("struct rusage") { ret shape(144, 8) }
     fail("unknown Linux x86-64 header type layout")
     shape(0, 1)
 }
@@ -100,6 +101,9 @@ header_offset :: fn(ty abi.Type, name Str) u64 {
         if name.eq("tv_sec") { ret 0 }
         if name.eq("tv_nsec") { ret 8 }
     }
+    if ty.header.eq("sys/resource.h") and ty.name.eq("struct rusage") and name.eq("ru_maxrss") {
+        ret 32
+    }
     fail("unknown Linux x86-64 header field")
     0
 }
@@ -111,6 +115,8 @@ header_value :: fn(header, name Str) u64 {
     }
     if header.eq("stdio.h") and name.eq("EOF") { ret 0 - (1 as u64) }
     if header.eq("pthread.h") and name.eq("PTHREAD_CREATE_DETACHED") { ret 1 }
+    if header.eq("time.h") and name.eq("CLOCK_MONOTONIC") { ret 1 }
+    if header.eq("sys/resource.h") and name.eq("RUSAGE_SELF") { ret 0 }
     if header.eq("errno.h") {
         if name.eq("EINTR") { ret 4 }
         if name.eq("ENOMEM") { ret 12 }

@@ -1,0 +1,70 @@
+target :: @import("core/target")
+sys :: @import("std/sys")
+
+Timespec :: extern ["time.h"] "struct timespec" struct {
+    tv_sec, tv_nsec i64
+}
+
+Usage :: extern ["sys/resource.h"] "struct rusage" struct {
+    ru_maxrss i64
+}
+
+clock_gettime :: extern ["time.h"] fn(i32, &Timespec) i32
+getrusage :: extern ["sys/resource.h"] fn(i32, &Usage) i32
+
+supported :: fn() bool { true }
+
+monotonic :: fn() u64 {
+    stamp: Timespec
+    if clock_gettime(@c_value("time.h", "CLOCK_MONOTONIC", i32), &stamp) != 0 { ret 0 }
+    stamp.tv_sec as u64 * 1000000000 + stamp.tv_nsec as u64 + 1
+}
+
+peak_rss :: fn() u64 {
+    if target.target_os == target.Os.linux {
+        peak := linux_peak()
+        if peak != 0 { ret peak }
+    }
+    usage: Usage
+    if getrusage(@c_value("sys/resource.h", "RUSAGE_SELF", i32), &usage) != 0 { ret 0 }
+    bytes := usage.ru_maxrss as u64
+    if target.target_os == target.Os.linux { bytes * 1024 } else { bytes }
+}
+
+linux_peak :: fn() u64 {
+    handle := sys.open_handle(
+        c"/proc/self/status"
+        .{
+            read: true
+            write: false
+            create: false
+            truncate: false
+            append: false
+        }
+    )
+    if handle < 0 { ret 0 }
+    buffer: [4096]u8
+    count := sys.read_handle(handle, &buffer[0], 4096)
+    sys.close_handle(handle)
+    if count <= 0 { ret 0 }
+    text := Str.new(&buffer[0], count as u64)
+    prefix := "VmHWM:"
+    cursor: u64 = 0
+    while cursor < text.len {
+        if text.sub(cursor, text.len - cursor).starts_with(prefix) {
+            cursor = cursor + prefix.len
+            while cursor < text.len and (buffer[cursor] == 32 or buffer[cursor] == 9) {
+                cursor = cursor + 1
+            }
+            kilobytes: u64 = 0
+            while cursor < text.len and buffer[cursor] >= '0' and buffer[cursor] <= '9' {
+                kilobytes = kilobytes * 10 + (buffer[cursor] - '0') as u64
+                cursor = cursor + 1
+            }
+            ret kilobytes * 1024
+        }
+        while cursor < text.len and buffer[cursor] != 10 { cursor = cursor + 1 }
+        cursor = cursor + 1
+    }
+    0
+}

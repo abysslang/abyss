@@ -1,0 +1,41 @@
+clock :: @import("std/sys/clock")
+native_output :: @import("core/target_values").native_output
+
+clock_read :: fn() Str {
+    if native_output { "clock.monotonic()" } else { "0 as u64" }
+}
+
+Duration :: struct {
+    nanos u64
+
+    from_nanos :: fn(nanos u64) Self { .{ nanos: nanos } }
+
+    as_nanos :: fn(self &Self) u64 { self.nanos }
+    as_millis :: fn(self &Self) f64 { self.nanos as f64 / 1000000.0 }
+    as_secs :: fn(self &Self) f64 { self.nanos as f64 / 1000000000.0 }
+}
+
+Instant :: struct {
+    ticks u64
+
+    try_now :: fn() Maybe(Self) {
+        ticks := #clock_read()
+        if ticks == 0 { ret Maybe(Self).none() }
+        Maybe(Self).some(.{ ticks: ticks })
+    }
+
+    now :: fn() Self { Self.try_now().unwrap() }
+
+    checked_duration_since :: fn(self &Self, earlier Self) Maybe(Duration) {
+        if self.ticks < earlier.ticks { ret Maybe(Duration).none() }
+        Maybe(Duration).some(Duration.from_nanos(self.ticks - earlier.ticks))
+    }
+
+    duration_since :: fn(self &Self, earlier Self) Duration {
+        self.checked_duration_since(earlier).unwrap_or(Duration.from_nanos(0))
+    }
+
+    elapsed :: fn(self &Self) Duration { Self.now().duration_since(*self) }
+}
+
+supported :: fn() bool { native_output and clock.supported() }

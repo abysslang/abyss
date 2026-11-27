@@ -1,0 +1,22 @@
+Counter :: extern struct {
+    ticks i64
+}
+
+QueryPerformanceCounter :: extern fn(&Counter) i32
+QueryPerformanceFrequency :: extern fn(&Counter) i32
+
+supported :: fn() bool { true }
+
+monotonic :: fn() u64 {
+    frequency: Counter
+    counter: Counter
+    if QueryPerformanceFrequency(&frequency) == 0 or QueryPerformanceCounter(&counter) == 0 {
+        ret 0
+    }
+    ticks := counter.ticks as u64
+    rate := frequency.ticks as u64
+    if rate == 0 { ret 0 }
+    ticks / rate * 1000000000 + ticks % rate * 1000000000 / rate + 1
+}
+
+peak_rss :: fn() u64 { 0 }

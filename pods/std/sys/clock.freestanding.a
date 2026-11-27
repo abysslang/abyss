@@ -1,0 +1,3 @@
+supported :: fn() bool { false }
+monotonic :: fn() u64 { 0 }
+peak_rss :: fn() u64 { 0 }

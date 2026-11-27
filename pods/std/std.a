@@ -13,6 +13,7 @@ sort :: @import("./sort")
 string :: @import("./string")
 sys :: @import("./sys")
 thread :: @import("./thread")
+time :: @import("./time")
 
 HashMap :: @import("./collections/hash_map").HashMap
 HashSet :: @import("./collections/hash_set").HashSet

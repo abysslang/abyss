@@ -1,0 +1,11 @@
+clock_time_get :: extern "wasi_snapshot_preview1" "clock_time_get" fn(u32, u64, &u64) u32
+
+supported :: fn() bool { true }
+
+monotonic :: fn() u64 {
+    stamp: u64
+    if clock_time_get(1, 1, &stamp) != 0 { ret 0 }
+    stamp + 1
+}
+
+peak_rss :: fn() u64 { 0 }

@@ -239,6 +239,30 @@ With `sonar build`, `-pthread` is added automatically on supported platforms.
 
 The runtime lives in `std/sys`: thread creation, locking, and `sleep` call the platform through `extern` declarations, and using `sleep` alone does not pull in thread creation or mutex bindings.
 
+## 5. Monotonic Time
+
+```abyss
+time :: @import("std/time")
+thread :: @import("std/thread")
+
+main :: fn() {
+    start := time.Instant.now()
+    thread.sleep(25).unwrap()
+    print(start.elapsed().as_nanos())
+}
+```
+
+An `Instant` is a point on the host's monotonic clock. Subtract instants to
+measure elapsed time; they do not represent calendar dates. `Duration` keeps
+integer nanoseconds and offers floating-point conversions with `as_millis()`
+and `as_secs()`.
+
+`later.duration_since(earlier)` returns zero if the inputs are reversed.
+Use `checked_duration_since` to detect that case. `Instant.try_now()` returns
+`Maybe(Instant)` if the clock may fail or be unavailable; `Instant.now()`
+requires a working clock. Linux, macOS, Windows, and WASI native targets
+provide a clock. The VM and freestanding targets return no instant.
+
 ---
 
 [Previous: Allocators & Memory](05-allocators-and-mem.md) | [Next: Language Intrinsics →](07-language-intrinsics.md)
