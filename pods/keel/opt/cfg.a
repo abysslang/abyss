@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 ir :: @import("../ir")
 id :: @import("../id")
 ops :: @import("../ops")
@@ -352,6 +354,13 @@ merge_blocks :: fn(body &Function, info &GraphInfo, merged &Block) bool {
 }
 
 run :: fn(body &Function) bool {
+    timing := profile.enter(Phase.backend_cfg)
+    result := run_impl(body)
+    profile.leave(timing)
+    result
+}
+
+run_impl :: fn(body &Function) bool {
     count := body.block_count()
     if count == 0 { ret false }
     arena := Arena.new(4096)

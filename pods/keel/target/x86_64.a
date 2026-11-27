@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 elf :: @import("pods/keel/target/elf64")
 abi :: @import("pods/keel/abi_types")
 ir :: @import("pods/keel/ir")
@@ -775,7 +777,9 @@ Encoder :: struct {
             if decl.kind == program.Kind.external { signature = decl.abi_signature }
         } else { signature = target }
         if sysv.needs_bridge(self.air, signature) {
+            span := profile.enter(Phase.backend_elf_abi)
             abi_invoke(self.image, self.air, symbol, signature, body, &self.allocation, inst, pos)
+            profile.leave(span)
             ret
         }
         space := count as u64 * 16
@@ -1208,7 +1212,9 @@ emit_body :: fn(
 ) {
     code := &image.text
     start := code.len()
+    allocation_span := profile.enter(Phase.backend_regalloc)
     allocation := workspace.allocate(body)
+    profile.leave(allocation_span)
     block_count := body.block_count()
     max_args: u32 = 0
     block: u64 = 1
@@ -1327,6 +1333,14 @@ emit_entry :: fn(
 }
 
 emit :: fn(arena &Arena, air &program.Program, executable, hosted bool) Str {
+    timing := profile.enter(Phase.backend_elf)
+    result := emit_impl(arena, air, executable, hosted)
+    profile.leave(timing)
+    result
+}
+
+emit_impl :: fn(arena &Arena, air &program.Program, executable, hosted bool) Str {
+    symbol_span := profile.enter(Phase.backend_elf_symbols)
     image := elf.Image.new(arena)
     symbols := Vec(u32).with_cap(air.declarations.len)
     addresses := Vec(u32).with_cap(air.declarations.len)
@@ -1362,11 +1376,13 @@ emit :: fn(arena &Arena, air &program.Program, executable, hosted bool) Str {
         }
         at = at + 1
     }
+    profile.leave(symbol_span)
     at = 0
     for decl in air.declarations {
         index := symbols.get(at)
         match decl.kind {
             function {
+                emission := profile.enter(Phase.backend_elf_body)
                 emit_body(
                     &image
                     air
@@ -1376,8 +1392,13 @@ emit :: fn(arena &Arena, air &program.Program, executable, hosted bool) Str {
                     index
                     &workspace
                 )
+                profile.leave(emission)
                 address := addresses.get(at)
-                if address != index { emit_wrapper(&image, air, decl, address, index) }
+                if address != index {
+                    abi_span := profile.enter(Phase.backend_elf_abi)
+                    emit_wrapper(&image, air, decl, address, index)
+                    profile.leave(abi_span)
+                }
             }
             data {
                 image.define(index, image.data.len(), decl.bytes.len)
@@ -1408,5 +1429,8 @@ emit :: fn(arena &Arena, air &program.Program, executable, hosted bool) Str {
     workspace.destroy()
     symbols.destroy()
     addresses.destroy()
-    elf.emit(arena, &image, first_global)
+    serialization := profile.enter(Phase.backend_elf_write)
+    result := elf.emit(arena, &image, first_global)
+    profile.leave(serialization)
+    result
 }

@@ -95,6 +95,19 @@ build_wasi() {
 }
 
 case "${CMD}" in
+    bench)
+        export ABYSS_BENCH_CWD="${ORIG_PWD}"
+        custom_compiler=false
+        for arg in "$@"; do
+            case "$arg" in
+                --compiler|--compiler=*|-h|--help) custom_compiler=true ;;
+            esac
+        done
+        if [[ "$custom_compiler" == false && -z "${ABYSS_COMPILER:-}" ]]; then
+            prepare_compiler
+        fi
+        exec python3 "${ROOT_DIR}/scripts/bench.py" "$@"
+        ;;
     emit)
         prepare_compiler
         "${COMPILER_BIN}" "$@"
@@ -388,6 +401,7 @@ EOF
         echo "  r-win [file]      Build and run Windows binary with wine"
         echo "  test [filter]     Run fast dev test suite (C + VM backends via TCC/GCC)"
         echo "  test-all [filter] Run full test suite (fixed-point, reflection, standalone, CLI)"
+        echo "  bench [options]   Benchmark compilation and record daily results"
         echo "  test-win [filter] Run language test suite on Windows binary with wine"
         echo "  bootstrap [n]     Run multi-generation fixed-point stability test"
         echo "  promote [n]       Verify multi-stage bootstrap & tests then promote to ./abyssc"

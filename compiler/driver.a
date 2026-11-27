@@ -7,6 +7,8 @@ sys :: @import("std/sys")
 c99 :: @import("pods/keel/target/c99")
 x86_64 :: @import("pods/keel/target/x86_64")
 air :: @import("compiler/air/lower")
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 Engine :: @import("compiler/engine").Engine
 id_none :: @import("compiler/nexus/pool").id_none
 platform :: @import("compiler/platform")
@@ -27,6 +29,7 @@ CompilerConfig :: struct {
     target_arch  target.Arch
     is_library   bool
     source_index i32
+    profiling    profile.Mode
     from_env :: fn() Self {
         argc := Env.args_len()
         src := Env.get_or(c"ABYSS_SRC", c"main.a")
@@ -40,6 +43,7 @@ CompilerConfig :: struct {
         target_os := platform.host_os()
         arch := Maybe(target.Arch).none()
         library := false
+        profiling := profile.Mode.off
 
         pos_idx: i32 = 0
         source_index: i32 = 0
@@ -75,6 +79,15 @@ CompilerConfig :: struct {
                 hosted_obj = true
             } else if arg_str.eq("--library") {
                 library = true
+            } else if arg_str.eq("--profile") {
+                profiling = profile.Mode.text
+            } else if arg_str.eq("--profile=tsv") {
+                profiling = profile.Mode.tsv
+            } else if arg_str.eq("--profile=summary") {
+                profiling = profile.Mode.summary
+            } else if arg_str.starts_with("--profile=") {
+                sys.write_stderr("--profile expects tsv or summary (omit the value for text)\n")
+                #sys.fall
             } else if arg_str.eq("-I") {
                 if (i + 1) < argc {
                     i = i + 1
@@ -160,6 +173,7 @@ CompilerConfig :: struct {
             target_arch: target_arch
             is_library: library
             source_index: source_index
+            profiling: profiling
         }
     }
 }
@@ -176,7 +190,11 @@ Driver :: struct {
     }
 
     run :: fn(self &Self) {
+        profile.start(self.config.profiling)
+        read := profile.enter(Phase.driver_read)
         source := fs.read_file(self.arena, self.config.src_path)
+        profile.leave(read)
+        setup := profile.enter(Phase.driver_setup)
         eng := Engine.new(self.arena)
         eng.nexus.target_os = self.config.target_os
         eng.nexus.target_arch = self.config.target_arch
@@ -194,6 +212,7 @@ Driver :: struct {
         executable := not self.config.is_library and self.config.target_os != target.Os.freestanding
         eng.nexus.native_output = not self.config.is_vm_run
         eng.nexus.native_executable = executable and eng.nexus.native_output
+        profile.leave(setup)
         fid := eng.add_file_with_runtime(
             Str.of(self.config.src_path)
             source
@@ -202,12 +221,18 @@ Driver :: struct {
         sym_id := eng.build_entry(fid, executable)
 
         if self.config.is_vm_run {
+            lower := profile.enter(Phase.backend_vm_lower)
             vcg := vm_codegen.VmCodeGen.new(self.arena)
             vcg.init_types(&eng.nexus.types, self.arena)
             vbuilder := vm_codegen.VmCodeBuilder.new(&vcg)
             vcg.abyss_main(sym_id)
             eng.compile_vm(&vcg, &vbuilder, sym_id)
+            profile.leave(lower)
+            link := profile.enter(Phase.backend_vm_link)
             vcg.finish_linking()
+            profile.leave(link)
+            profile.stop()
+            profile.report(self.arena)
             vm := Vm.new()
             Env.shift_args(self.config.source_index)
             if vcg.globals_entry != id_none() {
@@ -228,7 +253,13 @@ Driver :: struct {
         } else {
             c99.emit(self.arena, &program, self.config.target_os, executable)
         }
+        write := profile.enter(Phase.driver_write)
         fs.write_file(self.config.out_path, output)
+        profile.leave(write)
+        cleanup := profile.enter(Phase.driver_cleanup)
         program.destroy()
+        profile.leave(cleanup)
+        profile.stop()
+        profile.report(self.arena)
     }
 }

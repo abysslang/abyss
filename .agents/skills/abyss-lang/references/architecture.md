@@ -115,6 +115,12 @@ constants through 64 bits, integer casts, and floating-point negation. `dce.a`
 eliminates dead instructions via mark-sweep, removes write-only stack slots,
 and prunes unreachable program declarations. The bytecode path stays separate.
 
+Use `abyssc b --profile main.a main.c` for phase timings. `pods/keel/profile.a`
+records wall time in flat counters shared by the compiler and Keel. Exclusive
+time belongs to the active phase; nested imports and compile-time work are
+charged independently. `./abyss bench` collects baseline timings separately
+from detailed profiles and keeps raw runs and daily records under `benchmarks/`.
+
 ---
 
 ## 4. Stability & Bootstrap Invariants

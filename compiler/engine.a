@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 Os :: @import("core/target").Os
 Arena :: @import("std/allocator").Arena
 Path :: @import("std/path").Path
@@ -38,16 +40,22 @@ Engine :: struct {
     parse_module :: fn(self &Self, fid u32) {
         db := &self.nexus
         tokens := TokenStream.new()
-        lex(&tokens, db.get_file_source(fid), db.get_file_path(fid))
+        source := db.get_file_source(fid)
+        profile.source(source)
+        lex(&tokens, source, db.get_file_path(fid))
+        span := profile.enter(Phase.frontend_parse)
         parser := Parser_new(db, &tokens, &db.hir, fid, id_none(), 0, (tokens.count() as u32) - 1)
         parse_file(&parser)
         parser.env.destroy()
         tokens.destroy()
+        profile.leave(span)
     }
 
     load_module :: fn(self &Self, fid u32, offset u32, base, path Str) u32 {
         count := self.nexus.file_paths.len as u32
+        span := profile.enter(Phase.frontend_modules)
         module := modules.resolve_module(&self.nexus, self.arena, fid, offset, base, path)
+        profile.leave(span)
         if module == count {
             self.parse_module(module)
         }
@@ -107,6 +115,12 @@ Engine :: struct {
     }
 
     type_check :: fn(self &Self, sym_id u32) {
+        timing := profile.enter(Phase.type_check)
+        self.type_check_impl(sym_id)
+        profile.leave(timing)
+    }
+
+    type_check_impl :: fn(self &Self, sym_id u32) {
         hir_start := self.nexus.sym_hir_start(sym_id)
         hir_end := self.nexus.sym_hir_end(sym_id)
 
@@ -161,6 +175,12 @@ Engine :: struct {
     }
 
     ensure_resolved :: fn(self &Self, sym_id u32) {
+        timing := profile.enter(Phase.type_resolve)
+        self.ensure_resolved_impl(sym_id)
+        profile.leave(timing)
+    }
+
+    ensure_resolved_impl :: fn(self &Self, sym_id u32) {
         if sym_id == id_none() {
             ret
         }
@@ -277,6 +297,13 @@ Engine :: struct {
     }
 
     build_entry :: fn(self &Self, fid u32, executable bool) u32 {
+        timing := profile.enter(Phase.type_resolve)
+        result := self.build_entry_impl(fid, executable)
+        profile.leave(timing)
+        result
+    }
+
+    build_entry_impl :: fn(self &Self, fid u32, executable bool) u32 {
         sym_id := id_none()
         if executable {
             sym_id = self.nexus.find_local_symbol(fid, self.nexus.interner.intern("main"))

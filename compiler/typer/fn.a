@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 fall :: @import("std/sys").fall
 
 Engine :: @import("compiler/engine").Engine
@@ -784,6 +786,12 @@ synth_generic_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot u3
 }
 
 synth_call :: fn(eng &Engine, id u32) {
+    timing := profile.enter(Phase.type_calls)
+    synth_call_impl(eng, id)
+    profile.leave(timing)
+}
+
+synth_call_impl :: fn(eng &Engine, id u32) {
     db := &eng.nexus
     tbl := &db.hir
     unify_ptr := &db.unify

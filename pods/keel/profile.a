@@ -1,0 +1,336 @@
+clock :: @import("std/sys/clock")
+native_output :: @import("core/target_values").native_output
+Arena :: @import("std/allocator").Arena
+String :: @import("std/string").String
+fmt :: @import("std/fmt")
+sys :: @import("std/sys")
+
+Mode :: enum u8 {
+    off
+    summary
+    text
+    tsv
+}
+
+Phase :: enum u8 {
+    off
+    other
+    driver_read
+    driver_setup
+    driver_write
+    driver_cleanup
+    frontend_lex
+    frontend_parse
+    frontend_modules
+    type_resolve
+    type_check
+    type_infer
+    type_unify_union
+    type_unify_bind
+    type_unify_types
+    type_unify_resolve
+    type_calls
+    type_specialize
+    type_reflection
+    comptime_splice
+    comptime_evaluate
+    comptime_lower
+    comptime_vm
+    backend_lower
+    backend_functions
+    backend_globals
+    backend_metadata
+    backend_optimize
+    backend_cfg
+    backend_mem2reg
+    backend_fold
+    backend_dce
+    backend_prune
+    backend_c99
+    backend_c99_abi
+    backend_c99_body
+    backend_elf
+    backend_elf_symbols
+    backend_elf_body
+    backend_elf_abi
+    backend_regalloc
+    backend_elf_write
+    backend_vm_lower
+    backend_vm_link
+    end_
+}
+
+label :: fn(phase Phase) Str {
+    match phase {
+        driver_read { "driver/read" }
+        driver_setup { "driver/setup" }
+        driver_write { "driver/write" }
+        driver_cleanup { "driver/cleanup" }
+        frontend_lex { "frontend/lex" }
+        frontend_parse { "frontend/parse" }
+        frontend_modules { "frontend/modules" }
+        type_resolve { "type/resolve" }
+        type_check { "type/check" }
+        type_infer { "type/infer" }
+        type_unify_union { "type/unify_union" }
+        type_unify_bind { "type/unify_bind" }
+        type_unify_types { "type/unify_types" }
+        type_unify_resolve { "type/unify_resolve" }
+        type_calls { "type/calls" }
+        type_specialize { "type/specialize" }
+        type_reflection { "type/reflection" }
+        comptime_splice { "comptime/splice" }
+        comptime_evaluate { "comptime/evaluate" }
+        comptime_lower { "comptime/lower" }
+        comptime_vm { "comptime/vm" }
+        backend_lower { "backend/lower" }
+        backend_functions { "backend/functions" }
+        backend_globals { "backend/globals" }
+        backend_metadata { "backend/metadata" }
+        backend_optimize { "backend/optimize" }
+        backend_cfg { "backend/cfg" }
+        backend_mem2reg { "backend/mem2reg" }
+        backend_fold { "backend/fold" }
+        backend_dce { "backend/dce" }
+        backend_prune { "backend/prune" }
+        backend_c99 { "backend/c99" }
+        backend_c99_abi { "backend/c99_abi" }
+        backend_c99_body { "backend/c99_body" }
+        backend_elf { "backend/elf" }
+        backend_elf_symbols { "backend/elf_symbols" }
+        backend_elf_body { "backend/elf_body" }
+        backend_elf_abi { "backend/elf_abi" }
+        backend_regalloc { "backend/regalloc" }
+        backend_elf_write { "backend/elf_write" }
+        backend_vm_lower { "backend/vm_lower" }
+        backend_vm_link { "backend/vm_link" }
+        else { "other" }
+    }
+}
+
+Sample :: struct {
+    exclusive, inclusive, calls, depth u64
+    entered u64
+}
+
+Span :: struct {
+    parent Phase
+}
+
+Session :: struct {
+    mode                       Mode
+    active                     Phase
+    started, switched          u64
+    samples                    [Phase.end_ as u64]Sample
+    sources                    Vec(Str)
+    total, files, lines, bytes u64
+}
+
+state: Session
+tracing: bool
+
+clock_expr :: fn() Str {
+    if native_output { "clock.monotonic()" } else { "0 as u64" }
+}
+
+rss_expr :: fn() Str {
+    if native_output { "clock.peak_rss()" } else { "0 as u64" }
+}
+
+timestamp :: fn() u64 {
+    now := #clock_expr()
+    if now == 0 {
+        sys.write_stderr("Could not read the monotonic host clock\n")
+        sys.exit_process(1)
+    }
+    now
+}
+
+start :: fn(mode Mode) {
+    if mode == Mode.off { ret }
+    if not native_output or not clock.supported() {
+        sys.write_stderr("Profiling requires a monotonic host clock\n")
+        sys.exit_process(1)
+    }
+    state.mode = mode
+    state.sources = Vec(Str).new()
+    tracing = mode != Mode.summary
+    state.active = if tracing { Phase.other } else { Phase.off }
+    state.started = timestamp()
+    state.switched = state.started
+}
+
+enabled :: fn() bool { state.mode != Mode.off }
+
+enter :: fn(phase Phase) Span {
+    parent := state.active
+    if parent == Phase.off or phase == parent { ret .{ parent: Phase.off } }
+    now := timestamp()
+    previous := &state.samples[parent as u64]
+    previous.exclusive = previous.exclusive + (now - state.switched)
+    slot := &state.samples[phase as u64]
+    if slot.depth == 0 { slot.entered = now }
+    slot.depth = slot.depth + 1
+    slot.calls = slot.calls + 1
+    state.active = phase
+    state.switched = now
+    .{ parent: parent }
+}
+
+leave :: fn(span Span) {
+    if span.parent == Phase.off { ret }
+    now := timestamp()
+    slot := &state.samples[state.active as u64]
+    slot.exclusive = slot.exclusive + (now - state.switched)
+    slot.depth = slot.depth - 1
+    if slot.depth == 0 {
+        slot.inclusive = slot.inclusive + (now - slot.entered)
+    }
+    state.active = span.parent
+    state.switched = now
+}
+
+source :: fn(text Str) {
+    if enabled() { state.sources.push(text) }
+}
+
+count_source :: fn(text Str) {
+    state.files = state.files + 1
+    state.bytes = state.bytes + text.len
+    if text.len == 0 { ret }
+    for byte in text {
+        if byte == 10 { state.lines = state.lines + 1 }
+    }
+    if text.ptr[text.len - 1] != 10 { state.lines = state.lines + 1 }
+}
+
+stop :: fn() {
+    if not enabled() { ret }
+    now := timestamp()
+    state.total = now - state.started
+    if tracing {
+        other := &state.samples[Phase.other as u64]
+        other.exclusive = other.exclusive + (now - state.switched)
+        other.inclusive = other.exclusive
+    }
+}
+
+millis :: fn(nanos u64) f64 { nanos as f64 / 1000000.0 }
+
+share :: fn(nanos u64) f64 {
+    if state.total == 0 { ret 0.0 }
+    nanos as f64 * 100.0 / state.total as f64
+}
+
+group :: fn(name Str) Str {
+    length: u64 = 0
+    while length < name.len and name.ptr[length] != 47 { length = length + 1 }
+    name.sub(0, length)
+}
+
+group_row :: fn(out &String, name Str, nanos u64) {
+    if nanos != 0 {
+        fmt.fmt_into(out, "  {}\t{} ms\t{}%\n", .(name, millis(nanos), share(nanos)))
+    }
+}
+
+row :: fn(out &String, name Str, sample Sample) {
+    if state.mode == Mode.tsv {
+        fmt.fmt_into(
+            out
+            "phase\t{}\t{}\t{}\t{}\n"
+            .(
+                name
+                sample.exclusive
+                sample.inclusive
+                sample.calls
+            )
+        )
+    } else {
+        fmt.fmt_into(
+            out
+            "  {}\t{} ms\t{}%\t{} ms inclusive\t{} spans\n"
+            .(
+                name
+                millis(sample.exclusive)
+                share(sample.exclusive)
+                millis(sample.inclusive)
+                sample.calls
+            )
+        )
+    }
+}
+
+report :: fn(arena &Arena) {
+    if not enabled() { ret }
+    rss := #rss_expr()
+    for source in state.sources { count_source(source) }
+    state.sources.destroy()
+    out := String.new(arena)
+    if state.mode == Mode.text {
+        throughput := if state.total == 0 { 0.0 } else {
+            state.lines as f64 * 1000000000.0 / state.total as f64
+        }
+        fmt.fmt_into(
+            &out
+            "Compile: {} ms | {} lines/s | {} lines in {} files\n"
+            .(
+                millis(state.total)
+                throughput as u64
+                state.lines
+                state.files
+            )
+        )
+        if rss != 0 {
+            fmt.fmt_into(&out, "Peak RSS: {} MiB\n", .(rss as f64 / 1048576.0))
+        } else { out.push_str("Peak RSS: unavailable\n") }
+        out.push_str("Phase\tExclusive time\tShare of compile\tInclusive time\tSpans\n")
+    } else {
+        fmt.fmt_into(
+            &out
+            "abyss-profile\t1\nsummary\t{}\t{}\t{}\t{}\t{}\n"
+            .(
+                state.total
+                state.lines
+                state.files
+                state.bytes
+                rss
+            )
+        )
+    }
+    if state.mode != Mode.summary {
+        first := Phase.other as i32
+        end := Phase.end_ as i32
+        for index in Range.new(first, end) {
+            item := state.samples[index as u64]
+            if item.calls != 0 or index == first { row(&out, label(index as Phase), item) }
+        }
+        if state.mode == Mode.text {
+            out.push_str("Group totals (exclusive):\n")
+            previous := Str.empty()
+            nanos: u64 = 0
+            typer: u64 = 0
+            unify: u64 = 0
+            for index in Range.new(first, end) {
+                phase := label(index as Phase)
+                name := group(phase)
+                elapsed := state.samples[index as u64].exclusive
+                if not previous.eq(name) {
+                    group_row(&out, previous, nanos)
+                    previous = name
+                    nanos = 0
+                }
+                if name.eq("type") or name.eq("comptime") { typer = typer + elapsed }
+                if phase.starts_with("type/unify_") { unify = unify + elapsed }
+                nanos = nanos + elapsed
+            }
+            group_row(&out, previous, nanos)
+            group_row(&out, "type checker and comptime", typer)
+            group_row(&out, "unification (subset of type)", unify)
+        }
+    }
+    sys.write_stderr(out.as_str())
+    state.mode = Mode.off
+    state.active = Phase.off
+    tracing = false
+}

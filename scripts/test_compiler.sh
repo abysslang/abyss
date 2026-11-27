@@ -333,6 +333,18 @@ if [[ "${OBJECT_TEST}" == true && ( -z "${FILTER}" || object == *"${FILTER}"* ) 
     fi
 fi
 
+if [[ "${ABYSS_TEST_WINE:-false}" != true && ( -z "${FILTER}" || profile == *"${FILTER}"* ) ]] &&
+    command -v python3 >/dev/null; then
+    TOTAL=$((TOTAL + 1))
+    if bash "${ROOT_DIR}/scripts/test_profile.sh" "${COMPILER}" "${WORK_DIR}/profile"; then
+        printf "  ${GREEN}✔ PASS${RESET}  %-36s ${DIM}[CLI]${RESET}\n" "compiler_profile_and_benchmark"
+        PASSED=$((PASSED + 1))
+    else
+        printf "  ${RED}✘ FAIL${RESET}  %-36s ${DIM}[CLI]${RESET}\n" "compiler_profile_and_benchmark"
+        FAILED=$((FAILED + 1))
+    fi
+fi
+
 if [[ ${TOTAL} -eq 0 ]]; then
     echo -e "${YELLOW}No tests matched: ${FILTER}${RESET}"
     exit 1

@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 Ascii :: @import("std/ascii").Ascii
 fall :: @import("std/sys").fall
 
@@ -514,6 +516,12 @@ Lexer :: struct {
 }
 
 lex :: fn(stream &TokenStream, source Str, path Str) {
+    timing := profile.enter(Phase.frontend_lex)
+    lex_impl(stream, source, path)
+    profile.leave(timing)
+}
+
+lex_impl :: fn(stream &TokenStream, source Str, path Str) {
     lexer := Lexer.new(source, path)
 
     while not lexer.is_eof() {

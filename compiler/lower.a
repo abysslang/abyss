@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 Arena :: @import("std/allocator").Arena
 fall :: @import("std/sys").fall
 
@@ -1191,6 +1193,13 @@ lower_body :: fn(ctx &LowerCtx, id u32) VmVal {
 }
 
 eval_const :: fn(db &Nexus, id u32) u64 {
+    timing := profile.enter(Phase.comptime_evaluate)
+    result := eval_const_impl(db, id)
+    profile.leave(timing)
+    result
+}
+
+eval_const_impl :: fn(db &Nexus, id u32) u64 {
     if id == hir.hir_none() {
         ret 0
     }
@@ -1339,6 +1348,7 @@ eval_const :: fn(db &Nexus, id u32) u64 {
             }
         }
     }
+    lowering := profile.enter(Phase.comptime_lower)
     saved_cg := db.comptime_cg
     saved_vm := db.comptime_vm
     nested := db.comptime_depth > 0
@@ -1384,7 +1394,10 @@ eval_const :: fn(db &Nexus, id u32) u64 {
     type_queue.destroy()
 
     db.comptime_cg.finish_linking()
+    profile.leave(lowering)
+    execution := profile.enter(Phase.comptime_vm)
     res := db.comptime_vm.run(&db.comptime_cg.chunk, start_ip)
+    profile.leave(execution)
     db.comptime_depth = db.comptime_depth - 1
     if nested {
         db.comptime_cg = saved_cg

@@ -17,4 +17,7 @@ vm_dyn_io.txt
 *.tar.gz
 *.rar
 .vendor/
+/benchmarks/*.json
+/benchmarks/runs/
+/benchmarks/.lock
 

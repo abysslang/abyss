@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 HirExprKind :: hir.HirExprKind
 Program :: keel.Program
 keel :: @import("pods/keel")
@@ -1027,6 +1029,12 @@ reflection_address :: fn(ctx &Context, node u32) Val {
 }
 
 lower_metadata :: fn(ctx &Context, data Metadata) {
+    timing := profile.enter(Phase.backend_metadata)
+    lower_metadata_impl(ctx, data)
+    profile.leave(timing)
+}
+
+lower_metadata_impl :: fn(ctx &Context, data Metadata) {
     db := ctx.db
     table := &db.types
     dest := ctx.out.address(data.target)
@@ -1070,6 +1078,12 @@ lower_metadata :: fn(ctx &Context, data Metadata) {
 }
 
 lower_body :: fn(module &Module, pending Pending) {
+    timing := profile.enter(Phase.backend_functions)
+    lower_body_impl(module, pending)
+    profile.leave(timing)
+}
+
+lower_body_impl :: fn(module &Module, pending Pending) {
     db := module.db
     sym := pending.source
     node := db.get_fn_node(sym)
@@ -1107,6 +1121,12 @@ lower_body :: fn(module &Module, pending Pending) {
 }
 
 lower_globals :: fn(module &Module, lowered &u64) {
+    timing := profile.enter(Phase.backend_globals)
+    lower_globals_impl(module, lowered)
+    profile.leave(timing)
+}
+
+lower_globals_impl :: fn(module &Module, lowered &u64) {
     if module.globals.len == 0 and module.metadata.len == 0 { ret }
     module.air.initializer = module.air.declare("$init", Slice(Ty).empty(), Ty.void_, false)
     ctx := Context.new(module, types.ty_id_unit())
@@ -1140,6 +1160,13 @@ lower_globals :: fn(module &Module, lowered &u64) {
 }
 
 lower :: fn(db &Nexus, arena &Arena, file, entry, selected u32) Program {
+    timing := profile.enter(Phase.backend_lower)
+    result := lower_impl(db, arena, file, entry, selected)
+    profile.leave(timing)
+    result
+}
+
+lower_impl :: fn(db &Nexus, arena &Arena, file, entry, selected u32) Program {
     module := Module.new(db, arena)
     if selected != none() {
         module.air.entry = module.register(selected, db.get_fn_node(selected))

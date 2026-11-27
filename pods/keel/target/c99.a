@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 Arena :: @import("std/allocator").Arena
 String :: @import("std/string").String
 Os :: @import("core/target").Os
@@ -111,6 +113,12 @@ abi_params :: fn(out &String, air &program.Program, signature AbiType, named boo
 }
 
 abi_types :: fn(out &String, air &program.Program) {
+    timing := profile.enter(Phase.backend_c99_abi)
+    abi_types_impl(out, air)
+    profile.leave(timing)
+}
+
+abi_types_impl :: fn(out &String, air &program.Program) {
     for pos in Range.new(1, air.abi_types.len as i32 + 1) {
         key := pos as u32
         ty := air.abi_type(key)
@@ -214,6 +222,12 @@ include :: fn(out &String, headers &Vec(Str), path Str) {
 }
 
 abi_wrapper :: fn(out &String, air &program.Program, symbol Symbol) {
+    timing := profile.enter(Phase.backend_c99_abi)
+    abi_wrapper_impl(out, air, symbol)
+    profile.leave(timing)
+}
+
+abi_wrapper_impl :: fn(out &String, air &program.Program, symbol Symbol) {
     decl := air.get(symbol)
     ty := air.abi_type(decl.abi_signature)
     result := air.abi_type(ty.inner)
@@ -586,6 +600,13 @@ signature :: fn(out &String, air &program.Program, symbol Symbol) {
 }
 
 emit :: fn(arena &Arena, air &program.Program, os Os, executable bool) Str {
+    timing := profile.enter(Phase.backend_c99)
+    result := emit_impl(arena, air, os, executable)
+    profile.leave(timing)
+    result
+}
+
+emit_impl :: fn(arena &Arena, air &program.Program, os Os, executable bool) Str {
     out := String.new(arena)
     out.push_str(
         `#ifndef _GNU_SOURCE
@@ -720,6 +741,7 @@ static void keel_zero(void *dest, size_t n) {
     for decl in air.declarations.iter() {
         index = index + 1
         if decl.kind != program.Kind.function { cont }
+        emission := profile.enter(Phase.backend_c99_body)
         body := air.functions.ptr_at((decl.body - 1) as u64)
         signature(&out, air, index as Symbol)
         out.push_str(" {\n")
@@ -735,6 +757,7 @@ static void keel_zero(void *dest, size_t n) {
             }
         }
         out.push_str("}\n")
+        profile.leave(emission)
         if decl.abi_signature != 0 { abi_wrapper(&out, air, index as Symbol) }
     }
     if not executable and air.initializer != Symbol.none and os != Os.freestanding and

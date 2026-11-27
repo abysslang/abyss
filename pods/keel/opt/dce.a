@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 ir :: @import("../ir")
 id :: @import("../id")
 ops :: @import("../ops")
@@ -458,6 +460,13 @@ mark_sweep :: fn(body &Function, arena &Arena) bool {
 }
 
 run :: fn(body &Function) bool {
+    timing := profile.enter(Phase.backend_dce)
+    result := run_impl(body)
+    profile.leave(timing)
+    result
+}
+
+run_impl :: fn(body &Function) bool {
     count := body.graph.ops.len
     if count == 0 { ret false }
     arena := Arena.new(4096)
@@ -487,6 +496,13 @@ run :: fn(body &Function) bool {
 }
 
 prune_program :: fn(module &Program) bool {
+    timing := profile.enter(Phase.backend_prune)
+    result := prune_program_impl(module)
+    profile.leave(timing)
+    result
+}
+
+prune_program_impl :: fn(module &Program) bool {
     count := module.declarations.len
     if count == 0 { ret false }
     has_roots := module.entry != Symbol.none

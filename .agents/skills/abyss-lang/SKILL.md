@@ -220,6 +220,7 @@ Command | Purpose
 `./abyss b <file.a>` | Compile `.a` file to optimized native binary via C backend.
 `./abyss br <file.a>` | Build and immediately execute native binary.
 `./abyss test [filter]` | Run the compiler test suite across C and VM backends.
+`./abyss bench [--elf] [source]` | Measure compile time, phase shares, throughput, and peak RSS. `--elf` measures a compiler built by Keel's ELF backend.
 `./abyss bootstrap [n]` | Verify multi-generation bit-identical self-hosting fixed-point.
 `./abyss promote [n]` | Verify and promote compiler binary to `./abyssc`.
 `./abyss fmt [--width N] <path> ...` | Format files or directories in place. The default target is 100 columns.

@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 fall :: @import("std/sys").fall
 
 Engine :: @import("compiler/engine").Engine
@@ -160,6 +162,12 @@ synth_node :: fn(eng &Engine, id u32) {
 }
 
 synth_splice :: fn(eng &Engine, id u32) {
+    timing := profile.enter(Phase.comptime_splice)
+    synth_splice_impl(eng, id)
+    profile.leave(timing)
+}
+
+synth_splice_impl :: fn(eng &Engine, id u32) {
     db := &eng.nexus
     tbl := &db.hir
     if tbl.rhs(id) != hir.hir_none() {
@@ -217,6 +225,7 @@ synth_splice :: fn(eng &Engine, id u32) {
     }
     tokens := token.TokenStream.new()
     lex(&tokens, macro_src, Str.of("<splice>"))
+    parsing := profile.enter(Phase.frontend_parse)
     tok_count := tokens.count() as u32
     if tok_count > 1 {
         tok_count = tok_count - 1
@@ -251,6 +260,7 @@ synth_splice :: fn(eng &Engine, id u32) {
     node_end := tbl.len()
     sub_p.env.destroy()
     tokens.destroy()
+    profile.leave(parsing)
 
     if parsed_node == hir.hir_none() {
         printf("\n[syntax error] macro expansion produced no expression\n       --> ", .())
@@ -419,6 +429,12 @@ type_has_infer_seen :: fn(types &type_defs.TypeStorage, ty_id u32, visited &Vec(
 }
 
 finalize_inferred_types :: fn(eng &Engine, func_id u32) {
+    timing := profile.enter(Phase.type_infer)
+    finalize_inferred_types_impl(eng, func_id)
+    profile.leave(timing)
+}
+
+finalize_inferred_types_impl :: fn(eng &Engine, func_id u32) {
     db := &eng.nexus
     tbl := &db.hir
     body := tbl.extra(func_id)
@@ -720,6 +736,12 @@ tyck_mono_function :: fn(eng &Engine, sym_id u32) {
 }
 
 process_mono_funcs :: fn(eng &Engine) {
+    timing := profile.enter(Phase.type_specialize)
+    process_mono_funcs_impl(eng)
+    profile.leave(timing)
+}
+
+process_mono_funcs_impl :: fn(eng &Engine) {
     db := &eng.nexus
     changed := true
     while changed {

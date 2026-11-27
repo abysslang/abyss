@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 Convert :: @import("std/convert").Convert
 String :: @import("std/string").String
 fall :: @import("std/sys").fall
@@ -163,6 +165,13 @@ reflection_fields :: fn(db &Nexus, ty u32) Vec(u32) {
 }
 
 synth_reflection_builtin :: fn(eng &Engine, id u32, name Str, args Slice(u32)) bool {
+    timing := profile.enter(Phase.type_reflection)
+    result := synth_reflection_builtin_impl(eng, id, name, args)
+    profile.leave(timing)
+    result
+}
+
+synth_reflection_builtin_impl :: fn(eng &Engine, id u32, name Str, args Slice(u32)) bool {
     if name.eq("type_from_id") {
         db := &eng.nexus
         if args.len != 1 {

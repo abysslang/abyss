@@ -1,3 +1,5 @@
+profile :: @import("pods/keel/profile")
+Phase :: profile.Phase
 ir :: @import("../ir")
 id :: @import("../id")
 ops :: @import("../ops")
@@ -244,6 +246,13 @@ Promotion :: struct {
 }
 
 run :: fn(body &Function, pointer_bytes u32) bool {
+    timing := profile.enter(Phase.backend_mem2reg)
+    result := run_impl(body, pointer_bytes)
+    profile.leave(timing)
+    result
+}
+
+run_impl :: fn(body &Function, pointer_bytes u32) bool {
     found := false
     for op in body.graph.ops {
         if op == Op.stack { found = true, break }
