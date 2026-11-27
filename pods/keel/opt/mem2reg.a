@@ -1,0 +1,318 @@
+ir :: @import("../ir")
+id :: @import("../id")
+ops :: @import("../ops")
+mem :: @import("std/mem")
+Arena :: @import("std/allocator").Arena
+fall :: @import("std/sys").fall
+Function :: ir.Function
+Block :: id.Block
+Edge :: id.Edge
+Inst :: id.Inst
+Use :: id.Use
+Val :: id.Val
+Ty :: ops.Ty
+Op :: ops.Op
+
+table :: fn(T type, arena &Arena, count u64) &T {
+    size := count * @sizeof(T)
+    ptr := arena.alloc(size)
+    mem.mem_set(ptr, 0, size)
+    ptr as &T
+}
+
+Slot :: struct {
+    size, count u32
+    ty          Ty
+    first, last Inst
+    invalid     bool
+}
+
+Incoming :: struct {
+    from Block
+    edge Edge
+}
+
+CFG :: struct {
+    starts    &u32
+    incoming  &Incoming
+    reachable &bool
+
+    build :: fn(arena &Arena, body &Function, queue &Vec(Block)) Self {
+        count := body.block_count()
+        starts := table(u32, arena, count + 2)
+        incoming := table(Incoming, arena, body.graph.targets.len)
+        reachable := table(bool, arena, count + 1)
+        for index in Range.new(1, ((count + 1) as i32)) {
+            last := body.last_inst(index as Block)
+            if last == Inst.none { cont }
+            for pos in Range.new(0, 2) {
+                edge := body.successor(last, pos as u64)
+                if edge == Edge.none { break }
+                target := body.edge_target(edge) as u32
+                starts[target + 1] = starts[target + 1] + 1
+            }
+        }
+        for index in Range.new(1, ((count + 1) as i32)) {
+            starts[index + 1] = starts[index + 1] + starts[index]
+        }
+        for index in Range.new(1, ((count + 1) as i32)) {
+            last := body.last_inst(index as Block)
+            if last == Inst.none { cont }
+            for pos in Range.new(0, 2) {
+                edge := body.successor(last, pos as u64)
+                if edge == Edge.none { break }
+                target := body.edge_target(edge) as u32
+                starts[target] = starts[target] + 1
+                incoming[starts[target] - 1] = .{ from: index as Block, edge: edge }
+            }
+        }
+        queue.clear()
+        queue.push(Block.entry)
+        reachable[Block.entry as u32] = true
+        while not queue.is_empty() {
+            last := body.last_inst(queue.pop())
+            if last == Inst.none { cont }
+            for pos in Range.new(0, 2) {
+                edge := body.successor(last, pos as u64)
+                if edge == Edge.none { break }
+                target := body.edge_target(edge) as u32
+                if reachable[target] { cont }
+                reachable[target] = true
+                queue.push(target as Block)
+            }
+        }
+        .{ starts: starts, incoming: incoming, reachable: reachable }
+    }
+
+    preds :: fn(self &Self, block Block) Slice(Incoming) {
+        index := id.slot(block)
+        first := self.starts[index]
+        Slice(Incoming).new(self.incoming + first as u64, (self.starts[index + 1] - first) as u64)
+    }
+}
+
+Source :: struct {
+    store Inst
+    param Val
+
+    value :: fn(self &Self, body &Function) Val {
+        if self.store == Inst.none { self.param } else { body.operand(self.store, 1) }
+    }
+}
+
+State :: struct {
+    slot  Val
+    last  Inst
+    live  bool
+    input Source
+}
+
+Promotion :: struct {
+    body  &Function
+    arena &Arena
+    next  &Inst
+    state &State
+    cfg   Maybe(CFG)
+    live  Vec(Block)
+    walk  Vec(Block)
+
+    block :: fn(self &Self, slot Val, block Block) &State {
+        state := self.state + id.slot(block)
+        if state.slot != slot {
+            *state = .{
+                slot: slot
+                last: Inst.none
+                live: false
+                input: .{ store: Inst.none, param: Val.none }
+            }
+        }
+        state
+    }
+
+    mark :: fn(self &Self, block Block, state &State) {
+        if state.live { ret }
+        state.live = true
+        self.live.push(block)
+    }
+
+    input :: fn(self &Self, cfg &CFG, block Block) Source {
+        current := block
+        source := self.state[id.slot(current)].input
+        self.walk.clear()
+        while source.store == Inst.none and source.param == Val.none {
+            self.walk.push(current)
+            pred := cfg.preds(current).get(0).from
+            state := self.state + id.slot(pred)
+            if state.last != Inst.none {
+                source.store = state.last
+                break
+            }
+            source = state.input
+            current = pred
+        }
+        for visited in self.walk { self.state[id.slot(visited)].input = source }
+        source
+    }
+
+    place :: fn(self &Self, address Val, item &Slot, stores u32) bool {
+        if self.cfg.is_none() {
+            self.cfg = Maybe(CFG).some(CFG.build(self.arena, self.body, &self.walk))
+        }
+        cfg := &self.cfg.value
+        cursor: u64 = 0
+        while cursor < self.live.len {
+            block := self.live.get(cursor)
+            cursor = cursor + 1
+            if block == Block.entry or not cfg.reachable[block as u32] { ret false }
+            for pred in cfg.preds(block) {
+                if not cfg.reachable[pred.from as u32] { ret false }
+                state := self.block(address, pred.from)
+                if state.last == Inst.none { self.mark(pred.from, state) }
+            }
+        }
+        if stores == 1 { ret true }
+        for block in self.live {
+            if cfg.preds(block).len > 1 {
+                self.state[id.slot(block)].input.param = self.body.append_parameter(block, item.ty)
+            }
+        }
+        for block in self.live {
+            self.input(cfg, block)
+            preds := cfg.preds(block)
+            if preds.len < 2 { cont }
+            for pred in preds {
+                state := self.state + id.slot(pred.from)
+                value := if state.last == Inst.none {
+                    self.input(cfg, pred.from).value(self.body)
+                } else {
+                    self.body.operand(state.last, 1)
+                }
+                self.body.append_argument(pred.edge, value)
+            }
+        }
+        true
+    }
+
+    rewrite :: fn(self &Self, address Val, item &Slot) bool {
+        body := self.body
+        self.live.clear()
+        store := Inst.none
+        stores: u32 = 0
+        inst := item.first
+        while inst != Inst.none {
+            block := body.inst_block(inst)
+            state := self.block(address, block)
+            if body.opcode(inst) == Op.store {
+                state.last = inst
+                store = inst
+                stores = stores + 1
+            } else if state.last == Inst.none {
+                self.mark(block, state)
+            }
+            inst = self.next[id.slot(inst)]
+        }
+        if not self.live.is_empty() {
+            if stores == 0 or not self.place(address, item, stores) { ret false }
+        }
+        last_block := Block.none
+        source: Source
+        inst = item.first
+        while inst != Inst.none {
+            block := body.inst_block(inst)
+            if block != last_block {
+                state := self.state + id.slot(block)
+                source = state.input
+                if state.live and stores == 1 { source.store = store }
+                last_block = block
+            }
+            if body.opcode(inst) == Op.store {
+                source.store = inst
+            } else {
+                if not body.replace_uses(body.result(inst), source.value(body)) { #fall }
+                if not body.remove(inst) { #fall }
+            }
+            inst = self.next[id.slot(inst)]
+        }
+        inst = item.first
+        while inst != Inst.none {
+            if body.inst_block(inst) != Block.none and not body.remove(inst) { #fall }
+            inst = self.next[id.slot(inst)]
+        }
+        if not body.remove(body.defining_inst(address)) { #fall }
+        true
+    }
+}
+
+run :: fn(body &Function, pointer_bytes u32) bool {
+    found := false
+    for op in body.graph.ops {
+        if op == Op.stack { found = true, break }
+    }
+    if not found { ret false }
+    arena := Arena.new(4096)
+    slots := table(Slot, &arena, body.value_count())
+    next := table(Inst, &arena, body.graph.ops.len)
+    for index in Range.new(1, ((body.graph.ops.len + 1) as i32)) {
+        inst := index as Inst
+        if body.opcode(inst) == Op.stack and body.inst_block(inst) != Block.none and
+            body.payload(inst, 2) == 0 {
+            slots[id.slot(body.result(inst))].size = body.payload(inst, 0)
+        }
+    }
+    for index in Range.new(1, ((body.block_count() + 1) as i32)) {
+        inst := body.first_inst(index as Block)
+        while inst != Inst.none {
+            op := body.opcode(inst)
+            if op == Op.load or op == Op.store {
+                address := body.operand(inst, 0)
+                item := slots + id.slot(address)
+                if item.size != 0 and not item.invalid {
+                    value := if op == Op.load { body.result(inst) } else { body.operand(inst, 1) }
+                    ty := body.value_type(value)
+                    if item.size != ops.bytes(ty, pointer_bytes) or
+                        (item.count != 0 and item.ty != ty) {
+                        item.invalid = true
+                    } else {
+                        item.ty = ty
+                        item.count = item.count + 1
+                        if item.last == Inst.none {
+                            item.first = inst
+                        } else {
+                            next[id.slot(item.last)] = inst
+                        }
+                        item.last = inst
+                    }
+                }
+            }
+            inst = body.next_inst(inst)
+        }
+    }
+    pass: Promotion = .{
+        body: body
+        arena: &arena
+        next: next
+        state: table(State, &arena, body.block_count())
+        cfg: Maybe(CFG).none()
+        live: Vec(Block).new()
+        walk: Vec(Block).new()
+    }
+    changed := false
+    count := body.value_count()
+    for index in Range.new(0, (count as i32)) {
+        item := slots + index as u64
+        if item.size == 0 or item.invalid { cont }
+        address := id.next_id(Val, index as u64)
+        uses := &body.graph.uses
+        use := uses.head(address)
+        actual: u32 = 0
+        while use != Use.none and actual <= item.count {
+            actual = actual + 1
+            use = uses.next.get(id.slot(use))
+        }
+        if actual == item.count and pass.rewrite(address, item) { changed = true }
+    }
+    pass.walk.destroy()
+    pass.live.destroy()
+    arena.destroy()
+    changed
+}

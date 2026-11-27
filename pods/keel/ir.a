@@ -8,63 +8,9 @@ Block :: id.Block
 Edge :: id.Edge
 Use :: id.Use
 Symbol :: id.Symbol
-
-Ty :: enum u8 {
-    void_
-    i1
-    i8_
-    i16_
-    i32_
-    i64_
-    i128_
-    u8_
-    u16_
-    u32_
-    u64_
-    u128_
-    f32_
-    f64_
-    ptr
-}
-Op :: enum u8 {
-    iadd
-    sub
-    mul
-    div
-    rem
-    eq
-    ne
-    lt
-    le
-    gt
-    ge
-    band
-    bor
-    bxor
-    shl
-    shr
-    neg
-    invert
-    cast
-    constant
-    stack
-    address
-    offset
-    load
-    store
-    copy
-    copy_bytes
-    zero
-    call
-    call_indirect
-    jump
-    branch
-    ret_
-    trap
-    abi_size
-    abi_field
-    c_value
-}
+Ty :: @import("./ops").Ty
+Op :: @import("./ops").Op
+fold :: @import("./opt/fold")
 
 terminates :: fn(op Op) bool {
     op as u8 >= Op.jump as u8 and op as u8 <= Op.trap as u8
@@ -91,9 +37,12 @@ Graph :: struct {
     defs        Vec(Inst)
     param_start Vec(u32)
     param_count Vec(u32)
+    param_space Vec(u32)
+    params      Vec(Val)
     targets     Vec(Block)
     arg_start   Vec(u32)
     arg_count   Vec(u32)
+    arg_space   Vec(u32)
     uses        Uses
 
     new :: fn() Self {
@@ -105,9 +54,12 @@ Graph :: struct {
             defs: Vec(Inst).new()
             param_start: Vec(u32).new()
             param_count: Vec(u32).new()
+            param_space: Vec(u32).new()
+            params: Vec(Val).new()
             targets: Vec(Block).new()
             arg_start: Vec(u32).new()
             arg_count: Vec(u32).new()
+            arg_space: Vec(u32).new()
             uses: Uses.new()
         }
     }
@@ -120,9 +72,12 @@ Graph :: struct {
         self.defs.destroy()
         self.param_start.destroy()
         self.param_count.destroy()
+        self.param_space.destroy()
+        self.params.destroy()
         self.targets.destroy()
         self.arg_start.destroy()
         self.arg_count.destroy()
+        self.arg_space.destroy()
         self.uses.destroy()
     }
 
@@ -154,6 +109,7 @@ Graph :: struct {
         self.targets.push(target)
         self.arg_start.push(0)
         self.arg_count.push(0)
+        self.arg_space.push(0)
         self.set_edge(edge, target, args)
         edge
     }
@@ -162,9 +118,9 @@ Graph :: struct {
         at := id.slot(edge)
         first := self.arg_start.get(at)
         previous := self.arg_count.get(at) as u64
-        if args.len <= previous {
+        if args.len <= self.arg_space.get(at) as u64 {
             pos: u64 = 0
-            while pos < previous {
+            while pos < previous or pos < args.len {
                 value := if pos < args.len { args.get(pos) } else { Val.none }
                 self.uses.set((first + pos as u32) as Use, value)
                 pos = pos + 1
@@ -178,10 +134,51 @@ Graph :: struct {
             }
             first = id.next_id(Use, self.uses.values.len) as u32
             for value in args { self.uses.add(value) }
+            self.arg_space.set(at, args.len as u32)
         }
         self.targets.set(at, target)
         self.arg_start.set(at, first)
         self.arg_count.set(at, args.len as u32)
+    }
+
+    remove_edge_arg :: fn(self &Self, edge Edge, position u32) {
+        at := id.slot(edge)
+        count := self.arg_count.get(at)
+        if position >= count { #fall }
+        first := self.arg_start.get(at)
+        pos := position
+        while pos + 1 < count {
+            next := self.uses.value(first + pos + 1)
+            self.uses.set((first + pos) as Use, next)
+            pos = pos + 1
+        }
+        self.uses.set((first + count - 1) as Use, Val.none)
+        self.arg_count.set(at, count - 1)
+    }
+
+    append_arg :: fn(self &Self, edge Edge, value Val) {
+        at := id.slot(edge)
+        count := self.arg_count.get(at)
+        first := self.arg_start.get(at)
+        if count == self.arg_space.get(at) {
+            start := id.next_id(Use, self.uses.values.len) as u32
+            space := count * 2 + 1
+            pos: u32 = 0
+            while pos < count {
+                self.uses.add(self.uses.value(first + pos))
+                self.uses.set((first + pos) as Use, Val.none)
+                pos = pos + 1
+            }
+            while pos < space {
+                self.uses.add(Val.none)
+                pos = pos + 1
+            }
+            self.arg_start.set(at, start)
+            self.arg_space.set(at, space)
+            first = start
+        }
+        self.uses.set((first + count) as Use, value)
+        self.arg_count.set(at, count + 1)
     }
 }
 
@@ -211,6 +208,7 @@ Function :: struct {
         block := id.next_id(Block, self.graph.param_count.len)
         self.graph.param_start.push(self.graph.types.len as u32)
         self.graph.param_count.push(params.len as u32)
+        self.graph.param_space.push(0)
         for ty in params {
             if ty == Ty.void_ { #fall }
             self.graph.value(ty, Inst.none)
@@ -233,7 +231,96 @@ Function :: struct {
 
     parameter :: fn(self &Self, block Block, position u32) Val {
         if position >= self.parameter_count(block) { #fall }
-        (self.graph.param_start.get(id.slot(block)) + position + 1) as Val
+        at := id.slot(block)
+        first := self.graph.param_start.get(at) + position
+        if self.graph.param_space.get(at) == 0 { ret (first + 1) as Val }
+        self.graph.params.get(first as u64)
+    }
+
+    append_parameter :: fn(self &Self, block Block, ty Ty) Val {
+        if block == Block.entry or ty == Ty.void_ { #fall }
+        graph := &self.graph
+        at := id.slot(block)
+        count := self.parameter_count(block)
+        space := graph.param_space.get(at)
+        first := graph.param_start.get(at)
+        if space == 0 or count == space {
+            first = graph.params.len as u32
+            space = count * 2 + 1
+            graph.params.reserve(space as u64)
+            pos: u32 = 0
+            while pos < count {
+                graph.params.push(self.parameter(block, pos))
+                pos = pos + 1
+            }
+            while pos < space {
+                graph.params.push(Val.none)
+                pos = pos + 1
+            }
+            graph.param_space.set(at, space)
+            graph.param_start.set(at, first)
+        }
+        param := graph.value(ty, Inst.none)
+        graph.params.set((first + count) as u64, param)
+        graph.param_count.set(at, count + 1)
+        param
+    }
+
+    append_argument :: fn(self &Self, edge Edge, value Val) {
+        target := self.edge_target(edge)
+        pos := self.argument_count(edge)
+        if self.value_type(self.parameter(target, pos)) != self.value_type(value) { #fall }
+        self.graph.append_arg(edge, value)
+    }
+
+    remove_parameter :: fn(self &Self, block Block, position u32) {
+        if block == Block.entry { #fall }
+        count := self.parameter_count(block)
+        if position >= count { #fall }
+        removed := self.parameter(block, position)
+        if self.has_uses(removed) { #fall }
+        graph := &self.graph
+        at := id.slot(block)
+        space := graph.param_space.get(at)
+        if space == 0 {
+            first := graph.params.len as u32
+            kept := if count > 1 { count - 1 } else { 0 }
+            if kept > 0 {
+                graph.params.reserve(kept as u64)
+                pos: u32 = 0
+                while pos < count {
+                    if pos != position { graph.params.push(self.parameter(block, pos)) }
+                    pos = pos + 1
+                }
+            }
+            graph.param_start.set(at, first)
+            graph.param_space.set(at, if kept == 0 { 1 as u32 } else { kept })
+        } else {
+            first := graph.param_start.get(at)
+            pos := position
+            while pos + 1 < count {
+                graph.params.set((first + pos) as u64, graph.params.get((first + pos + 1) as u64))
+                pos = pos + 1
+            }
+            graph.params.set((first + count - 1) as u64, Val.none)
+        }
+        graph.types.set(id.slot(removed), Ty.void_)
+        graph.defs.set(id.slot(removed), Inst.none)
+        graph.param_count.set(at, count - 1)
+    }
+
+    clear_parameters :: fn(self &Self, block Block) {
+        if block == Block.entry { #fall }
+        count := self.parameter_count(block)
+        pos: u32 = 0
+        while pos < count {
+            param := self.parameter(block, pos)
+            if self.has_uses(param) { #fall }
+            self.graph.types.set(id.slot(param), Ty.void_)
+            self.graph.defs.set(id.slot(param), Inst.none)
+            pos = pos + 1
+        }
+        self.graph.param_count.set(id.slot(block), 0)
     }
 
     begin :: fn(self &Self, block Block) {
@@ -277,6 +364,7 @@ Function :: struct {
     }
 
     defining_inst :: fn(self &Self, value Val) Inst {
+        if value == Val.none { ret Inst.none }
         self.graph.defs.get(id.slot(value))
     }
 
@@ -316,17 +404,60 @@ Function :: struct {
             ty
         }
         if not binary(op) { #fall }
+        folded := self.fold_values(op, value, lhs, rhs)
+        if folded.is_some() { ret self.constant(value, folded.value) }
         self.emit(op, value, self.graph.uses.add(lhs), self.graph.uses.add(rhs), 0)
     }
 
     unary :: fn(self &Self, op Op, value Val) Val {
         if op != Op.neg and op != Op.invert { #fall }
-        self.emit(op, self.value_type(value), self.graph.uses.add(value), 0, 0)
+        ty := self.value_type(value)
+        folded := self.fold_values(op, ty, value, Val.none)
+        if folded.is_some() { ret self.constant(ty, folded.value) }
+        self.emit(op, ty, self.graph.uses.add(value), 0, 0)
     }
 
     cast :: fn(self &Self, ty Ty, value Val) Val {
         if self.value_type(value) == ty { ret value }
+        folded := self.fold_values(Op.cast, ty, value, Val.none)
+        if folded.is_some() { ret self.constant(ty, folded.value) }
         self.emit(Op.cast, ty, self.graph.uses.add(value), 0, 0)
+    }
+
+    fold_values :: fn(self &Self, op Op, ty Ty, lhs, rhs Val) Maybe(u64) {
+        left := self.defining_inst(lhs)
+        if left == Inst.none or self.opcode(left) != Op.constant { ret Maybe(u64).none() }
+        bits := self.constant_bits(left)
+        source := self.value_type(lhs)
+        if rhs == Val.none { ret fold.unary(op, source, ty, bits) }
+        right := self.defining_inst(rhs)
+        if right == Inst.none or self.opcode(right) != Op.constant { ret Maybe(u64).none() }
+        fold.binary(op, source, bits, self.constant_bits(right))
+    }
+
+    constant_bits :: fn(self &Self, inst Inst) u64 {
+        self.payload(inst, 0) as u64 | (self.payload(inst, 1) as u64 << 32)
+    }
+
+    fold_inst :: fn(self &Self, inst Inst) bool {
+        op := self.opcode(inst)
+        if not binary(op) and op != Op.neg and op != Op.invert and op != Op.cast { ret false }
+        value := self.result(inst)
+        folded := self.fold_values(
+            op
+            self.value_type(value)
+            self.operand(inst, 0)
+            self.operand(inst, 1)
+        )
+        if folded.is_none() { ret false }
+        for pos in Range.new(0, (fixed_uses(op) as i32)) {
+            self.graph.uses.set(self.payload(inst, pos as u64) as Use, Val.none)
+        }
+        self.graph.ops.set(id.slot(inst), Op.constant)
+        word := id.slot(inst) * 3
+        self.graph.words.set(word, folded.value as u32)
+        self.graph.words.set(word + 1, (folded.value >> 32) as u32)
+        true
     }
 
     constant :: fn(self &Self, ty Ty, bits u64) Val {
@@ -443,9 +574,7 @@ Function :: struct {
     }
 
     iadd :: fn(self &Self, lhs, rhs Val) Val {
-        inst := self.make_iadd(lhs, rhs)
-        self.append(inst)
-        self.result(inst)
+        self.binary(Op.iadd, lhs, rhs)
     }
 
     insert_iadd_before :: fn(self &Self, before Inst, lhs, rhs Val) Val {
@@ -537,6 +666,74 @@ Function :: struct {
         if not self.accepts(target, args) { ret false }
         self.graph.set_edge(edge, target, args)
         true
+    }
+
+    fold_branch :: fn(self &Self, inst Inst, keep u64) bool {
+        if self.inst_block(inst) == Block.none or self.opcode(inst) != Op.branch or keep > 1 {
+            ret false
+        }
+        self.graph.uses.set(self.payload(inst, 0) as Use, Val.none)
+        kept := self.successor(inst, keep)
+        dropped := self.successor(inst, 1 - keep)
+        self.graph.set_edge(dropped, Block.none, Slice(Val).empty())
+        self.graph.ops.set(id.slot(inst), Op.jump)
+        word := id.slot(inst) * 3
+        self.graph.words.set(word, kept as u32)
+        self.graph.words.set(word + 1, 0)
+        self.graph.words.set(word + 2, 0)
+        true
+    }
+
+    swap_branch :: fn(self &Self, inst Inst, cond Val) bool {
+        if self.inst_block(inst) == Block.none or self.opcode(inst) != Op.branch or
+            self.value_type(cond) != Ty.i1 {
+            ret false
+        }
+        self.graph.uses.set(self.payload(inst, 0) as Use, cond)
+        word := id.slot(inst) * 3
+        first := self.graph.words.get(word + 1)
+        second := self.graph.words.get(word + 2)
+        self.graph.words.set(word + 1, second)
+        self.graph.words.set(word + 2, first)
+        true
+    }
+
+    splice_block :: fn(self &Self, dest Block, jump Inst, source Block) {
+        if dest == source or self.inst_block(jump) != dest or self.opcode(jump) != Op.jump {
+            #fall
+        }
+        if not self.remove(jump) { #fall }
+        inst := self.first_inst(source)
+        while inst != Inst.none {
+            next := self.next_inst(inst)
+            self.layout.unlink(inst)
+            self.layout.append(dest, inst)
+            inst = next
+        }
+        self.clear_parameters(source)
+    }
+
+    strip_uses :: fn(self &Self, inst Inst) {
+        op := self.opcode(inst)
+        pos: u64 = 0
+        if op == Op.call or op == Op.call_indirect {
+            while pos < self.graph.word(inst, 2) as u64 {
+                self.graph.uses.set((self.graph.word(inst, 1) + pos as u32) as Use, Val.none)
+                pos = pos + 1
+            }
+        } else {
+            while pos < fixed_uses(op) {
+                self.graph.uses.set(self.graph.word(inst, pos) as Use, Val.none)
+                pos = pos + 1
+            }
+        }
+        pos = 0
+        edge := self.successor(inst, pos)
+        while edge != Edge.none {
+            self.graph.set_edge(edge, Block.none, Slice(Val).empty())
+            pos = pos + 1
+            edge = self.successor(inst, pos)
+        }
     }
 
     jump :: fn(self &Self, target Block) {

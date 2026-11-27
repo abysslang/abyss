@@ -1,6 +1,8 @@
 HirExprKind :: hir.HirExprKind
 Program :: keel.Program
 keel :: @import("pods/keel")
+opt :: @import("pods/keel/opt/pipeline")
+Arch :: @import("core/target").Arch
 hir :: @import("compiler/hir")
 storage :: @import("./layout")
 Field :: storage.Field
@@ -280,8 +282,13 @@ Context :: struct {
     local :: fn(self &Self, name, ty u32, value Val) {
         address := self.slot(ty, name)
         self.locals.insert(self.db.get_hir_symbol(name), address)
-        if value != Val.none { self.write(ty, name, address, value) } else {
+        if value != Val.none {
+            self.write(ty, name, address, value)
+        } else if storage.aggregate(self.db, ty) {
             self.zero(ty, name, address)
+        } else {
+            scalar := storage.scalar(self.db, ty, name)
+            if scalar != Ty.void_ { self.out.store(address, self.out.constant(scalar, 0)) }
         }
     }
 
@@ -1173,6 +1180,7 @@ lower :: fn(db &Nexus, arena &Arena, file, entry, selected u32) Program {
     module.abi_types.destroy()
     module.abi_layouts.destroy()
     module.metadata.destroy()
+    opt.run(&module.air, if db.target_arch == Arch.wasm32 { 4 } else { 8 })
     module.air
 }
 

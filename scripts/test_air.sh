@@ -9,13 +9,7 @@ mkdir -p "$work"
 diff -u - "$work/demo.out" <<'AIR'
 air add
 b0(v0: i32, v1: i32):
-  v2 = stack 4, align 4
-  store v2, v0
-  v3 = stack 4, align 4
-  store v3, v1
-  v4 = load i32 v2
-  v5 = load i32 v3
-  v6 = iadd i32 v4, v5
+  v6 = iadd i32 v0, v1
   ret v6
 AIR
 
@@ -29,17 +23,8 @@ ABYSS
 diff -u - "$work/custom.out" <<'AIR'
 air sum
 b0(v0: i32, v1: i32, v2: i32):
-  v3 = stack 4, align 4
-  store v3, v0
-  v4 = stack 4, align 4
-  store v4, v1
-  v5 = stack 4, align 4
-  store v5, v2
-  v6 = load i32 v4
-  v7 = load i32 v5
-  v8 = load i32 v3
-  v9 = iadd i32 v7, v8
-  v10 = iadd i32 v6, v9
+  v9 = iadd i32 v2, v0
+  v10 = iadd i32 v1, v9
   ret v10
 AIR
 
@@ -47,22 +32,10 @@ AIR
 diff -u - "$work/select.out" <<'AIR'
 air select
 b0(v0: i1, v1: i32, v2: i32):
-  v3 = stack 1, align 1
-  store v3, v0
-  v4 = stack 4, align 4
-  store v4, v1
-  v5 = stack 4, align 4
-  store v5, v2
-  v6 = load i1 v3
-  branch v6, b1, b2
+  branch v0, b1, b3(v2)
 b1:
-  v8 = load i32 v4
-  v9 = load i32 v5
-  v10 = iadd i32 v8, v9
+  v10 = iadd i32 v1, v2
   jump b3(v10)
-b2:
-  v11 = load i32 v5
-  jump b3(v11)
 b3(v7: i32):
   ret v7
 AIR
@@ -78,16 +51,90 @@ if "$compiler" --dump-air "$work/functions.a" missing > "$work/missing.log" 2>&1
 fi
 grep -Fq "function 'missing' not found" "$work/missing.log"
 
+for name in diamond swap_loop folded; do
+    "$compiler" --dump-air "$PWD/tests/air_optimizations.a" "$name" > "$work/$name.air"
+    if grep -Eq ' = (stack|load) |^  store ' "$work/$name.air"; then
+        cat "$work/$name.air"
+        exit 1
+    fi
+done
+grep -Eq '^b[1-9][0-9]*\(v[0-9]+: i32\):' "$work/diamond.air"
+grep -Eq '^b[1-9][0-9]*\(v[0-9]+: i32, v[0-9]+: i32, v[0-9]+: i32\):' "$work/swap_loop.air"
+grep -Fq '= const i32 42' "$work/folded.air"
+if grep -Eq ' = (iadd|mul|shr|cast) ' "$work/folded.air"; then
+    cat "$work/folded.air"
+    exit 1
+fi
+"$compiler" --dump-air "$PWD/tests/air_optimizations.a" escaped > "$work/escaped.air"
+grep -Fq '= stack 4, align 4' "$work/escaped.air"
+grep -Fq '= load i32' "$work/escaped.air"
+
+"$compiler" --dump-air "$PWD/tests/air_optimizations.a" dce_chain > "$work/dce_chain.air"
+if grep -Eq ' = (mul|xor|stack|load) |^  store ' "$work/dce_chain.air"; then
+    cat "$work/dce_chain.air"
+    exit 1
+fi
+if [ "$(grep -cE '^b[0-9]+' "$work/dce_chain.air")" -ne 1 ]; then
+    cat "$work/dce_chain.air"
+    exit 1
+fi
+
+"$compiler" --dump-air "$PWD/tests/air_optimizations.a" dead_loop_var > "$work/dead_loop_var.air"
+if ! grep -Eq '^b[1-9][0-9]*\(v[0-9]+: i32, v[0-9]+: i32\):$' "$work/dead_loop_var.air"; then
+    cat "$work/dead_loop_var.air"
+    exit 1
+fi
+
+"$compiler" --dump-air "$PWD/tests/air_optimizations.a" cfg_simplify > "$work/cfg_simplify.air"
+if grep -Eq 'mul|invert|99' "$work/cfg_simplify.air"; then
+    cat "$work/cfg_simplify.air"
+    exit 1
+fi
+
+"$compiler" --dump-air "$PWD/tests/air_optimizations.a" keep_effects > "$work/keep_effects.air"
+grep -Fq 'div i32' "$work/keep_effects.air"
+
+cat > "$work/prune.a" <<'ABYSS'
+dead_helper :: fn(x i32) i32 { x * 77 + 1 }
+live_helper :: fn(x i32) i32 { x + 1 }
+main :: fn() {
+    a := if 1 > 2 { dead_helper(3) } else { live_helper(4) }
+    print(a)
+}
+ABYSS
+"$compiler" --dump-air "$work/prune.a" > "$work/prune.air"
+if grep -Fq 'dead_helper' "$work/prune.air"; then
+    cat "$work/prune.air"
+    exit 1
+fi
+grep -Fq 'live_helper' "$work/prune.air"
+
 cat > "$work/edges.a" <<'ABYSS'
 keel :: @import("pods/keel")
 c99 :: @import("pods/keel/target/c99")
+mem2reg :: @import("pods/keel/opt/mem2reg")
+fall :: @import("std/sys").fall
 abi :: @import("pods/keel/abi_types")
 Arena :: @import("std/allocator").Arena
 Os :: @import("core/target").Os
 Ty :: keel.Ty
 Val :: keel.Val
 
+preserve :: fn() i32 {
+    body := keel.Function.new()
+    block := body.block()
+    body.begin(block)
+    location := body.stack(4, 4)
+    value := body.load(Ty.i32_, location)
+    body.store(location, body.constant(Ty.i32_, 1))
+    body.ret_value(value)
+    changed := mem2reg.run(&body, 8)
+    body.destroy()
+    if changed { 1 } else { 0 }
+}
+
 main :: fn() {
+    if preserve() != 0 { #fall }
     air := keel.Program.new()
     body := keel.Function.new()
     ty := Ty.i32_

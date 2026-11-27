@@ -1,0 +1,397 @@
+ir :: @import("../ir")
+id :: @import("../id")
+ops :: @import("../ops")
+mem :: @import("std/mem")
+Arena :: @import("std/allocator").Arena
+fall :: @import("std/sys").fall
+Function :: ir.Function
+Block :: id.Block
+Edge :: id.Edge
+Inst :: id.Inst
+Use :: id.Use
+Val :: id.Val
+Ty :: ops.Ty
+Op :: ops.Op
+
+table :: fn(T type, arena &Arena, count u64) &T {
+    size := count * @sizeof(T)
+    ptr := arena.alloc(size)
+    mem.mem_set(ptr, 0, size)
+    ptr as &T
+}
+
+Incoming :: struct {
+    from Block
+    edge Edge
+}
+
+GraphInfo :: struct {
+    starts    &u32
+    incoming  &Incoming
+    reachable &bool
+
+    fill :: fn(self &Self, body &Function, queue &Vec(Block)) {
+        count := body.block_count()
+        mem.mem_set(self.starts as &u8, 0, (count + 2) * @sizeof(u32))
+        mem.mem_set(self.reachable as &u8, 0, (count + 1) * @sizeof(bool))
+        queue.clear()
+        queue.push(Block.entry)
+        self.reachable[Block.entry as u32] = true
+        while not queue.is_empty() {
+            block := queue.pop()
+            last := body.last_inst(block)
+            if last == Inst.none { cont }
+            for pos in Range.new(0, 2) {
+                edge := body.successor(last, pos as u64)
+                if edge == Edge.none { break }
+                target := body.edge_target(edge) as u32
+                self.starts[target + 1] = self.starts[target + 1] + 1
+                if not self.reachable[target] {
+                    self.reachable[target] = true
+                    queue.push(target as Block)
+                }
+            }
+        }
+        for index in Range.new(1, ((count + 1) as i32)) {
+            self.starts[index + 1] = self.starts[index + 1] + self.starts[index]
+        }
+        for index in Range.new(1, ((count + 1) as i32)) {
+            block := index as Block
+            if not self.reachable[index] { cont }
+            last := body.last_inst(block)
+            if last == Inst.none { cont }
+            for pos in Range.new(0, 2) {
+                edge := body.successor(last, pos as u64)
+                if edge == Edge.none { break }
+                target := body.edge_target(edge) as u32
+                self.starts[target] = self.starts[target] + 1
+                self.incoming[self.starts[target] - 1] = .{ from: block, edge: edge }
+            }
+        }
+    }
+
+    preds :: fn(self &Self, block Block) Slice(Incoming) {
+        index := id.slot(block)
+        first := self.starts[index]
+        Slice(Incoming).new(self.incoming + first as u64, (self.starts[index + 1] - first) as u64)
+    }
+}
+
+prune_unreachable :: fn(body &Function, reachable &bool) bool {
+    changed := false
+    count := body.block_count()
+    for index in Range.new(2, ((count + 1) as i32)) {
+        block := index as Block
+        if reachable[index] { cont }
+        if body.first_inst(block) == Inst.none and body.parameter_count(block) == 0 { cont }
+        changed = true
+        inst := body.first_inst(block)
+        while inst != Inst.none {
+            body.strip_uses(inst)
+            inst = body.next_inst(inst)
+        }
+    }
+    if not changed { ret false }
+    for index in Range.new(2, ((count + 1) as i32)) {
+        block := index as Block
+        if reachable[index] { cont }
+        inst := body.last_inst(block)
+        while inst != Inst.none {
+            prev := body.prev_inst(inst)
+            value := body.result(inst)
+            if value != Val.none and not body.has_uses(value) {
+                body.graph.types.set(id.slot(value), Ty.void_)
+                body.graph.defs.set(id.slot(value), Inst.none)
+            }
+            if value == Val.none or not body.has_uses(value) { body.layout.unlink(inst) }
+            inst = prev
+        }
+        body.clear_parameters(block)
+    }
+    true
+}
+
+same_edges :: fn(body &Function, a, b Edge) bool {
+    target := body.edge_target(a)
+    if target != body.edge_target(b) { ret false }
+    count := body.argument_count(a)
+    if count != body.argument_count(b) { ret false }
+    pos: u32 = 0
+    while pos < count {
+        if body.argument(a, pos) != body.argument(b, pos) { ret false }
+        pos = pos + 1
+    }
+    true
+}
+
+simplify_branches :: fn(body &Function, reachable &bool) bool {
+    changed := false
+    count := body.block_count()
+    for index in Range.new(1, ((count + 1) as i32)) {
+        if not reachable[index] { cont }
+        last := body.last_inst(index as Block)
+        if last == Inst.none or body.opcode(last) != Op.branch { cont }
+        cond := body.operand(last, 0)
+        def := body.defining_inst(cond)
+        if def != Inst.none and body.opcode(def) == Op.constant {
+            keep := if (body.constant_bits(def) & 1) != 0 { 0 as u64 } else { 1 as u64 }
+            if body.fold_branch(last, keep) { changed = true }
+            cont
+        }
+        yes := body.successor(last, 0)
+        no := body.successor(last, 1)
+        if same_edges(body, yes, no) {
+            if body.fold_branch(last, 0) { changed = true }
+            cont
+        }
+        if def != Inst.none and body.opcode(def) == Op.invert and body.value_type(cond) == Ty.i1 {
+            inner := body.operand(def, 0)
+            if body.swap_branch(last, inner) { changed = true }
+        }
+    }
+    changed
+}
+
+total_uses :: fn(body &Function, val Val) u32 {
+    uses := &body.graph.uses
+    use := uses.head(val)
+    count: u32 = 0
+    while use != Use.none {
+        count = count + 1
+        use = uses.next.get(id.slot(use))
+    }
+    count
+}
+
+is_pure_jump_block :: fn(body &Function, block Block) bool {
+    if block == Block.entry { ret false }
+    first := body.first_inst(block)
+    if first == Inst.none or first != body.last_inst(block) or body.opcode(first) != Op.jump {
+        ret false
+    }
+    pcount := body.parameter_count(block)
+    if pcount == 0 { ret true }
+    edge := body.successor(first, 0)
+    acount := body.argument_count(edge)
+    pos: u32 = 0
+    while pos < pcount {
+        param := body.parameter(block, pos)
+        local: u32 = 0
+        apos: u32 = 0
+        while apos < acount {
+            if body.argument(edge, apos) == param { local = local + 1 }
+            apos = apos + 1
+        }
+        if total_uses(body, param) != local { ret false }
+        pos = pos + 1
+    }
+    true
+}
+
+map_jump_args :: fn(
+    body &Function
+    target Block
+    incoming &Vec(Val)
+    jump Inst
+    scratch &Vec(Val)
+) {
+    edge := body.successor(jump, 0)
+    count := body.argument_count(edge)
+    param_count := body.parameter_count(target)
+    scratch.clear()
+    pos: u32 = 0
+    while pos < count {
+        arg := body.argument(edge, pos)
+        mapped := arg
+        p: u32 = 0
+        while p < param_count {
+            if arg == body.parameter(target, p) {
+                mapped = incoming.get(p as u64)
+                break
+            }
+            p = p + 1
+        }
+        scratch.push(mapped)
+        pos = pos + 1
+    }
+}
+
+thread_edge :: fn(
+    body &Function
+    edge Edge
+    seen &bool
+    cur &Vec(Val)
+    next &Vec(Val)
+) bool {
+    target := body.edge_target(edge)
+    if target == Block.none or not is_pure_jump_block(body, target) { ret false }
+    first_jump := body.last_inst(target)
+    if body.edge_target(body.successor(first_jump, 0)) == target { ret false }
+    count := body.block_count()
+    mem.mem_set(seen as &u8, 0, (count + 1) * @sizeof(bool))
+    cur.clear()
+    edge_count := body.argument_count(edge)
+    pos: u32 = 0
+    while pos < edge_count {
+        cur.push(body.argument(edge, pos))
+        pos = pos + 1
+    }
+    final_target := target
+    while is_pure_jump_block(body, final_target) and not seen[final_target as u32] {
+        seen[final_target as u32] = true
+        jump := body.last_inst(final_target)
+        hop := body.edge_target(body.successor(jump, 0))
+        if hop == final_target { break }
+        map_jump_args(body, final_target, cur, jump, next)
+        cur.clear()
+        for v in next { cur.push(v) }
+        final_target = hop
+    }
+    if final_target == target { ret false }
+    body.retarget(edge, final_target, cur.as_slice())
+}
+
+thread_jumps :: fn(
+    body &Function
+    reachable &bool
+    seen &bool
+    cur &Vec(Val)
+    next &Vec(Val)
+) bool {
+    changed := false
+    count := body.block_count()
+    for index in Range.new(1, ((count + 1) as i32)) {
+        if not reachable[index] { cont }
+        last := body.last_inst(index as Block)
+        if last == Inst.none { cont }
+        for pos in Range.new(0, 2) {
+            edge := body.successor(last, pos as u64)
+            if edge == Edge.none { break }
+            if thread_edge(body, edge, seen, cur, next) { changed = true }
+        }
+    }
+    changed
+}
+
+dominates_entry_or_unique :: fn(body &Function, val Val, non_self_preds u32) bool {
+    if non_self_preds <= 1 { ret true }
+    def := body.defining_inst(val)
+    if def == Inst.none { ret id.slot(val) < body.parameter_count(Block.entry) as u64 }
+    body.inst_block(def) == Block.entry
+}
+
+simplify_block_params :: fn(body &Function, info &GraphInfo) bool {
+    changed := false
+    count := body.block_count()
+    for index in Range.new(2, ((count + 1) as i32)) {
+        block := index as Block
+        if not info.reachable[index] { cont }
+        pcount := body.parameter_count(block)
+        if pcount == 0 { cont }
+        preds := info.preds(block)
+        if preds.len == 0 { cont }
+        pos := pcount
+        while pos > 0 {
+            pos = pos - 1
+            param := body.parameter(block, pos)
+            candidate := Val.none
+            conflict := false
+            non_self: u32 = 0
+            for pred in preds {
+                arg := body.argument(pred.edge, pos)
+                if pred.from == block and arg == param { cont }
+                if pred.from != block { non_self = non_self + 1 }
+                if candidate == Val.none {
+                    candidate = arg
+                } else if candidate != arg {
+                    conflict = true
+                    break
+                }
+            }
+            if conflict or candidate == Val.none { cont }
+            if not dominates_entry_or_unique(body, candidate, non_self) { cont }
+            if body.replace_uses(param, candidate) {
+                for pred in preds { body.graph.remove_edge_arg(pred.edge, pos) }
+                body.remove_parameter(block, pos)
+                changed = true
+            }
+        }
+    }
+    changed
+}
+
+merge_blocks :: fn(body &Function, info &GraphInfo, merged &Block) bool {
+    changed := false
+    count := body.block_count()
+    mem.mem_set(merged as &u8, 0, (count + 1) * @sizeof(Block))
+    for index in Range.new(2, ((count + 1) as i32)) {
+        succ := index as Block
+        if not info.reachable[index] { cont }
+        preds := info.preds(succ)
+        if preds.len != 1 { cont }
+        pred := preds.get(0).from
+        while merged[pred as u32] != Block.none { pred = merged[pred as u32] }
+        edge := preds.get(0).edge
+        if pred == succ or not info.reachable[pred as u32] { cont }
+        jump := body.last_inst(pred)
+        if jump == Inst.none or body.opcode(jump) != Op.jump { cont }
+        pcount := body.parameter_count(succ)
+        pos: u32 = 0
+        while pos < pcount {
+            param := body.parameter(succ, pos)
+            arg := body.argument(edge, pos)
+            if not body.replace_uses(param, arg) { #fall }
+            pos = pos + 1
+        }
+        body.splice_block(pred, jump, succ)
+        merged[index] = pred
+        info.reachable[index] = false
+        changed = true
+    }
+    changed
+}
+
+run :: fn(body &Function) bool {
+    count := body.block_count()
+    if count == 0 { ret false }
+    arena := Arena.new(4096)
+    info: GraphInfo = .{
+        starts: table(u32, &arena, count + 2)
+        incoming: table(Incoming, &arena, body.graph.targets.len + 1)
+        reachable: table(bool, &arena, count + 1)
+    }
+    seen := table(bool, &arena, count + 1)
+    merged := table(Block, &arena, count + 1)
+    queue := Vec(Block).new()
+    cur := Vec(Val).new()
+    next := Vec(Val).new()
+    changed := false
+    pass_changed := true
+    while pass_changed {
+        pass_changed = false
+        info.fill(body, &queue)
+        if prune_unreachable(body, info.reachable) { pass_changed = true }
+        if simplify_branches(body, info.reachable) {
+            pass_changed = true
+            info.fill(body, &queue)
+            if prune_unreachable(body, info.reachable) { pass_changed = true }
+        }
+        if simplify_block_params(body, &info) { pass_changed = true }
+        if thread_jumps(body, info.reachable, seen, &cur, &next) {
+            pass_changed = true
+            info.fill(body, &queue)
+            if prune_unreachable(body, info.reachable) { pass_changed = true }
+            if simplify_branches(body, info.reachable) {
+                info.fill(body, &queue)
+                prune_unreachable(body, info.reachable)
+            }
+        }
+        if merge_blocks(body, &info, merged) { pass_changed = true }
+        if pass_changed { changed = true }
+    }
+    queue.destroy()
+    cur.destroy()
+    next.destroy()
+    arena.destroy()
+    changed
+}

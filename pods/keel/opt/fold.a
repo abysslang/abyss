@@ -1,0 +1,75 @@
+ops :: @import("../ops")
+Ty :: ops.Ty
+Op :: ops.Op
+
+mask :: fn(width u32) u64 {
+    if width == 64 { ~(0 as u64) } else { ((1 as u64) << width as u64) - 1 }
+}
+
+signed_value :: fn(bits u64, width u32) i64 {
+    shift := 64 - width
+    ((bits << shift as u64) as i64) >> shift as i64
+}
+
+binary :: fn(op Op, ty Ty, lhs, rhs u64) Maybe(u64) {
+    width := ops.bits(ty)
+    if width == 0 or width > 64 { ret Maybe(u64).none() }
+    if op as u8 > Op.shr as u8 or
+        (ty == Ty.i1 and (op as u8 < Op.eq as u8 or op == Op.shl or op == Op.shr)) {
+        ret Maybe(u64).none()
+    }
+    limit := mask(width)
+    left := lhs & limit
+    right := rhs & limit
+    signed := ops.signed(ty)
+    x := signed_value(left, width)
+    y := signed_value(right, width)
+    count := right & (width - 1) as u64
+    if (op == Op.div or op == Op.rem) and
+        (right == 0 or (signed and left == ((1 as u64) << (width - 1) as u64) and right == limit)) {
+        ret Maybe(u64).none()
+    }
+    result := match op {
+        iadd { left + right }
+        sub { left - right }
+        mul { left * right }
+        div { if signed { (x / y) as u64 } else { left / right } }
+        rem { if signed { (x % y) as u64 } else { left % right } }
+        eq { (left == right) as u64 }
+        ne { (left != right) as u64 }
+        lt { (if signed { x < y } else { left < right }) as u64 }
+        le { (if signed { x <= y } else { left <= right }) as u64 }
+        gt { (if signed { x > y } else { left > right }) as u64 }
+        ge { (if signed { x >= y } else { left >= right }) as u64 }
+        band { left & right }
+        bor { left | right }
+        bxor { left ^ right }
+        shl { left << count }
+        shr { if signed { (x >> count as i64) as u64 } else { left >> count } }
+        else { 0 as u64 }
+    }
+    Maybe(u64).some(result & limit)
+}
+
+unary :: fn(op Op, source, target Ty, bits u64) Maybe(u64) {
+    width := ops.bits(source)
+    to := ops.bits(target)
+    if op == Op.neg and source == Ty.f32_ { ret Maybe(u64).some(bits ^ ((1 as u64) << 31)) }
+    if op == Op.neg and source == Ty.f64_ { ret Maybe(u64).some(bits ^ ((1 as u64) << 63)) }
+    if width == 0 or width > 64 or to == 0 or to > 64 { ret Maybe(u64).none() }
+    if op != Op.neg and op != Op.invert and op != Op.cast { ret Maybe(u64).none() }
+    value := bits & mask(width)
+    result := match op {
+        neg { 0 - value }
+        invert { ~value }
+        cast {
+            if target == Ty.i1 { (value != 0) as u64 } else if ops.signed(source) {
+                signed_value(value, width) as u64
+            } else {
+                value
+            }
+        }
+        else { 0 as u64 }
+    }
+    Maybe(u64).some(result & mask(to))
+}

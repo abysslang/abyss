@@ -169,6 +169,10 @@ blocks :: fn(out &Fmt, func &Function) {
     block: u64 = 0
     while block < func.block_count() {
         key := (block + 1) as id.Block
+        if block != 0 and func.first_inst(key) == Inst.none {
+            block = block + 1
+            cont
+        }
         out.str("b").uint64((block) as u64)
         count := func.parameter_count(key)
         if count > 0 {

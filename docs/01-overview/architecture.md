@@ -64,10 +64,20 @@ Hosted targets use standard C99 declarations and standard library calls. WASI im
 
 Keel emits labels and jumps for basic blocks and uses C temporaries for SSA values.
 On each edge, it saves incoming arguments before assigning block parameters so
-that a loop can safely swap two values. Keel runs no optimization passes.
+that a loop can safely swap two values.
+
+Both native backends use the same AIR optimizations. Keel simplifies control flow
+(pruning unreachable blocks, collapsing trivial branches, simplifying invariant
+block parameters, threading jumps, and merging straight-line blocks), promotes
+local scalar stack slots to SSA values (carrying changing values through branches
+and loops as block arguments), folds expressions, and eliminates dead
+instructions, write-only stack slots, and unreachable program declarations
+in-place. Slots with escaping addresses or incompatible memory accesses stay in
+memory. The AIR builder folds fixed-width integer expressions when it can, and
+Keel runs these passes in an in-place fixed-point pipeline.
 
 To inspect Abyss IR (AIR), run `abyssc --dump-air main.a`. The compiler
-finishes type checking, then prints function bodies as basic blocks and SSA values, along
+finishes type checking and AIR optimization, then prints function bodies as basic blocks and SSA values, along
 with globals and external declarations. Pass a function name after the path to inspect
 one function and its dependencies. AIR dumping does not execute the program.
 

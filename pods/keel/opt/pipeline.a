@@ -1,0 +1,36 @@
+cfg :: @import("./cfg")
+dce :: @import("./dce")
+mem2reg :: @import("./mem2reg")
+ir :: @import("../ir")
+Program :: @import("../program").Program
+
+fold_body :: fn(body &ir.Function) bool {
+    changed := false
+    for b in Range.new(1, ((body.block_count() + 1) as i32)) {
+        inst := body.first_inst(b as ir.Block)
+        while inst != ir.Inst.none {
+            if body.fold_inst(inst) { changed = true }
+            inst = body.next_inst(inst)
+        }
+    }
+    changed
+}
+
+run :: fn(program &Program, pointer_bytes u32) {
+    for body in program.functions.iter_ref() {
+        cfg.run(body)
+        promoted := mem2reg.run(body, pointer_bytes)
+        if promoted { fold_body(body) }
+        round := 0
+        while round < 4 {
+            changed := false
+            if cfg.run(body) { changed = true }
+            if dce.run(body) { changed = true }
+            if fold_body(body) { changed = true }
+            if not changed { break }
+            round = round + 1
+        }
+        if cfg.run(body) { dce.run(body) }
+    }
+    dce.prune_program(program)
+}

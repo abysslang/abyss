@@ -1,0 +1,605 @@
+ir :: @import("../ir")
+id :: @import("../id")
+ops :: @import("../ops")
+program :: @import("../program")
+mem :: @import("std/mem")
+Arena :: @import("std/allocator").Arena
+Function :: ir.Function
+Program :: program.Program
+Block :: id.Block
+Edge :: id.Edge
+Inst :: id.Inst
+Use :: id.Use
+Val :: id.Val
+Symbol :: id.Symbol
+Ty :: ops.Ty
+Op :: ops.Op
+
+table :: fn(T type, arena &Arena, count u64) &T {
+    size := count * @sizeof(T)
+    ptr := arena.alloc(size)
+    mem.mem_set(ptr, 0, size)
+    ptr as &T
+}
+
+safe_div_divisor :: fn(body &Function, inst Inst) bool {
+    divisor := body.operand(inst, 1)
+    def := body.defining_inst(divisor)
+    if def == Inst.none or body.opcode(def) != Op.constant { ret false }
+    ty := body.value_type(divisor)
+    bits := body.constant_bits(def)
+    if bits == 0 { ret false }
+    if not ops.signed(ty) { ret true }
+    width := ops.bits(ty)
+    if width == 0 or width > 64 { ret false }
+    limit := if width == 64 { ~(0 as u64) } else { ((1 as u64) << width as u64) - 1 }
+    if (bits & limit) != limit { ret true }
+    dividend := body.operand(inst, 0)
+    ddef := body.defining_inst(dividend)
+    if ddef == Inst.none or body.opcode(ddef) != Op.constant { ret false }
+    min_bits := (1 as u64) << (width - 1) as u64
+    (body.constant_bits(ddef) & limit) != min_bits
+}
+
+is_removable :: fn(body &Function, inst Inst) bool {
+    op := body.opcode(inst)
+    if op == Op.div or op == Op.rem {
+        ty := body.value_type(body.result(inst))
+        if ty == Ty.f32_ or ty == Ty.f64_ { ret true }
+        ret safe_div_divisor(body, inst)
+    }
+    if ir.binary(op) { ret true }
+    match op {
+        neg, invert, cast, constant, stack, address, offset { true }
+        else { false }
+    }
+}
+
+operand_count :: fn(body &Function, inst Inst) u64 {
+    op := body.opcode(inst)
+    if op == Op.call or op == Op.call_indirect { ret body.payload(inst, 2) as u64 }
+    ir.fixed_uses(op)
+}
+
+WorkQueue :: struct {
+    body   &Function
+    items  Vec(Inst)
+    queued &bool
+
+    push :: fn(self &Self, inst Inst) {
+        if inst == Inst.none or self.body.inst_block(inst) == Block.none { ret }
+        slot := id.slot(inst)
+        if self.queued[slot] { ret }
+        self.queued[slot] = true
+        self.items.push(inst)
+    }
+
+    drain :: fn(self &Self, operands &Vec(Val)) bool {
+        changed := false
+        while not self.items.is_empty() {
+            inst := self.items.pop()
+            slot := id.slot(inst)
+            self.queued[slot] = false
+            if self.body.inst_block(inst) == Block.none or not is_removable(self.body, inst) {
+                cont
+            }
+            res := self.body.result(inst)
+            if res != Val.none and self.body.has_uses(res) { cont }
+            operands.clear()
+            n := operand_count(self.body, inst)
+            pos: u64 = 0
+            while pos < n {
+                val := self.body.operand(inst, pos)
+                if val != Val.none { operands.push(val) }
+                pos = pos + 1
+            }
+            if self.body.remove(inst) {
+                changed = true
+                for val in operands {
+                    def := self.body.defining_inst(val)
+                    if def != Inst.none and is_removable(self.body, def) and
+                        not self.body.has_uses(val) {
+                        self.push(def)
+                    }
+                }
+            }
+        }
+        changed
+    }
+}
+
+StackSlot :: struct {
+    active  bool
+    invalid bool
+    first   Inst
+    last    Inst
+}
+
+append_slot_op :: fn(item &StackSlot, next_link &Inst, inst Inst) {
+    if item.last == Inst.none { item.first = inst } else {
+        next_link[id.slot(item.last)] = inst
+    }
+    item.last = inst
+}
+
+mark_invalid :: fn(body &Function, root &Val, slots &StackSlot, inst Inst) {
+    n := operand_count(body, inst)
+    pos: u64 = 0
+    while pos < n {
+        val := body.operand(inst, pos)
+        if val != Val.none {
+            r := root[id.slot(val)]
+            if r != Val.none { slots[id.slot(r)].invalid = true }
+        }
+        pos = pos + 1
+    }
+    op := body.opcode(inst)
+    if op == Op.jump or op == Op.branch {
+        epos: u64 = 0
+        edge := body.successor(inst, epos)
+        while edge != Edge.none {
+            ecount := body.argument_count(edge)
+            apos: u32 = 0
+            while apos < ecount {
+                val := body.argument(edge, apos)
+                if val != Val.none {
+                    r := root[id.slot(val)]
+                    if r != Val.none { slots[id.slot(r)].invalid = true }
+                }
+                apos = apos + 1
+            }
+            epos = epos + 1
+            edge = body.successor(inst, epos)
+        }
+    }
+}
+
+eliminate_dead_stacks :: fn(
+    body &Function
+    arena &Arena
+    wq &WorkQueue
+    stored &Vec(Val)
+) bool {
+    vcount := body.value_count()
+    if vcount == 0 { ret false }
+    slots := table(StackSlot, arena, vcount)
+    root := table(Val, arena, vcount)
+    offsets := Vec(Inst).new()
+    has_stack := false
+    bcount := body.block_count()
+    for b in Range.new(1, ((bcount + 1) as i32)) {
+        inst := body.first_inst(b as Block)
+        while inst != Inst.none {
+            op := body.opcode(inst)
+            if op == Op.stack {
+                res := body.result(inst)
+                if res != Val.none {
+                    slots[id.slot(res)].active = true
+                    root[id.slot(res)] = res
+                    has_stack = true
+                }
+            } else if op == Op.offset and has_stack {
+                offsets.push(inst)
+            }
+            inst = body.next_inst(inst)
+        }
+    }
+    if not has_stack {
+        offsets.destroy()
+        ret false
+    }
+    prop := true
+    while prop {
+        prop = false
+        for inst in offsets {
+            res := body.result(inst)
+            base := body.operand(inst, 0)
+            if res != Val.none and base != Val.none {
+                r := root[id.slot(base)]
+                if r != Val.none and root[id.slot(res)] != r {
+                    root[id.slot(res)] = r
+                    prop = true
+                }
+            }
+        }
+    }
+    offsets.destroy()
+    next_link := table(Inst, arena, body.graph.ops.len)
+    for b in Range.new(1, ((bcount + 1) as i32)) {
+        inst := body.first_inst(b as Block)
+        while inst != Inst.none {
+            op := body.opcode(inst)
+            handled := false
+            if op == Op.store {
+                addr := body.operand(inst, 0)
+                val := body.operand(inst, 1)
+                if addr != Val.none and root[id.slot(addr)] != Val.none {
+                    r := root[id.slot(addr)]
+                    vr := if val != Val.none { root[id.slot(val)] } else { Val.none }
+                    if vr != r {
+                        append_slot_op(slots + id.slot(r), next_link, inst)
+                        if vr != Val.none { slots[id.slot(vr)].invalid = true }
+                        handled = true
+                    }
+                }
+            } else if op == Op.zero {
+                addr := body.operand(inst, 0)
+                if addr != Val.none and root[id.slot(addr)] != Val.none {
+                    append_slot_op(slots + id.slot(root[id.slot(addr)]), next_link, inst)
+                    handled = true
+                }
+            } else if op == Op.copy {
+                dest := body.operand(inst, 0)
+                src := body.operand(inst, 1)
+                if dest != Val.none and src != Val.none and root[id.slot(dest)] != Val.none and
+                    root[id.slot(src)] != Val.none and
+                    root[id.slot(dest)] != root[id.slot(src)] {
+                    append_slot_op(slots + id.slot(root[id.slot(dest)]), next_link, inst)
+                    slots[id.slot(root[id.slot(src)])].invalid = true
+                    handled = true
+                }
+            } else if op == Op.load {
+                addr := body.operand(inst, 0)
+                if addr != Val.none and root[id.slot(addr)] != Val.none and
+                    not body.has_uses(body.result(inst)) {
+                    append_slot_op(slots + id.slot(root[id.slot(addr)]), next_link, inst)
+                    handled = true
+                }
+            } else if op == Op.offset {
+                base := body.operand(inst, 0)
+                idx := body.operand(inst, 1)
+                if base != Val.none and root[id.slot(base)] != Val.none and
+                    (idx == Val.none or root[id.slot(idx)] == Val.none) {
+                    append_slot_op(slots + id.slot(root[id.slot(base)]), next_link, inst)
+                    handled = true
+                }
+            }
+            if not handled and op != Op.stack { mark_invalid(body, root, slots, inst) }
+            inst = body.next_inst(inst)
+        }
+    }
+    changed := false
+    dead_offsets := Vec(Inst).new()
+    for idx in Range.new(0, (vcount as i32)) {
+        item := slots + idx as u64
+        if not item.active or item.invalid { cont }
+        slot := id.next_id(Val, idx as u64)
+        stack_inst := body.defining_inst(slot)
+        if stack_inst == Inst.none or body.inst_block(stack_inst) == Block.none { cont }
+        stored.clear()
+        dead_offsets.clear()
+        cur := item.first
+        while cur != Inst.none {
+            nxt := next_link[id.slot(cur)]
+            if body.inst_block(cur) != Block.none {
+                op := body.opcode(cur)
+                if op == Op.offset {
+                    dead_offsets.push(cur)
+                } else {
+                    if op == Op.store { stored.push(body.operand(cur, 1)) } else if op == Op.copy {
+                        stored.push(body.operand(cur, 1))
+                    } else if op == Op.offset {
+                        stored.push(body.operand(cur, 1))
+                    }
+                    if body.remove(cur) { changed = true }
+                }
+            }
+            cur = nxt
+        }
+        oi := dead_offsets.len
+        while oi > 0 {
+            oi = oi - 1
+            off := dead_offsets.get(oi)
+            if body.inst_block(off) != Block.none {
+                idx_val := body.operand(off, 1)
+                if idx_val != Val.none { stored.push(idx_val) }
+                if body.remove(off) { changed = true }
+            }
+        }
+        if not body.has_uses(slot) and body.remove(stack_inst) {
+            changed = true
+            for val in stored {
+                def := body.defining_inst(val)
+                if def != Inst.none and is_removable(body, def) and not body.has_uses(val) {
+                    wq.push(def)
+                }
+            }
+        }
+    }
+    dead_offsets.destroy()
+    changed
+}
+
+mark_sweep :: fn(body &Function, arena &Arena) bool {
+    bcount := body.block_count()
+    icount := body.graph.ops.len
+    vcount := body.value_count()
+    if bcount == 0 or icount == 0 or vcount == 0 { ret false }
+    starts := table(u32, arena, bcount + 2)
+    edges := table(Edge, arena, body.graph.targets.len + 1)
+    for src in Range.new(1, ((bcount + 1) as i32)) {
+        last := body.last_inst(src as Block)
+        if last == Inst.none { cont }
+        for epos in Range.new(0, 2) {
+            edge := body.successor(last, epos as u64)
+            if edge == Edge.none { break }
+            target := body.edge_target(edge) as u32
+            starts[target + 1] = starts[target + 1] + 1
+        }
+    }
+    for index in Range.new(1, ((bcount + 1) as i32)) {
+        starts[index + 1] = starts[index + 1] + starts[index]
+    }
+    for src in Range.new(1, ((bcount + 1) as i32)) {
+        last := body.last_inst(src as Block)
+        if last == Inst.none { cont }
+        for epos in Range.new(0, 2) {
+            edge := body.successor(last, epos as u64)
+            if edge == Edge.none { break }
+            target := body.edge_target(edge) as u32
+            starts[target] = starts[target] + 1
+            edges[starts[target] - 1] = edge
+        }
+    }
+    param_owner := table(Block, arena, vcount)
+    param_pos := table(u32, arena, vcount)
+    for b in Range.new(2, ((bcount + 1) as i32)) {
+        block := b as Block
+        pcount := body.parameter_count(block)
+        pos: u32 = 0
+        while pos < pcount {
+            param := body.parameter(block, pos)
+            param_owner[id.slot(param)] = block
+            param_pos[id.slot(param)] = pos
+            pos = pos + 1
+        }
+    }
+    live_inst := table(bool, arena, icount)
+    live_val := table(bool, arena, vcount)
+    mark_insts := Vec(Inst).new()
+    mark_vals := Vec(Val).new()
+    ep: u32 = 0
+    ec := body.parameter_count(Block.entry)
+    while ep < ec {
+        live_val[id.slot(body.parameter(Block.entry, ep))] = true
+        ep = ep + 1
+    }
+    for b in Range.new(1, ((bcount + 1) as i32)) {
+        inst := body.first_inst(b as Block)
+        while inst != Inst.none {
+            if not is_removable(body, inst) {
+                live_inst[id.slot(inst)] = true
+                mark_insts.push(inst)
+            }
+            inst = body.next_inst(inst)
+        }
+    }
+    while not mark_insts.is_empty() or not mark_vals.is_empty() {
+        while not mark_insts.is_empty() {
+            inst := mark_insts.pop()
+            n := operand_count(body, inst)
+            pos: u64 = 0
+            while pos < n {
+                val := body.operand(inst, pos)
+                if val != Val.none and not live_val[id.slot(val)] {
+                    live_val[id.slot(val)] = true
+                    mark_vals.push(val)
+                }
+                pos = pos + 1
+            }
+        }
+        while not mark_vals.is_empty() {
+            val := mark_vals.pop()
+            def := body.defining_inst(val)
+            if def != Inst.none {
+                if body.inst_block(def) != Block.none and not live_inst[id.slot(def)] {
+                    live_inst[id.slot(def)] = true
+                    mark_insts.push(def)
+                }
+                cont
+            }
+            owner := param_owner[id.slot(val)]
+            if owner == Block.none { cont }
+            p := param_pos[id.slot(val)]
+            first := starts[id.slot(owner)]
+            incoming := Slice(Edge).new(
+                edges + first as u64
+                (starts[id.slot(owner) + 1] - first) as u64
+            )
+            for edge in incoming {
+                arg := body.argument(edge, p)
+                if arg != Val.none and not live_val[id.slot(arg)] {
+                    live_val[id.slot(arg)] = true
+                    mark_vals.push(arg)
+                }
+            }
+        }
+    }
+    mark_insts.destroy()
+    mark_vals.destroy()
+    changed := false
+    for b in Range.new(1, ((bcount + 1) as i32)) {
+        inst := body.first_inst(b as Block)
+        while inst != Inst.none {
+            nxt := body.next_inst(inst)
+            if not live_inst[id.slot(inst)] {
+                body.strip_uses(inst)
+                res := body.result(inst)
+                if res != Val.none {
+                    body.graph.types.set(id.slot(res), Ty.void_)
+                    body.graph.defs.set(id.slot(res), Inst.none)
+                }
+                body.layout.unlink(inst)
+                changed = true
+            }
+            inst = nxt
+        }
+    }
+    for b in Range.new(2, ((bcount + 1) as i32)) {
+        block := b as Block
+        pcount := body.parameter_count(block)
+        if pcount == 0 or body.first_inst(block) == Inst.none { cont }
+        first := starts[id.slot(block)]
+        incoming := Slice(Edge).new(
+            edges + first as u64
+            (starts[id.slot(block) + 1] - first) as u64
+        )
+        pos := pcount
+        while pos > 0 {
+            pos = pos - 1
+            param := body.parameter(block, pos)
+            if live_val[id.slot(param)] { cont }
+            for edge in incoming { body.graph.remove_edge_arg(edge, pos) }
+            body.remove_parameter(block, pos)
+            changed = true
+        }
+    }
+    changed
+}
+
+run :: fn(body &Function) bool {
+    count := body.graph.ops.len
+    if count == 0 { ret false }
+    arena := Arena.new(4096)
+    wq: WorkQueue = .{
+        body: body
+        items: Vec(Inst).new()
+        queued: table(bool, &arena, count)
+    }
+    operands := Vec(Val).new()
+    stored := Vec(Val).new()
+    changed := false
+    pass_changed := true
+    while pass_changed {
+        pass_changed = false
+        if mark_sweep(body, &arena) { pass_changed = true }
+        if eliminate_dead_stacks(body, &arena, &wq, &stored) {
+            pass_changed = true
+            if wq.drain(&operands) { pass_changed = true }
+        }
+        if pass_changed { changed = true }
+    }
+    wq.items.destroy()
+    operands.destroy()
+    stored.destroy()
+    arena.destroy()
+    changed
+}
+
+prune_program :: fn(module &Program) bool {
+    count := module.declarations.len
+    if count == 0 { ret false }
+    has_roots := module.entry != Symbol.none
+    if not has_roots {
+        for decl in module.declarations {
+            if decl.exported { has_roots = true, break }
+        }
+    }
+    if not has_roots { ret false }
+    arena := Arena.new(4096)
+    live := table(bool, &arena, count + 1)
+    queue := Vec(Symbol).new()
+    if module.entry != Symbol.none {
+        live[module.entry as u32] = true
+        queue.push(module.entry)
+    }
+    if module.initializer != Symbol.none {
+        if not live[module.initializer as u32] {
+            live[module.initializer as u32] = true
+            queue.push(module.initializer)
+        }
+    }
+    index: u32 = 0
+    for decl in module.declarations {
+        index = index + 1
+        if decl.exported and not live[index] {
+            live[index] = true
+            queue.push(index as Symbol)
+        }
+    }
+    while not queue.is_empty() {
+        sym := queue.pop()
+        decl := module.get(sym)
+        if decl.kind != program.Kind.function or decl.body == 0 { cont }
+        body := module.functions.ptr_at(decl.body as u64 - 1)
+        bcount := body.block_count()
+        for b in Range.new(1, ((bcount + 1) as i32)) {
+            inst := body.first_inst(b as Block)
+            while inst != Inst.none {
+                op := body.opcode(inst)
+                if op == Op.call or op == Op.address {
+                    target := body.payload(inst, 0) as u32
+                    if target != 0 and not live[target] {
+                        live[target] = true
+                        queue.push(target as Symbol)
+                    }
+                }
+                inst = body.next_inst(inst)
+            }
+        }
+    }
+    queue.destroy()
+    all_live := true
+    for i in Range.new(1, ((count + 1) as i32)) {
+        if not live[i] { all_live = false, break }
+    }
+    if all_live {
+        arena.destroy()
+        ret false
+    }
+    func_count := module.functions.len
+    live_func := table(bool, &arena, func_count + 1)
+    for i in Range.new(1, ((count + 1) as i32)) {
+        if not live[i] { cont }
+        decl := module.declarations.get((i - 1) as u64)
+        if decl.body != 0 { live_func[decl.body] = true }
+    }
+    func_remap := table(u32, &arena, func_count + 1)
+    write_func: u64 = 0
+    for f in Range.new(0, func_count as i32) {
+        if not live_func[f + 1] {
+            module.functions.ptr_at(f as u64).destroy()
+            cont
+        }
+        func_remap[f + 1] = (write_func + 1) as u32
+        if write_func != f as u64 {
+            module.functions.set(write_func, module.functions.get(f as u64))
+        }
+        write_func = write_func + 1
+    }
+    module.functions.len = write_func
+    remap := table(Symbol, &arena, count + 1)
+    write_decl: u64 = 0
+    for i in Range.new(1, ((count + 1) as i32)) {
+        decl := module.declarations.get((i - 1) as u64)
+        if not live[i] { cont }
+        new_sym := id.next_id(Symbol, write_decl)
+        remap[i] = new_sym
+        if decl.body != 0 { decl.body = func_remap[decl.body] }
+        module.declarations.set(write_decl, decl)
+        write_decl = write_decl + 1
+    }
+    module.declarations.len = write_decl
+    if module.entry != Symbol.none { module.entry = remap[module.entry as u32] }
+    if module.initializer != Symbol.none {
+        module.initializer = remap[module.initializer as u32]
+    }
+    for body in module.functions.iter_ref() {
+        bcount := body.block_count()
+        for b in Range.new(1, ((bcount + 1) as i32)) {
+            inst := body.first_inst(b as Block)
+            while inst != Inst.none {
+                op := body.opcode(inst)
+                if op == Op.call or op == Op.address {
+                    target := body.payload(inst, 0) as u32
+                    if target != 0 {
+                        body.graph.words.set(id.slot(inst) * 3, remap[target] as u32)
+                    }
+                }
+                inst = body.next_inst(inst)
+            }
+        }
+    }
+    arena.destroy()
+    true
+}

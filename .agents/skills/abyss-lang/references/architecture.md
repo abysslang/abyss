@@ -101,8 +101,19 @@ static data, and symbol IDs. AIR values have fixed widths; the frontend lays out
 aggregates as byte storage and passes them by address. Mutable locals use stack slots;
 expression joins pass SSA values as block arguments. The frontend supplies ABI
 signatures and target header references explicitly. Keel uses them for ABI
-wrappers and resolves layouts in the selected backend. Native builds emit AIR
-without an optimization pass.
+wrappers and resolves layouts in the selected backend.
+
+Keel runs its shared native in-place optimization pipeline from `pods/keel/opt`
+before emission and AIR dumps (`pipeline.a` iterates passes to a bounded fixed
+point without cloning the IR). `cfg.a` simplifies control flow by pruning
+unreachable blocks, folding constant or identical branches, removing invariant
+or single-valued block parameters, threading pure jumps, and merging straight-line
+blocks. `mem2reg.a` promotes exact-width scalar slots with direct loads and
+stores, adding parameters where incoming values meet while keeping existing
+instruction and value handles stable. The builder and `fold.a` fold integer
+constants through 64 bits, integer casts, and floating-point negation. `dce.a`
+eliminates dead instructions via mark-sweep, removes write-only stack slots,
+and prunes unreachable program declarations. The bytecode path stays separate.
 
 ---
 

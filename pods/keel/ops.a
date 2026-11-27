@@ -1,0 +1,81 @@
+Ty :: enum u8 {
+    void_
+    i1
+    i8_
+    i16_
+    i32_
+    i64_
+    i128_
+    u8_
+    u16_
+    u32_
+    u64_
+    u128_
+    f32_
+    f64_
+    ptr
+}
+Op :: enum u8 {
+    iadd
+    sub
+    mul
+    div
+    rem
+    eq
+    ne
+    lt
+    le
+    gt
+    ge
+    band
+    bor
+    bxor
+    shl
+    shr
+    neg
+    invert
+    cast
+    constant
+    stack
+    address
+    offset
+    load
+    store
+    copy
+    copy_bytes
+    zero
+    call
+    call_indirect
+    jump
+    branch
+    ret_
+    trap
+    abi_size
+    abi_field
+    c_value
+}
+
+bits :: fn(ty Ty) u32 {
+    match ty {
+        i1 { 1 }
+        i8_, u8_ { 8 }
+        i16_, u16_ { 16 }
+        i32_, u32_ { 32 }
+        i64_, u64_ { 64 }
+        i128_, u128_ { 128 }
+        else { 0 }
+    }
+}
+
+signed :: fn(ty Ty) bool {
+    ty as u8 >= Ty.i8_ as u8 and ty as u8 <= Ty.i128_ as u8
+}
+
+bytes :: fn(ty Ty, pointer_bytes u32) u32 {
+    match ty {
+        ptr { pointer_bytes }
+        f32_ { 4 }
+        f64_ { 8 }
+        else { (bits(ty) + 7) / 8 }
+    }
+}
