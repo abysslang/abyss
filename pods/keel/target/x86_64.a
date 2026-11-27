@@ -3,6 +3,7 @@ abi :: @import("pods/keel/abi_types")
 ir :: @import("pods/keel/ir")
 program :: @import("pods/keel/program")
 sysv :: @import("pods/keel/target/sysv")
+regalloc :: @import("./regalloc")
 Arena :: @import("std/allocator").Arena
 Op :: ir.Op
 Ty :: ir.Ty
@@ -68,21 +69,130 @@ arg_reg :: fn(index u32) u64 {
     regs[index] as u64
 }
 
-slot :: fn(value Val) u64 { value as u64 * 16 }
+wrapper_slot :: fn(value Val) u64 { value as u64 * 16 }
 
 frame_access :: fn(code &elf.Buffer, opcode, reg, offset u64) {
-    code.put(0x48 | ((reg >> 3) << 2), 1)
+    frame_mem(code, 0x48, opcode, reg, offset)
+}
+
+frame_mem :: fn(code &Buffer, rex, opcode, reg, offset u64) {
+    if rex != 0 or reg >= 8 { code.put(rex | 0x40 | ((reg >> 3) << 2), 1) }
     code.put(opcode, 1)
-    code.put(0x85 | ((reg & 7) << 3), 1)
-    code.put(0 - offset, 4)
+    frame_disp(code, reg, offset)
 }
 
-load_value :: fn(code &elf.Buffer, value Val, reg u64) {
-    frame_access(code, 0x8b, reg, slot(value))
+frame_disp :: fn(code &Buffer, reg, offset u64) {
+    short := offset as i64 >= -127 and offset as i64 <= 128
+    code.put((if short { 0x45 } else { 0x85 }) | ((reg & 7) << 3), 1)
+    code.put(0 - offset, if short { 1 } else { 4 })
 }
 
-save_value :: fn(code &elf.Buffer, value Val) {
-    frame_access(code, 0x89, 0, slot(value))
+reg_op :: fn(code &Buffer, opcode, dest, source u64) {
+    code.put(0x48 | ((dest >> 3) << 2) | (source >> 3), 1)
+    if opcode > 255 { code.put(0x0f, 1) }
+    code.put(opcode, 1)
+    code.put(0xc0 | ((dest & 7) << 3) | (source & 7), 1)
+}
+
+normalize_reg :: fn(code &Buffer, ty Ty, reg u64) {
+    if ty == Ty.i1 {
+        code.put(0x40 | (reg >> 3), 1)
+        code.put(0x83, 1)
+        code.put(0xe0 | (reg & 7), 1)
+        code.put(1, 1)
+    } else if ty == Ty.i8_ { reg_op(code, 0x1be, reg, reg) } else if ty == Ty.i16_ {
+        reg_op(code, 0x1bf, reg, reg)
+    } else if ty == Ty.i32_ { reg_op(code, 0x63, reg, reg) } else if ty == Ty.u8_ or
+        ty == Ty.u16_ or
+        ty == Ty.u32_ {
+        rex := ((reg >> 3) << 2) | (reg >> 3)
+        if rex != 0 { code.put(0x40 | rex, 1) }
+        if ty == Ty.u32_ { code.put(0x8b, 1) } else {
+            code.put(0x0f, 1)
+            code.put(if ty == Ty.u8_ { 0xb6 } else { 0xb7 }, 1)
+        }
+        code.put(0xc0 | ((reg & 7) << 3) | (reg & 7), 1)
+    }
+}
+
+alu_opcode :: fn(op Op) u64 {
+    match op {
+        iadd { 0x03 }
+        sub { 0x2b }
+        mul { 0x1af }
+        band { 0x23 }
+        bor { 0x0b }
+        bxor { 0x33 }
+        else { 0 }
+    }
+}
+
+sse_binary :: fn(code &Buffer, op Op, ty Ty, dest, right u64) {
+    float_prefix(code, ty)
+    rex := ((dest >> 3) << 2) | (right >> 3)
+    if rex != 0 { code.put(0x40 | rex, 1) }
+    code.put(0x0f, 1)
+    code.put(
+        match op {
+            iadd { 0x58 }
+            sub { 0x5c }
+            mul { 0x59 }
+            else { 0x5e }
+        }
+        1
+    )
+    code.put(0xc0 | ((dest & 7) << 3) | (right & 7), 1)
+}
+
+move_reg :: fn(code &Buffer, dest, source u64) {
+    if dest != source { reg_op(code, 0x8b, dest, source) }
+}
+
+xmm_gp :: fn(code &Buffer, xmm, gp u64, to_xmm bool) {
+    code.put(0x66, 1)
+    code.put(0x48 | ((xmm >> 3) << 2) | (gp >> 3), 1)
+    code.put(0x0f, 1)
+    code.put(if to_xmm { 0x6e } else { 0x7e }, 1)
+    code.put(0xc0 | ((xmm & 7) << 3) | (gp & 7), 1)
+}
+
+xmm_copy :: fn(code &Buffer, dest, source u64) {
+    if dest == source { ret }
+    code.put(0xf3, 1)
+    rex := ((dest >> 3) << 2) | (source >> 3)
+    if rex != 0 { code.put(0x40 | rex, 1) }
+    code.raw("\x0f\x7e")
+    code.put(0xc0 | ((dest & 7) << 3) | (source & 7), 1)
+}
+
+xmm_home :: fn(code &Buffer, home u64, reg u64, save bool) {
+    if regalloc.in_xmm(home) {
+        if save { xmm_copy(code, home - 16, reg) } else { xmm_copy(code, reg, home - 16) }
+    } else if regalloc.in_register(home) {
+        xmm_gp(code, reg, home, not save)
+    } else {
+        code.put(if save { 0x66 } else { 0xf3 }, 1)
+        if reg >= 8 { code.put(0x44, 1) }
+        code.put(0x0f, 1)
+        code.put(if save { 0xd6 } else { 0x7e }, 1)
+        frame_disp(code, reg, regalloc.offset(home))
+    }
+}
+
+load_home :: fn(code &Buffer, home u64, reg u64) {
+    if regalloc.in_xmm(home) {
+        xmm_gp(code, home - 16, reg, false)
+    } else if regalloc.in_register(home) {
+        move_reg(code, reg, home)
+    } else { frame_access(code, 0x8b, reg, regalloc.offset(home)) }
+}
+
+save_home :: fn(code &Buffer, home u64, reg u64) {
+    if regalloc.in_xmm(home) {
+        xmm_gp(code, home - 16, reg, true)
+    } else if regalloc.in_register(home) {
+        move_reg(code, home, reg)
+    } else { frame_access(code, 0x89, reg, regalloc.offset(home)) }
 }
 
 normalize :: fn(code &elf.Buffer, ty Ty) {
@@ -100,8 +210,24 @@ normalize :: fn(code &elf.Buffer, ty Ty) {
 }
 
 immediate :: fn(code &elf.Buffer, value u64) {
-    code.raw("\x48\xb8")
-    code.put(value, 8)
+    imm_reg(code, 0, value)
+}
+
+imm_reg :: fn(code &Buffer, reg, value u64) {
+    if value <= 4294967295 as u64 {
+        if reg >= 8 { code.put(0x41, 1) }
+        code.put(0xb8 | (reg & 7), 1)
+        code.put(value, 4)
+    } else if value as i64 >= -2147483648 and value as i64 < 0 {
+        code.put(0x48 | (reg >> 3), 1)
+        code.put(0xc7, 1)
+        code.put(0xc0 | (reg & 7), 1)
+        code.put(value, 4)
+    } else {
+        code.put(0x48 | (reg >> 3), 1)
+        code.put(0xb8 | (reg & 7), 1)
+        code.put(value, 8)
+    }
 }
 
 condition :: fn(code &elf.Buffer, flag u64) {
@@ -200,40 +326,55 @@ Arguments :: struct {
 
     new :: fn() Self { .{ gp: 0, sse: 0, stack: 0 } }
 
-    move :: fn(self &Self, code &Buffer, val Val, ty Ty, incoming bool) {
+    move :: fn(self &Self, code &Buffer, home u64, ty Ty, incoming bool) {
         if wide(ty) {
             if self.gp <= 4 {
                 pos: u64 = 0
                 while pos < 2 {
                     reg := arg_reg(self.gp as u32)
-                    frame_access(code, if incoming { 0x89 } else { 0x8b }, reg, slot(val) - pos * 8)
+                    frame_access(
+                        code
+                        if incoming { 0x89 } else { 0x8b }
+                        reg
+                        regalloc.offset(home) - pos * 8
+                    )
                     self.gp = self.gp + 1
                     pos = pos + 1
                 }
             } else {
                 self.stack = aligned(self.stack, 16)
-                self.spill(code, slot(val), incoming, Ty.u64_)
-                self.spill(code, slot(val) - 8, incoming, Ty.u64_)
+                self.spill(code, regalloc.offset(home), incoming, Ty.u64_)
+                self.spill(code, regalloc.offset(home) - 8, incoming, Ty.u64_)
             }
         } else if floating(ty) and self.sse < 8 {
-            code.raw(if incoming { "\x66\x0f\xd6" } else { "\xf3\x0f\x7e" })
-            code.put(0x85 | (self.sse << 3), 1)
-            code.put(0 - slot(val), 4)
+            xmm_home(code, home, self.sse, incoming)
             self.sse = self.sse + 1
         } else if not floating(ty) and self.gp < 6 {
             reg := arg_reg(self.gp as u32)
             if incoming {
-                code.put(0x48 | (reg >> 3), 1)
-                code.raw("\x8b")
-                code.put(0xc0 | (reg & 7), 1)
-                normalize(code, ty)
-                save_value(code, val)
+                if regalloc.in_register(home) {
+                    move_reg(code, home, reg)
+                    normalize_reg(code, ty, home)
+                } else if ty == Ty.i64_ or ty == Ty.u64_ or ty == Ty.ptr {
+                    save_home(code, home, reg)
+                } else {
+                    move_reg(code, 0, reg)
+                    normalize(code, ty)
+                    save_home(code, home, 0)
+                }
             } else {
-                load_value(code, val, reg)
+                load_home(code, home, reg)
             }
             self.gp = self.gp + 1
+        } else if incoming {
+            frame_access(code, 0x8b, 0, 0 - (16 + self.stack))
+            normalize(code, ty)
+            save_home(code, home, 0)
+            self.stack = self.stack + 8
         } else {
-            self.spill(code, slot(val), incoming, ty)
+            load_home(code, home, 0)
+            stack_access(code, 0x89, 0, self.stack)
+            self.stack = self.stack + 8
         }
     }
 
@@ -254,8 +395,24 @@ Arguments :: struct {
 
 adjust_stack :: fn(code &elf.Buffer, size u64, reserve bool) {
     if size == 0 { ret }
-    code.raw(if reserve { "\x48\x81\xec" } else { "\x48\x81\xc4" })
-    code.put(size, 4)
+    if size <= 127 {
+        code.raw(if reserve { "\x48\x83\xec" } else { "\x48\x83\xc4" })
+        code.put(size, 1)
+    } else {
+        code.raw(if reserve { "\x48\x81\xec" } else { "\x48\x81\xc4" })
+        code.put(size, 4)
+    }
+}
+
+saved_registers :: fn(code &Buffer, used u32, save bool) {
+    if used == 0 { ret }
+    offset: u64 = 0
+    for index in Range.new(0, 5) {
+        reg := regalloc.callee(index as u64)
+        if (used & ((1 as u32) << reg as u32)) == 0 { cont }
+        offset = offset + 8
+        frame_access(code, if save { 0x89 } else { 0x8b }, reg, offset)
+    }
 }
 
 stack_access :: fn(code &Buffer, opcode, reg, offset u64) {
@@ -363,6 +520,7 @@ abi_invoke :: fn(
     air &Program
     target, sig u32
     body &ir.Function
+    allocation &regalloc.Allocation
     inst Inst
     start u64
 ) {
@@ -373,25 +531,32 @@ abi_invoke :: fn(
     for loc in plan.args {
         val := body.operand(inst, index)
         if loc.aggregate {
-            load_value(code, val, 6)
+            load_home(code, allocation.get(val), 6)
             stack_access(code, 0x8d, 7, if loc.memory { loc.stack } else { loc.home })
             copy_count(code, loc.shape.size)
         } else if loc.memory {
-            load_value(code, val, 0)
+            load_home(code, allocation.get(val), 0)
             stack_access(code, 0x89, 0, loc.stack)
             if loc.shape.size > 8 {
-                frame_access(code, 0x8b, 0, slot(val) - 8)
+                frame_access(code, 0x8b, 0, regalloc.offset(allocation.get(val)) - 8)
                 stack_access(code, 0x89, 0, loc.stack + 8)
             }
         }
         index = index + 1
     }
-    if plan.result.memory { load_value(code, body.operand(inst, start), 7) }
+    if plan.result.memory { load_home(code, allocation.get(body.operand(inst, start)), 7) }
     index = start + plan.result.aggregate as u64
     for loc in plan.args {
         if not loc.memory {
             if loc.aggregate { loc.registers(code, loc.home, true, false, false) } else {
-                loc.registers(code, 0 - slot(body.operand(inst, index)), false, false, false)
+                home := allocation.get(body.operand(inst, index))
+                if loc.shape.parts[1] != Class.empty {
+                    loc.registers(code, 0 - regalloc.offset(home), false, false, false)
+                } else if loc.shape.parts[0] == Class.sse {
+                    xmm_home(code, home, loc.sse, false)
+                } else {
+                    load_home(code, home, arg_reg(loc.gp as u32))
+                }
             }
         }
         index = index + 1
@@ -402,13 +567,13 @@ abi_invoke :: fn(
         code.put(0xe8, 1)
         image.relative(target, 4)
     } else {
-        load_value(code, body.operand(inst, 0), 11)
+        load_home(code, allocation.get(body.operand(inst, 0)), 11)
         code.raw("\x41\xff\xd3")
     }
     if plan.result.aggregate and not plan.result.memory {
         plan.result.registers(code, plan.result.home, true, true, true)
         stack_access(code, 0x8d, 6, plan.result.home)
-        load_value(code, body.operand(inst, start), 7)
+        load_home(code, allocation.get(body.operand(inst, start)), 7)
         copy_count(code, plan.result.shape.size)
     }
     adjust_stack(code, plan.bytes, false)
@@ -424,10 +589,10 @@ emit_wrapper :: fn(image &elf.Image, air &Program, decl program.Decl, wrapper, t
     adjust_stack(code, decl.count as u64 * 16 + plan.bytes, true)
     if plan.result.aggregate {
         if plan.result.memory {
-            frame_access(code, 0x89, 7, slot(1 as Val))
+            frame_access(code, 0x89, 7, wrapper_slot(1 as Val))
         } else {
             stack_access(code, 0x8d, 0, plan.result.home)
-            save_value(code, 1 as Val)
+            save_home(code, regalloc.memory(wrapper_slot(1 as Val)), 0)
         }
     }
     index: u64 = 0
@@ -440,16 +605,16 @@ emit_wrapper :: fn(image &elf.Image, air &Program, decl program.Decl, wrapper, t
                 loc.registers(code, loc.home, true, true, false)
                 stack_access(code, 0x8d, 0, loc.home)
             }
-            save_value(code, val)
+            save_home(code, regalloc.memory(wrapper_slot(val)), 0)
         } else if loc.memory {
             frame_access(code, 0x8b, 0, 0 - (16 + loc.stack))
-            save_value(code, val)
+            save_home(code, regalloc.memory(wrapper_slot(val)), 0)
             if loc.shape.size > 8 {
                 frame_access(code, 0x8b, 0, 0 - (24 + loc.stack))
-                frame_access(code, 0x89, 0, slot(val) - 8)
+                frame_access(code, 0x89, 0, wrapper_slot(val) - 8)
             }
         } else {
-            loc.registers(code, 0 - slot(val), false, true, false)
+            loc.registers(code, 0 - wrapper_slot(val), false, true, false)
         }
         index = index + 1
     }
@@ -458,14 +623,19 @@ emit_wrapper :: fn(image &elf.Image, air &Program, decl program.Decl, wrapper, t
     args := Arguments.new()
     index = 0
     while index < decl.count as u64 {
-        args.move(code, (index + 1) as Val, air.types.get(decl.params as u64 + index), false)
+        args.move(
+            code
+            regalloc.memory(wrapper_slot((index + 1) as Val))
+            air.types.get(decl.params as u64 + index)
+            false
+        )
         index = index + 1
     }
     code.put(0xe8, 1)
     image.relative(target, 4)
     adjust_stack(code, outgoing, false)
     if plan.result.aggregate {
-        if plan.result.memory { load_value(code, 1 as Val, 0) } else {
+        if plan.result.memory { load_home(code, regalloc.memory(wrapper_slot(1 as Val)), 0) } else {
             plan.result.registers(code, plan.result.home, true, false, true)
         }
     }
@@ -542,9 +712,21 @@ Encoder :: struct {
     symbols            Slice(u32)
     addresses          Slice(u32)
     body               &ir.Function
+    allocation         regalloc.Allocation
     blocks             Vec(u64)
     jumps              Vec(Fixup)
     scratch, stack_top u64
+    next_block         Block
+
+    slot :: fn(self &Self, value Val) u64 { regalloc.offset(self.allocation.get(value)) }
+
+    load_value :: fn(self &Self, code &Buffer, value Val, reg u64) {
+        load_home(code, self.allocation.get(value), reg)
+    }
+
+    save_value :: fn(self &Self, code &Buffer, value Val) {
+        save_home(code, self.allocation.get(value), 0)
+    }
 
     helper :: fn(self &Self, name Str) {
         self.image.text.put(0xe8, 1)
@@ -558,7 +740,7 @@ Encoder :: struct {
             code.put(width(source) * 8 - 1, 1)
         } else if wide(source) {
             args := Arguments.new()
-            args.move(code, value, source, false)
+            args.move(code, self.allocation.get(value), source, false)
             name := if result == Ty.f32_ {
                 if signed(source) { "__floattisf" } else { "__floatuntisf" }
             } else {
@@ -581,7 +763,7 @@ Encoder :: struct {
         }
     }
 
-    invoke :: fn(self &Self, inst Inst, direct bool, target, count u32, result Ty) {
+    invoke :: fn(self &Self, inst Inst, direct bool, target, count u32) {
         body := self.body
         code := &self.image.text
         pos: u64 = if direct { 0 } else { 1 }
@@ -593,8 +775,7 @@ Encoder :: struct {
             if decl.kind == program.Kind.external { signature = decl.abi_signature }
         } else { signature = target }
         if sysv.needs_bridge(self.air, signature) {
-            abi_invoke(self.image, self.air, symbol, signature, body, inst, pos)
-            if floating(result) { float_out(code) }
+            abi_invoke(self.image, self.air, symbol, signature, body, &self.allocation, inst, pos)
             ret
         }
         space := count as u64 * 16
@@ -602,7 +783,7 @@ Encoder :: struct {
         args := Arguments.new()
         while pos < count as u64 {
             value := body.operand(inst, pos)
-            args.move(code, value, body.value_type(value), false)
+            args.move(code, self.allocation.get(value), body.value_type(value), false)
             pos = pos + 1
         }
         code.put(0xb0, 1)
@@ -611,11 +792,10 @@ Encoder :: struct {
             code.put(0xe8, 1)
             self.image.relative(symbol, 4)
         } else {
-            load_value(code, body.operand(inst, 0), 11)
+            self.load_value(code, body.operand(inst, 0), 11)
             code.raw("\x41\xff\xd3")
         }
         adjust_stack(code, space, false)
-        if floating(result) { float_out(code) }
     }
 
     wide_binary :: fn(self &Self, op Op, first, second Val) {
@@ -628,15 +808,15 @@ Encoder :: struct {
                 if signed(ty) { "__modti3" } else { "__umodti3" }
             }
             args := Arguments.new()
-            args.move(code, first, ty, false)
-            args.move(code, second, ty, false)
+            args.move(code, self.allocation.get(first), ty, false)
+            args.move(code, self.allocation.get(second), ty, false)
             self.helper(name)
             ret
         }
-        load_value(code, first, 0)
-        load_value(code, second, 1)
-        frame_access(code, 0x8b, 2, slot(first) - 8)
-        frame_access(code, 0x8b, 8, slot(second) - 8)
+        self.load_value(code, first, 0)
+        self.load_value(code, second, 1)
+        frame_access(code, 0x8b, 2, self.slot(first) - 8)
+        frame_access(code, 0x8b, 8, self.slot(second) - 8)
         match op {
             iadd { code.raw("\x48\x01\xc8\x4c\x11\xc2") }
             sub { code.raw("\x48\x29\xc8\x4c\x19\xc2") }
@@ -673,19 +853,72 @@ Encoder :: struct {
         }
     }
 
-    edge :: fn(self &Self, edge Edge) {
+    move_edge :: fn(self &Self, edge Edge) {
+        body := self.body
+        code := &self.image.text
+        target := body.edge_target(edge)
+        count := body.argument_count(edge)
+        written: u32 = 0
+        pos: u32 = 0
+        while pos < count {
+            value := body.argument(edge, pos)
+            from := self.allocation.get(value)
+            to := self.allocation.get(body.parameter(target, pos))
+            if from != to {
+                if regalloc.in_register(from) {
+                    if (written & ((1 as u32) << from as u32)) != 0 {
+                        self.stage_edge(edge)
+                        ret
+                    }
+                } else if pos != 0 and self.allocation.block(value) == target and
+                    body.defining_inst(value) == Inst.none {
+                    self.stage_edge(edge)
+                    ret
+                }
+                if regalloc.in_register(to) { written = written | ((1 as u32) << to as u32) }
+            }
+            pos = pos + 1
+        }
+        pos = 0
+        while pos < count {
+            value := body.argument(edge, pos)
+            from := self.allocation.get(value)
+            to := self.allocation.get(body.parameter(target, pos))
+            if from != to {
+                if regalloc.in_xmm(from) {
+                    xmm_home(code, to, from - 16, true)
+                } else if regalloc.in_xmm(to) {
+                    xmm_home(code, from, to - 16, false)
+                } else if regalloc.in_register(from) {
+                    save_home(code, to, from)
+                } else if regalloc.in_register(to) {
+                    load_home(code, from, to)
+                } else {
+                    load_home(code, from, 0)
+                    save_home(code, to, 0)
+                    if wide(body.value_type(value)) {
+                        frame_access(code, 0x8b, 0, regalloc.offset(from) - 8)
+                        frame_access(code, 0x89, 0, regalloc.offset(to) - 8)
+                    }
+                }
+            }
+            pos = pos + 1
+        }
+    }
+
+    stage_edge :: fn(self &Self, edge Edge) {
         code := &self.image.text
         body := self.body
         target := body.edge_target(edge)
         count := body.argument_count(edge)
         pos: u32 = 0
         while pos < count {
-            load_value(code, body.argument(edge, pos), 0)
+            self.load_value(code, body.argument(edge, pos), 0)
             temp := self.scratch + (pos as u64 + 1) * 16
             frame_access(code, 0x89, 0, temp)
             value := body.argument(edge, pos)
             if wide(body.value_type(value)) {
-                frame_access(code, 0x8b, 0, slot(value) - 8)
+                frame_access(code, 0x8b, 0, self.slot(value) - 8)
                 frame_access(code, 0x89, 0, temp - 8)
             }
             pos = pos + 1
@@ -695,16 +928,28 @@ Encoder :: struct {
             temp := self.scratch + (pos as u64 + 1) * 16
             value := body.parameter(target, pos)
             frame_access(code, 0x8b, 0, temp)
-            save_value(code, value)
+            self.save_value(code, value)
             if wide(body.value_type(value)) {
                 frame_access(code, 0x8b, 0, temp - 8)
-                frame_access(code, 0x89, 0, slot(value) - 8)
+                frame_access(code, 0x89, 0, self.slot(value) - 8)
             }
             pos = pos + 1
         }
-        code.put(0xe9, 1)
+    }
+
+    jump_to :: fn(self &Self, target Block) {
+        code := &self.image.text
         self.jumps.push(.{ at: code.len(), target: target })
         code.put(0, 4)
+    }
+
+    edge :: fn(self &Self, edge Edge, fallthrough bool) {
+        self.move_edge(edge)
+        target := self.body.edge_target(edge)
+        if not fallthrough or target != self.next_block {
+            self.image.text.put(0xe9, 1)
+            self.jump_to(target)
+        }
     }
 
     instruction :: fn(self &Self, inst Inst) {
@@ -719,12 +964,54 @@ Encoder :: struct {
         arg1 := body.payload(inst, 1)
         arg2 := body.payload(inst, 2)
 
+        if op == Op.constant and result != Val.none and not wide(ty) {
+            home := self.allocation.get(result)
+            if regalloc.in_register(home) and not regalloc.in_xmm(home) {
+                imm_reg(code, home, arg0 as u64 | ((arg1 as u64) << 32))
+                normalize_reg(code, ty, home)
+                ret
+            }
+        }
         if ir.binary(op) and wide(body.value_type(first)) {
             self.wide_binary(op, first, second)
         } else if ir.binary(op) {
-            load_value(code, first, 0)
-            load_value(code, second, 1)
             operand_ty := body.value_type(first)
+            if floating(operand_ty) and ty != Ty.i1 {
+                to := self.allocation.get(result)
+                left := self.allocation.get(first)
+                right := self.allocation.get(second)
+                dest := if regalloc.in_xmm(to) { to - 16 } else { 0 }
+                rhs := if regalloc.in_xmm(right) and (to != right or left == right) {
+                    right - 16
+                } else {
+                    xmm_home(code, right, 1, false)
+                    1 as u64
+                }
+                xmm_home(code, left, dest, false)
+                sse_binary(code, op, ty, dest, rhs)
+                xmm_home(code, to, dest, true)
+                ret
+            }
+            opcode := alu_opcode(op)
+            if opcode != 0 and not floating(operand_ty) {
+                to := self.allocation.get(result)
+                left := self.allocation.get(first)
+                right := self.allocation.get(second)
+                dest := if regalloc.in_register(to) { to } else { 0 }
+                rhs := if regalloc.in_register(right) and (to != right or left == right) {
+                    right
+                } else {
+                    load_home(code, right, 1)
+                    1 as u64
+                }
+                load_home(code, left, dest)
+                reg_op(code, opcode, dest, rhs)
+                normalize_reg(code, ty, dest)
+                save_home(code, to, dest)
+                ret
+            }
+            self.load_value(code, first, 0)
+            self.load_value(code, second, 1)
             if floating(operand_ty) { float_binary(code, op, operand_ty) } else {
                 binary(code, op, operand_ty)
             }
@@ -744,8 +1031,8 @@ Encoder :: struct {
                     self.image.relative(self.addresses.get(arg0 as u64 - 1), 9)
                 }
                 offset {
-                    load_value(code, first, 0)
-                    load_value(code, second, 1)
+                    self.load_value(code, first, 0)
+                    self.load_value(code, second, 1)
                     if arg2 != 1 {
                         if arg2 > 2147483647 { fail("pointer stride is too large") }
                         code.raw("\x48\x69\xc9")
@@ -754,10 +1041,10 @@ Encoder :: struct {
                     code.raw("\x48\x01\xc8")
                 }
                 cast, invert, neg {
-                    load_value(code, first, 0)
+                    self.load_value(code, first, 0)
                     source := body.value_type(first)
                     if wide(source) {
-                        frame_access(code, 0x8b, 2, slot(first) - 8)
+                        frame_access(code, 0x8b, 2, self.slot(first) - 8)
                     } else if wide(ty) {
                         code.raw(if signed(source) { "\x48\x99" } else { "\x31\xd2" })
                     }
@@ -789,22 +1076,22 @@ Encoder :: struct {
                     }
                 }
                 load {
-                    load_value(code, first, 0)
+                    self.load_value(code, first, 0)
                     if wide(ty) { code.raw("\x48\x8b\x50\x08\x48\x8b\x00") } else {
                         read_mem(code, width(ty))
                     }
                 }
                 store {
-                    load_value(code, first, 0)
-                    load_value(code, second, 1)
+                    self.load_value(code, first, 0)
+                    self.load_value(code, second, 1)
                     source := body.value_type(second)
                     if wide(source) {
-                        frame_access(code, 0x8b, 2, slot(second) - 8)
+                        frame_access(code, 0x8b, 2, self.slot(second) - 8)
                         code.raw("\x48\x89\x50\x08\x48\x89\x08")
                     } else { write_mem(code, width(source)) }
                 }
                 zero {
-                    load_value(code, first, 7)
+                    self.load_value(code, first, 7)
                     code.put(0xb9, 1)
                     code.put(
                         if arg2 == 0 { arg1 as u64 } else { sysv.layout(self.air, arg1).size }
@@ -813,35 +1100,59 @@ Encoder :: struct {
                     code.raw("\x31\xc0\xf3\xaa")
                 }
                 copy, copy_bytes {
-                    load_value(code, first, 7)
-                    load_value(code, second, 6)
+                    self.load_value(code, first, 7)
+                    self.load_value(code, second, 6)
                     if op == Op.copy {
                         code.put(0xb9, 1)
                         code.put(arg2 as u64, 4)
                     } else {
-                        load_value(code, body.operand(inst, 2), 1)
+                        self.load_value(code, body.operand(inst, 2), 1)
                     }
                     memmove(code)
                 }
-                call, call_indirect { self.invoke(inst, op == Op.call, arg0, arg2, ty) }
-                jump { self.edge(body.successor(inst, 0)) }
+                call, call_indirect {
+                    self.invoke(inst, op == Op.call, arg0, arg2)
+                    if floating(ty) {
+                        xmm_home(code, self.allocation.get(result), 0, true)
+                        ret
+                    }
+                }
+                jump { self.edge(body.successor(inst, 0), true) }
                 branch {
-                    load_value(code, first, 0)
-                    code.raw("\x48\x85\xc0\x0f\x84")
-                    skip := code.len()
-                    code.put(0, 4)
-                    self.edge(body.successor(inst, 0))
-                    rel32(code, skip, code.len())
-                    self.edge(body.successor(inst, 1))
+                    yes := body.successor(inst, 0)
+                    no := body.successor(inst, 1)
+                    home := self.allocation.get(first)
+                    reg := if regalloc.in_register(home) { home } else { 0 }
+                    load_home(code, home, reg)
+                    reg_op(code, 0x85, reg, reg)
+                    if body.argument_count(yes) == 0 and body.edge_target(yes) != self.next_block {
+                        code.raw("\x0f\x85")
+                        self.jump_to(body.edge_target(yes))
+                        self.edge(no, true)
+                    } else if body.argument_count(no) == 0 {
+                        code.raw("\x0f\x84")
+                        self.jump_to(body.edge_target(no))
+                        self.edge(yes, true)
+                    } else {
+                        flip := body.edge_target(yes) == self.next_block
+                        code.raw(if flip { "\x0f\x85" } else { "\x0f\x84" })
+                        skip := code.len()
+                        code.put(0, 4)
+                        self.edge(if flip { no } else { yes }, false)
+                        rel32(code, skip, code.len())
+                        self.edge(if flip { yes } else { no }, true)
+                    }
                 }
                 ret_ {
                     if first != Val.none {
-                        load_value(code, first, 0)
-                        if floating(body.value_type(first)) { float_in(code, 0) }
+                        if floating(body.value_type(first)) {
+                            xmm_home(code, self.allocation.get(first), 0, false)
+                        } else { self.load_value(code, first, 0) }
                         if wide(body.value_type(first)) {
-                            frame_access(code, 0x8b, 2, slot(first) - 8)
+                            frame_access(code, 0x8b, 2, self.slot(first) - 8)
                         }
                     }
+                    saved_registers(code, self.allocation.saved, false)
                     code.raw("\xc9\xc3")
                 }
                 trap { code.raw("\x0f\x0b") }
@@ -867,8 +1178,8 @@ Encoder :: struct {
         }
         if result != Val.none {
             normalize(code, ty)
-            save_value(code, result)
-            if wide(ty) { frame_access(code, 0x89, 2, slot(result) - 8) }
+            self.save_value(code, result)
+            if wide(ty) { frame_access(code, 0x89, 2, self.slot(result) - 8) }
         }
     }
 }
@@ -893,19 +1204,31 @@ emit_body :: fn(
     symbols, addresses Slice(u32)
     body &ir.Function
     index u32
+    workspace &regalloc.Workspace
 ) {
     code := &image.text
     start := code.len()
+    allocation := workspace.allocate(body)
     block_count := body.block_count()
-    max_params: u32 = 0
+    max_args: u32 = 0
     block: u64 = 1
     while block <= block_count {
-        count := body.parameter_count(block as Block)
-        if count > max_params { max_params = count }
+        last := body.last_inst(block as Block)
+        if last != Inst.none {
+            op := body.opcode(last)
+            if op == Op.jump or op == Op.branch {
+                count := body.argument_count(body.successor(last, 0))
+                if count > max_args { max_args = count }
+                if op == Op.branch {
+                    count = body.argument_count(body.successor(last, 1))
+                    if count > max_args { max_args = count }
+                }
+            }
+        }
         block = block + 1
     }
-    scratch := body.value_count() * 16
-    stack_top := scratch + max_params as u64 * 16
+    scratch := allocation.bytes
+    stack_top := scratch + max_args as u64 * 16
     end := stack_top
     block = 1
     while block <= block_count {
@@ -921,14 +1244,15 @@ emit_body :: fn(
     }
     frame := aligned(end, 16)
     if frame > 2147483647 { fail("stack frame is too large") }
-    code.raw("\x55\x48\x89\xe5\x48\x81\xec")
-    code.put(frame, 4)
+    code.raw("\x55\x48\x89\xe5")
+    adjust_stack(code, frame, true)
+    saved_registers(code, allocation.saved, true)
     count := body.parameter_count(Block.entry)
     pos: u32 = 0
     args := Arguments.new()
     while pos < count {
         val := body.parameter(Block.entry, pos)
-        args.move(code, val, body.value_type(val), true)
+        args.move(code, allocation.get(val), body.value_type(val), true)
         pos = pos + 1
     }
     encoder: Encoder = .{
@@ -937,13 +1261,16 @@ emit_body :: fn(
         symbols: symbols
         addresses: addresses
         body: body
+        allocation: allocation
         blocks: Vec(u64).with_cap(block_count)
         jumps: Vec(Fixup).new()
         scratch: scratch
         stack_top: stack_top
+        next_block: Block.none
     }
     block = 1
     while block <= block_count {
+        encoder.next_block = (block + 1) as Block
         encoder.blocks.push(code.len())
         inst := body.first_inst(block as Block)
         while inst != Inst.none {
@@ -1020,6 +1347,7 @@ emit :: fn(arena &Arena, air &program.Program, executable, hosted bool) Str {
         } else { index }
         addresses.push(address)
     }
+    workspace := regalloc.Workspace.new()
     first_global := image.symbol_count()
     at: u64 = 0
     for decl in air.declarations {
@@ -1046,6 +1374,7 @@ emit :: fn(arena &Arena, air &program.Program, executable, hosted bool) Str {
                     addresses.as_slice()
                     air.functions.ptr_at(decl.body as u64 - 1)
                     index
+                    &workspace
                 )
                 address := addresses.get(at)
                 if address != index { emit_wrapper(&image, air, decl, address, index) }
@@ -1076,6 +1405,7 @@ emit :: fn(arena &Arena, air &program.Program, executable, hosted bool) Str {
     } else if air.initializer != ir.Symbol.none {
         image.initializer = symbols.get(air.initializer as u64 - 1)
     }
+    workspace.destroy()
     symbols.destroy()
     addresses.destroy()
     elf.emit(arena, &image, first_global)

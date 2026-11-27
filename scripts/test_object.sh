@@ -57,6 +57,49 @@ status=0
 timeout 5s "$work/float" || status=$?
 [[ "$status" == 1 ]]
 
+cat > "$work/registers.a" <<'ABYSS'
+add :: extern fn(left, right i64) i64 { left + right }
+step :: fn(value f64) f64 { value + 1.0 }
+
+integer_pressure :: fn(one, two, three, four, five, six, seven, eight, nine, ten i64) i64 {
+    sum := add(one, ten)
+    sum + one + two + three + four + five + six + seven + eight + nine + ten
+}
+
+float_pressure :: fn(one, two, three, four, five, six, seven, eight, nine, ten f64) f64 {
+    sum := step(one)
+    sum + one + two + three + four + five + six + seven + eight + nine + ten
+}
+
+rotate :: fn(first, second, rounds i64) i64 {
+    left := first
+    right := second
+    count := rounds
+    while count > 0 {
+        saved := left
+        left = right
+        right = saved
+        count = count - 1
+    }
+    left * 10 + right
+}
+
+main :: fn() i32 {
+    if integer_pressure(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) != 66 { ret 91 }
+    if float_pressure(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0) != 57.0 { ret 92 }
+    if rotate(2, 7, 3) != 72 or rotate(2, 7, 4) != 27 { ret 93 }
+    0
+}
+ABYSS
+"$compiler" "${options[@]}" "$work/registers.a" "$work/registers.o"
+ld -o "$work/registers" "$work/registers.o"
+timeout 5s "$work/registers"
+if command -v objdump > /dev/null; then
+    add_code=$(objdump -d --disassemble=add "$work/registers.o")
+    [[ "$add_code" == *addq* || "$add_code" == *$'\tadd '* ]]
+    [[ "$add_code" != *'(%rbp)'* ]]
+fi
+
 cat > "$work/initialized.a" <<'ABYSS'
 value: i32 = 42
 stored :: extern fn() i32 { value }

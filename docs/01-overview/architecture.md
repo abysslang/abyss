@@ -108,8 +108,11 @@ cc -no-pie main.o -lm -pthread -o main
 ```
 
 The `cc` command only links; the input is already machine code. The backend
-uses stack slots for SSA values and supports integers through 128 bits,
-floating point, indirect calls, and System V argument and return conventions.
+allocates registers directly from AIR, using flat tables and a bounded scan.
+Short-lived scalar values use registers, selected values carried between
+blocks use callee-saved registers, and wide values and spills use stack slots.
+The backend supports integers through 128 bits, floating point, indirect
+calls, and System V argument and return conventions.
 Some wide integer operations need compiler runtime helpers. Use `--library`
 to emit exported functions without a program entry point. The ELF backend
 knows the glibc layouts and constants used by the standard library. Use C99

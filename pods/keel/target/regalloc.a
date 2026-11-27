@@ -1,0 +1,238 @@
+ir :: @import("../ir")
+mem :: @import("std/mem")
+Val :: ir.Val
+Ty :: ir.Ty
+Op :: ir.Op
+Block :: ir.Block
+Inst :: ir.Inst
+Edge :: ir.Edge
+Function :: ir.Function
+
+spill :: fn() u64 { 32 }
+memory :: fn(offset u64) u64 { offset + spill() }
+offset :: fn(home u64) u64 { home - spill() }
+in_register :: fn(home u64) bool { home < spill() }
+in_xmm :: fn(home u64) bool { home >= 16 and in_register(home) }
+
+floating :: fn(ty Ty) bool { ty == Ty.f32_ or ty == Ty.f64_ }
+wide :: fn(ty Ty) bool { ty == Ty.i128_ or ty == Ty.u128_ }
+
+callee :: fn(index u64) u64 { if index == 0 { 3 } else { 11 + index } }
+
+Info :: struct {
+    def_block, use_block Block
+    last, barrier, uses  u32
+    diverse              bool
+
+    local :: fn(self &Self) bool {
+        not self.diverse and (self.uses == 0 or self.def_block == self.use_block)
+    }
+}
+
+Active :: struct {
+    value Val
+    last  u32
+}
+
+Allocation :: struct {
+    homes &u64
+    info  &Info
+    saved u32
+    bytes u64
+
+    get :: fn(self &Self, value Val) u64 { self.homes[value as u64 - 1] }
+
+    block :: fn(self &Self, value Val) Block { self.info[value as u64 - 1].def_block }
+}
+
+Workspace :: struct {
+    info  Vec(Info)
+    homes Vec(u64)
+
+    new :: fn() Self { .{ info: Vec(Info).new(), homes: Vec(u64).new() } }
+
+    destroy :: fn(self &Self) {
+        self.info.destroy()
+        self.homes.destroy()
+    }
+
+    at :: fn(self &Self, value Val) &Info { self.info.ptr_at(value as u64 - 1) }
+
+    record :: fn(self &Self, value Val, block Block, position, barrier u32) {
+        if value == Val.none { ret }
+        item := self.at(value)
+        if item.uses == 0 {
+            item.use_block = block
+        } else if item.use_block != block {
+            item.diverse = true
+        }
+        item.uses = item.uses + 1
+        item.last = position
+        if barrier > item.barrier { item.barrier = barrier }
+    }
+
+    inspect :: fn(self &Self, body &Function) {
+        count := body.value_count()
+        self.info.clear()
+        self.info.reserve(count)
+        self.info.len = count
+        mem.mem_set(self.info.ptr as &u8, 0, count * @sizeof(Info))
+        self.homes.clear()
+        self.homes.reserve(count)
+        self.homes.len = count
+
+        position: u32 = 0
+        for index in Range.new(1, (body.block_count() + 1) as i32) {
+            block := index as Block
+            position = position + 1
+            for param in Range.new(0, body.parameter_count(block) as i32) {
+                self.at(body.parameter(block, param as u32)).def_block = block
+            }
+            barrier: u32 = 0
+            inst := body.first_inst(block)
+            while inst != Inst.none {
+                position = position + 1
+                op := body.opcode(inst)
+                if clobbers(body, inst, op) { barrier = position }
+                value := body.result(inst)
+                if value != Val.none { self.at(value).def_block = block }
+                arity := if op == Op.call or op == Op.call_indirect {
+                    body.payload(inst, 2) as u64
+                } else { ir.fixed_uses(op) }
+                for operand in Range.new(0, arity as i32) {
+                    self.record(body.operand(inst, operand as u64), block, position, barrier)
+                }
+                if op == Op.jump or op == Op.branch {
+                    for arm in Range.new(0, if op == Op.jump { 1 } else { 2 }) {
+                        edge := body.successor(inst, arm as u64)
+                        for arg in Range.new(0, body.argument_count(edge) as i32) {
+                            self.record(body.argument(edge, arg as u32), block, position, barrier)
+                        }
+                    }
+                }
+                inst = body.next_inst(inst)
+            }
+        }
+    }
+
+    globals :: fn(self &Self, body &Function) u64 {
+        best: [3]Val
+        scores: [3]u64
+        for index in Range.new(0, self.info.len as i32) {
+            at := index as u64
+            self.homes.set(at, spill())
+            value := (at + 1) as Val
+            item := self.info.get(at)
+            if item.local() or item.uses == 0 { cont }
+            ty := body.value_type(value)
+            if floating(ty) or wide(ty) { cont }
+            score := item.uses as u64 * 2
+            if body.defining_inst(value) == Inst.none and item.def_block != Block.entry {
+                score = score + 5
+            }
+            if score <= scores[2] { cont }
+            pos: u64 = 2
+            while pos != 0 and score > scores[pos - 1] {
+                best[pos] = best[pos - 1]
+                scores[pos] = scores[pos - 1]
+                pos = pos - 1
+            }
+            best[pos] = value
+            scores[pos] = score
+        }
+        used: u64 = 0
+        while used < 3 and best[used] != Val.none {
+            self.homes.set(best[used] as u64 - 1, callee(used))
+            used = used + 1
+        }
+        used
+    }
+
+    place :: fn(self &Self, value Val, ty Ty, position u32, globals u64, active &Active) {
+        item := self.at(value)
+        if not item.local() or item.uses == 0 or wide(ty) { ret }
+        across_call := item.barrier > position
+        if floating(ty) and across_call { ret }
+        general: [7]u64 = .[ 10, 11, 3, 12, 13, 14, 15 ]
+        remaining := if floating(ty) { 8 } else { 7 }
+        best: u64 = 32
+        farthest := item.last
+        index: u64 = if floating(ty) { 0 } else { (if across_call { 2 } else { 0 }) as u64 }
+        while index < remaining {
+            pos := index
+            index = index + 1
+            if not floating(ty) and pos >= 2 and pos < 2 + globals { cont }
+            reg := if floating(ty) { 24 + pos } else { general[pos] }
+            previous := active[reg]
+            if previous.last <= position {
+                best = reg
+                break
+            }
+            if previous.last > farthest {
+                farthest = previous.last
+                best = reg
+            }
+        }
+        if best == 32 { ret }
+        previous := active[best]
+        if previous.last > position { self.homes.set(previous.value as u64 - 1, spill()) }
+        active[best] = .{ value: value, last: item.last }
+        self.homes.set(value as u64 - 1, best)
+    }
+
+    allocate :: fn(self &Self, body &Function) Allocation {
+        self.inspect(body)
+        globals := self.globals(body)
+        active: [32]Active
+        position: u32 = 0
+        for index in Range.new(1, (body.block_count() + 1) as i32) {
+            block := index as Block
+            position = position + 1
+            for param in Range.new(0, body.parameter_count(block) as i32) {
+                value := body.parameter(block, param as u32)
+                self.place(value, body.value_type(value), position, globals, &active[0])
+            }
+            inst := body.first_inst(block)
+            while inst != Inst.none {
+                position = position + 1
+                value := body.result(inst)
+                if value != Val.none {
+                    self.place(value, body.value_type(value), position, globals, &active[0])
+                }
+                inst = body.next_inst(inst)
+            }
+        }
+        saved: u32 = 0
+        bytes: u64 = 0
+        for home in self.homes {
+            if home == 3 or (home >= 12 and home < 16) {
+                bit := (1 as u32) << home as u32
+                if (saved & bit) == 0 {
+                    saved = saved | bit
+                    bytes = bytes + 8
+                }
+            }
+        }
+        for index in Range.new(0, self.homes.len as i32) {
+            at := index as u64
+            if self.homes.get(at) != spill() { cont }
+            ty := body.value_type((at + 1) as Val)
+            if ty == Ty.void_ { cont }
+            bytes = if wide(ty) { (bytes + 31) & ~(15 as u64) } else { bytes + 8 }
+            self.homes.set(at, memory(bytes))
+        }
+        .{ homes: self.homes.ptr, info: self.info.ptr, saved: saved, bytes: bytes }
+    }
+}
+
+clobbers :: fn(body &Function, inst Inst, op Op) bool {
+    if op == Op.call or op == Op.call_indirect or op == Op.c_value { ret true }
+    if op == Op.div or op == Op.rem { ret wide(body.value_type(body.operand(inst, 0))) }
+    if op == Op.cast {
+        source := body.value_type(body.operand(inst, 0))
+        result := body.value_type(body.result(inst))
+        ret (floating(source) and (wide(result) or result == Ty.u64_)) or
+            (wide(source) and floating(result))
+    }
+    false
+}
