@@ -4,18 +4,11 @@
 
 **Built for the deep.**
 
-A statically typed, data-oriented systems programming language. Pairs modern ergonomics with the transparency and speed of C.
+Carry nothing to the bottom. Abyss is a self-hosted systems language that burns off abstraction at compile time—emitting native x86-64 ELF, C99, and WASI through **Keel** with zero runtime behind your binary.
 
-- **100% Self-Hosted:** Bit-for-bit deterministic bootstrap verification.
-- **Pure C99 Target:** Emits standard portable C. Compiles with GCC, Clang, or MSVC.
-- **Integrated Bytecode VM:** Instant compile-and-run without external toolchain latency.
-- **C Interoperability:** [Import C functions, export Abyss functions, and pass C-compatible structs](docs/02-quickstart/c-interop.md).
-- **Zero-Cost Formatting & Reflection:** Compile-time format verification and type inspection with zero runtime overhead.
-- **Compile-Time Evaluation:** Run arbitrary logic at compile time via `cmpt` and macros.
-- **First-Class Types:** Compute, return, and pass types dynamically at compile time.
-- **Zero-Dependency Bootstrap:** Standalone C99 source compiles anywhere with a single `cc` command.
-
-🌐 **Website & Docs:** [**jhosein58.github.io/abyss**](https://jhosein58.github.io/abyss)
+- **Instant VM, native Keel** — Iterate on an integrated bytecode VM; ship SSA-optimized machine code or standalone C.
+- **Compile-time first** — First-class types, layout reflection, `cmpt`, and format checks resolve before execution.
+- **Deterministic to the bit** — Bit-identical multi-generation bootstrap with zero external dependencies and direct C ABI interop.
 
 ---
 
@@ -55,8 +48,8 @@ main :: fn() {
             sub   { s.push(s.pop() - s.pop()) }
             mul   { s.push(s.pop() * s.pop()) }
 
-            print { 
-                printf("result = {}\n", .{s.pop()}) 
+            print {
+                printf("result = {}\n", .(s.pop()))
             }
         }
     }
@@ -68,30 +61,18 @@ main :: fn() {
 ## Installation
 
 ```sh
-# Linux / macOS
+# Linux (x86_64)
 curl -fsSL https://raw.githubusercontent.com/abysslang/abyss/main/scripts/install.sh | bash
 
-# Windows (PowerShell)
+# Windows (x86_64 PowerShell)
 irm https://raw.githubusercontent.com/abysslang/abyss/main/scripts/install.ps1 | iex
 ```
 
 ---
 
-## Quick Start
+## Website
 
-```sh
-# Run immediately via VM (zero compile latency)
-./abyss r main.a
-
-# Compile and run optimized native binary (-O3)
-./abyss br main.a
-
-# Fast test suite
-./abyss test
-
-# Package manager
-./abyss sonar help
-```
+Visit the official website at [jhosein58.github.io/abyss](https://jhosein58.github.io/abyss), or read the [Into the Abyss](docs/README.md) book directly in this repository.
 
 ---
 
