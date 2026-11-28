@@ -49,6 +49,7 @@ Module :: struct {
     reflected   HashMap(u64, Symbol)
     abi_types   HashMap(u32, u32)
     abi_layouts HashMap(u32, bool)
+    locals      HashMap(u32, Val)
     heap        HeapHooks
 
     new :: fn(db &Nexus, arena &Arena) Self {
@@ -64,6 +65,7 @@ Module :: struct {
             reflected: HashMap(u64, Symbol).new()
             abi_types: HashMap(u32, u32).new()
             abi_layouts: HashMap(u32, bool).new()
+            locals: HashMap(u32, Val).new()
             heap: HeapHooks.find(db)
         }
     }
@@ -224,17 +226,18 @@ Context :: struct {
     module                &Module
     db                    &Nexus
     out                   keel.Function
-    locals                HashMap(u32, Val)
+    locals                &HashMap(u32, Val)
     break_to, continue_to Block
     return_ty             u32
     return_slot           Val
 
-    new :: fn(module &Module, result u32) Self {
+    new :: fn(module &Module, result u32, locals &HashMap(u32, Val)) Self {
+        locals.clear()
         .{
             module: module
             db: module.db
             out: keel.Function.new()
-            locals: HashMap(u32, Val).new()
+            locals: locals
             break_to: Block.none
             continue_to: Block.none
             return_ty: result
@@ -1128,7 +1131,7 @@ lower_body_impl :: fn(module &Module, pending Pending) {
     node := db.get_fn_node(sym)
     if db.is_mono_sym(sym) { db.restore_mono_func(sym) }
     sig := func_type(db, sym, node)
-    ctx := Context.new(module, db.types.func_return(sig))
+    ctx := Context.new(module, db.types.func_return(sig), &module.locals)
     decl := module.air.get(pending.target)
     signature := if decl.count == 0 { Slice(Ty).empty() } else {
         Slice(Ty).new(module.air.types.ptr_at(decl.params as u64), decl.count as u64)
@@ -1155,7 +1158,6 @@ lower_body_impl :: fn(module &Module, pending Pending) {
     }
     body := db.hir.extra(node)
     ctx.finish(expr(&ctx, body), body)
-    ctx.locals.destroy()
     module.air.define(pending.target, ctx.out)
 }
 
@@ -1168,7 +1170,8 @@ lower_globals :: fn(module &Module, lowered &u64) {
 lower_globals_impl :: fn(module &Module, lowered &u64) {
     if module.globals.len == 0 and module.metadata.len == 0 { ret }
     module.air.initializer = module.air.declare("$init", Slice(Ty).empty(), Ty.void_, false)
-    ctx := Context.new(module, types.ty_id_unit())
+    globals_locals := HashMap(u32, Val).new()
+    ctx := Context.new(module, types.ty_id_unit(), &globals_locals)
     ctx.out.begin(ctx.out.block())
     index: u64 = 0
     prepared: u64 = 0
@@ -1194,7 +1197,7 @@ lower_globals_impl :: fn(module &Module, lowered &u64) {
         index = index + 1
     }
     ctx.out.ret_void()
-    ctx.locals.destroy()
+    globals_locals.destroy()
     module.air.define(module.air.initializer, ctx.out)
 }
 
@@ -1245,6 +1248,7 @@ lower_impl :: fn(db &Nexus, arena &Arena, file, entry, selected u32) Program {
     module.reflected.destroy()
     module.abi_types.destroy()
     module.abi_layouts.destroy()
+    module.locals.destroy()
     module.metadata.destroy()
     opt.run(&module.air, if db.target_arch == Arch.wasm32 { 4 } else { 8 })
     module.air
@@ -1411,43 +1415,72 @@ call :: fn(ctx &Context, node, callee u32, supplied Val) Val {
     address := if target == Symbol.none { expr(ctx, callee) } else { Val.none }
     result := db.types.func_return(sig)
     params := db.types.func_params(sig)
-    args := Vec(Val).new()
+    raw_args := items(db, db.hir.rhs(node))
+    use_heap := raw_args.len > 14
+    stack_args: [16]Val
+    heap_args := if use_heap { Vec(Val).with_cap(raw_args.len + 2) } else { Vec(Val).new() }
+    arg_count: u64 = 0
     result_slot := if storage.aggregate(db, result) { ctx.slot(result, node) } else { Val.none }
-    if result_slot != Val.none { args.push(result_slot) }
+    if result_slot != Val.none {
+        if use_heap { heap_args.push(result_slot) } else {
+            stack_args[arg_count] = result_slot
+            arg_count = arg_count + 1
+        }
+    }
     if target != Symbol.none and db.hir.kind(callee) == k.member {
         base := db.hir.lhs(callee)
         if db.module_receiver(base) != none() {
             module_effect(ctx, base)
         } else if func_has_self(db, func) {
             arg := if supplied != Val.none { supplied } else { receiver(ctx, base, params.get(0)) }
-            args.push(arg)
+            if use_heap { heap_args.push(arg) } else {
+                stack_args[arg_count] = arg
+                arg_count = arg_count + 1
+            }
         }
-        if not ctx.open() { args.destroy(), ret Val.none }
+        if not ctx.open() {
+            if use_heap { heap_args.destroy() }
+            ret Val.none
+        }
     }
     index: u32 = 0
-    for arg in items(db, db.hir.rhs(node)) {
+    for arg in raw_args {
         ty := db.get_node_type(arg)
         if not db.is_const_call_arg(node, index) and ty != types.ty_id_type() {
             value := expr(ctx, arg)
-            if not ctx.open() { args.destroy(), ret Val.none }
+            if not ctx.open() {
+                if use_heap { heap_args.destroy() }
+                ret Val.none
+            }
             if target != Symbol.none {
                 decl := ctx.module.air.get(target)
-                if args.len < decl.count as u64 {
-                    want := ctx.module.air.types.get(decl.params as u64 + args.len)
+                cur_len := if use_heap { heap_args.len } else { arg_count }
+                if cur_len < decl.count as u64 {
+                    want := ctx.module.air.types.get(decl.params as u64 + cur_len)
                     value = ctx.out.cast(want, value)
                 }
             }
-            args.push(value)
+            if use_heap { heap_args.push(value) } else {
+                stack_args[arg_count] = value
+                arg_count = arg_count + 1
+            }
         }
         index = index + 1
     }
+    args_slice := if use_heap {
+        heap_args.as_slice()
+    } else if arg_count == 0 {
+        Slice(Val).empty()
+    } else {
+        Slice(Val).new(&stack_args[0], arg_count)
+    }
     ty := if result_slot != Val.none { Ty.void_ } else { storage.scalar(db, result, node) }
     value := if target == Symbol.none {
-        ctx.out.call_abi(address, ty, args.as_slice(), ctx.module.abi_type(sig, node))
+        ctx.out.call_abi(address, ty, args_slice, ctx.module.abi_type(sig, node))
     } else {
-        ctx.out.call(target, ty, args.as_slice())
+        ctx.out.call(target, ty, args_slice)
     }
-    args.destroy()
+    if use_heap { heap_args.destroy() }
     if result == types.ty_id_never() { ctx.out.trap() }
     if result_slot != Val.none { ret result_slot }
     value

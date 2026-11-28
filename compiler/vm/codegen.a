@@ -113,8 +113,10 @@ VmCodeGen :: struct {
     local_types         Vec(u32)
     init_field_ids      Vec(u32)
     local_syms          Vec(u32)
-    fn_syms             Vec(u32)
-    fn_ips              Vec(u32)
+    fn_entries          HashMap(u32, u32)
+    visited_fns         HashSet(u32)
+    work_queue          Vec(u32)
+    work_types          Vec(u32)
     call_fixups_ip      Vec(u32)
     call_fixups_sym     Vec(u32)
     if_patches          Vec(u32)
@@ -140,8 +142,10 @@ VmCodeGen :: struct {
             local_types: Vec(u32).new()
             init_field_ids: Vec(u32).new()
             local_syms: Vec(u32).new()
-            fn_syms: Vec(u32).new()
-            fn_ips: Vec(u32).new()
+            fn_entries: HashMap(u32, u32).new()
+            visited_fns: HashSet(u32).new()
+            work_queue: Vec(u32).new()
+            work_types: Vec(u32).new()
             call_fixups_ip: Vec(u32).new()
             call_fixups_sym: Vec(u32).new()
             if_patches: Vec(u32).new()
@@ -160,8 +164,10 @@ VmCodeGen :: struct {
         self.local_types.destroy()
         self.init_field_ids.destroy()
         self.local_syms.destroy()
-        self.fn_syms.destroy()
-        self.fn_ips.destroy()
+        self.fn_entries.destroy()
+        self.visited_fns.destroy()
+        self.work_queue.destroy()
+        self.work_types.destroy()
         self.call_fixups_ip.destroy()
         self.call_fixups_sym.destroy()
         self.if_patches.destroy()
@@ -577,19 +583,13 @@ VmCodeGen :: struct {
     }
 
     get_fn_entry :: fn(self &Self, sym_id u32) u32 {
-        i: u64 = 0
-        while i < self.fn_syms.len {
-            if self.fn_syms.get(i) == sym_id {
-                ret self.fn_ips.get(i)
-            }
-            i = i + 1
-        }
+        found := self.fn_entries.get(sym_id)
+        if found != (0 as &u32) { ret *found }
         0
     }
 
     register_fn_entry :: fn(self &Self, sym_id u32, ip u32) {
-        self.fn_syms.push(sym_id)
-        self.fn_ips.push(ip)
+        self.fn_entries.insert(sym_id, ip)
     }
 
     finish_linking :: fn(self &Self) {

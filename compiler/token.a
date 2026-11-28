@@ -95,6 +95,14 @@ TokenStream :: struct {
         }
     }
 
+    clear :: fn(self &Self) {
+        self.kinds.clear()
+        self.starts.clear()
+        self.lens.clear()
+        self.texts.clear()
+        self.newline_befores.clear()
+    }
+
     destroy :: fn(self &Self) {
         self.kinds.destroy()
         self.starts.destroy()

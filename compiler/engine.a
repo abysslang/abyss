@@ -25,29 +25,45 @@ type_defs :: @import("./types")
 slot_none :: @import("./unify").slot_none
 
 Engine :: struct {
-    nexus Nexus
-    arena &Arena
+    nexus         Nexus
+    arena         &Arena
+    tokens        TokenStream
+    splice_tokens TokenStream
     new :: fn(arena &Arena) Self {
-        res: Self = .{ nexus: Nexus.new(), arena: arena }
+        res: Self = .{
+            nexus: Nexus.new()
+            arena: arena
+            tokens: TokenStream.new()
+            splice_tokens: TokenStream.new()
+        }
         res.nexus.init_tuple_names()
         res
     }
 
     destroy :: fn(self &Self) {
+        self.tokens.destroy()
+        self.splice_tokens.destroy()
         self.nexus.destroy()
     }
 
     parse_module :: fn(self &Self, fid u32) {
         db := &self.nexus
-        tokens := TokenStream.new()
+        self.tokens.clear()
         source := db.get_file_source(fid)
         profile.source(source)
-        lex(&tokens, source, db.get_file_path(fid))
+        lex(&self.tokens, source, db.get_file_path(fid))
         span := profile.enter(Phase.frontend_parse)
-        parser := Parser_new(db, &tokens, &db.hir, fid, id_none(), 0, (tokens.count() as u32) - 1)
+        parser := Parser_new(
+            db
+            &self.tokens
+            &db.hir
+            fid
+            id_none()
+            0
+            (self.tokens.count() as u32) - 1
+        )
         parse_file(&parser)
         parser.env.destroy()
-        tokens.destroy()
         profile.leave(span)
     }
 
@@ -123,6 +139,7 @@ Engine :: struct {
     type_check_impl :: fn(self &Self, sym_id u32) {
         hir_start := self.nexus.sym_hir_start(sym_id)
         hir_end := self.nexus.sym_hir_end(sym_id)
+        dirty_mark := self.nexus.unify.dirty_mark()
 
         tyck.type_check(self, hir_start, hir_end)
         global := self.nexus.global_var(sym_id)
@@ -133,8 +150,9 @@ Engine :: struct {
         }
         fn_node := self.nexus.get_fn_node(sym_id)
         if fn_node != id_none() {
-            tyck.finalize_inferred_types(self, fn_node)
+            tyck.finalize_inferred_types_range(self, fn_node, dirty_mark)
         }
+        self.nexus.unify.truncate_dirty(dirty_mark)
     }
 
     predeclare_nominal :: fn(self &Self, sym_id u32) {

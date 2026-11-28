@@ -1357,46 +1357,48 @@ eval_const_impl :: fn(db &Nexus, id u32) u64 {
     }
     db.init_comptime()
     db.comptime_depth = db.comptime_depth + 1
-    db.comptime_cg.reset_locals()
-    builder := vm_codegen.VmCodeBuilder.new(db.comptime_cg)
-    start_ip := db.comptime_cg.chunk.buf.len as u32
-    visited := HashSet(u32).new()
-    queue := Vec(u32).new()
-    type_queue := Vec(u32).new()
+    cg := db.comptime_cg
+    cg.reset_locals()
+    builder := vm_codegen.VmCodeBuilder.new(cg)
+    start_ip := cg.chunk.buf.len as u32
+    cg.work_queue.clear()
+    cg.work_types.clear()
     ctx: LowerCtx = .{
         db: db
-        ccg: db.comptime_cg
+        ccg: cg
         builder: &builder
         empty: vm_codegen.VmVal.empty()
         arena: &db.comptime_arena
-        queue: &queue
-        type_queue: &type_queue
+        queue: &cg.work_queue
+        type_queue: &cg.work_types
         global_init: false
     }
     res_val := lower_body(&ctx, id)
     if res_val.kind != vm_codegen.VmValKind.none {
-        db.comptime_cg.ensure_on_stack(res_val)
+        cg.ensure_on_stack(res_val)
     } else {
-        db.comptime_cg.chunk.inst(OpCode.push_0)
+        cg.chunk.inst(OpCode.push_0)
     }
-    db.comptime_cg.chunk.inst(OpCode.ret_val)
+    cg.chunk.inst(OpCode.ret_val)
 
-    for q_sym in Worklist(u32).new(&queue) {
-        if visited.insert(q_sym) {
+    qi: u64 = 0
+    while qi < cg.work_queue.len {
+        q_sym := cg.work_queue.get(qi)
+        qi = qi + 1
+        if cg.visited_fns.insert(q_sym) {
             lower_one_function(&ctx, q_sym)
         }
     }
-    for ty in type_queue.as_slice() {
+    for ty in cg.work_types.as_slice() {
         if db.native_type_node(ty) != id_none() { reject_c_headers(db, id) }
     }
-    visited.destroy()
-    queue.destroy()
-    type_queue.destroy()
+    cg.work_queue.clear()
+    cg.work_types.clear()
 
-    db.comptime_cg.finish_linking()
+    cg.finish_linking()
     profile.leave(lowering)
     execution := profile.enter(Phase.comptime_vm)
-    res := db.comptime_vm.run(&db.comptime_cg.chunk, start_ip)
+    res := db.comptime_vm.run(&cg.chunk, start_ip)
     profile.leave(execution)
     db.comptime_depth = db.comptime_depth - 1
     if nested {
