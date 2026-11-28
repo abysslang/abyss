@@ -47,19 +47,19 @@ Graph :: struct {
 
     new :: fn() Self {
         .{
-            ops: Vec(Op).new()
-            words: Vec(u32).new()
-            results: Vec(Val).new()
-            types: Vec(Ty).new()
-            defs: Vec(Inst).new()
-            param_start: Vec(u32).new()
-            param_count: Vec(u32).new()
-            param_space: Vec(u32).new()
-            params: Vec(Val).new()
-            targets: Vec(Block).new()
-            arg_start: Vec(u32).new()
-            arg_count: Vec(u32).new()
-            arg_space: Vec(u32).new()
+            ops: Vec(Op).empty()
+            words: Vec(u32).empty()
+            results: Vec(Val).empty()
+            types: Vec(Ty).empty()
+            defs: Vec(Inst).empty()
+            param_start: Vec(u32).empty()
+            param_count: Vec(u32).empty()
+            param_space: Vec(u32).empty()
+            params: Vec(Val).empty()
+            targets: Vec(Block).empty()
+            arg_start: Vec(u32).empty()
+            arg_count: Vec(u32).empty()
+            arg_space: Vec(u32).empty()
             uses: Uses.new()
         }
     }

@@ -12,11 +12,11 @@ Layout :: struct {
 
     new :: fn() Self {
         .{
-            first: Vec(Inst).new()
-            last: Vec(Inst).new()
-            prev: Vec(Inst).new()
-            next: Vec(Inst).new()
-            owner: Vec(Block).new()
+            first: Vec(Inst).empty()
+            last: Vec(Inst).empty()
+            prev: Vec(Inst).empty()
+            next: Vec(Inst).empty()
+            owner: Vec(Block).empty()
         }
     }
 
