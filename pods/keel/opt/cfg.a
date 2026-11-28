@@ -3,10 +3,12 @@ Phase :: profile.Phase
 ir :: @import("../ir")
 id :: @import("../id")
 ops :: @import("../ops")
+workspace :: @import("./workspace")
 mem :: @import("std/mem")
 Arena :: @import("std/allocator").Arena
 fall :: @import("std/sys").fall
 Function :: ir.Function
+Workspace :: workspace.Workspace
 Block :: id.Block
 Edge :: id.Edge
 Inst :: id.Inst
@@ -354,53 +356,57 @@ merge_blocks :: fn(body &Function, info &GraphInfo, merged &Block) bool {
 }
 
 run :: fn(body &Function) bool {
+    ws := Workspace.new()
+    result := run_in(body, &ws)
+    ws.destroy()
+    result
+}
+
+run_in :: fn(body &Function, ws &Workspace) bool {
     timing := profile.enter(Phase.backend_cfg)
-    result := run_impl(body)
+    result := run_impl(body, ws)
     profile.leave(timing)
     result
 }
 
-run_impl :: fn(body &Function) bool {
+run_impl :: fn(body &Function, ws &Workspace) bool {
     count := body.block_count()
     if count == 0 { ret false }
-    arena := Arena.new(4096)
+    ws.reset()
+    arena := &ws.arena
     info: GraphInfo = .{
-        starts: table(u32, &arena, count + 2)
-        incoming: table(Incoming, &arena, body.graph.targets.len + 1)
-        reachable: table(bool, &arena, count + 1)
+        starts: table(u32, arena, count + 2)
+        incoming: table(Incoming, arena, body.graph.targets.len + 1)
+        reachable: table(bool, arena, count + 1)
     }
-    seen := table(bool, &arena, count + 1)
-    merged := table(Block, &arena, count + 1)
-    queue := Vec(Block).new()
-    cur := Vec(Val).new()
-    next := Vec(Val).new()
+    seen := table(bool, arena, count + 1)
+    merged := table(Block, arena, count + 1)
+    queue := &ws.blocks
+    cur := &ws.vals
+    next := &ws.vals2
     changed := false
     pass_changed := true
     while pass_changed {
         pass_changed = false
-        info.fill(body, &queue)
+        info.fill(body, queue)
         if prune_unreachable(body, info.reachable) { pass_changed = true }
         if simplify_branches(body, info.reachable) {
             pass_changed = true
-            info.fill(body, &queue)
+            info.fill(body, queue)
             if prune_unreachable(body, info.reachable) { pass_changed = true }
         }
         if simplify_block_params(body, &info) { pass_changed = true }
-        if thread_jumps(body, info.reachable, seen, &cur, &next) {
+        if thread_jumps(body, info.reachable, seen, cur, next) {
             pass_changed = true
-            info.fill(body, &queue)
+            info.fill(body, queue)
             if prune_unreachable(body, info.reachable) { pass_changed = true }
             if simplify_branches(body, info.reachable) {
-                info.fill(body, &queue)
+                info.fill(body, queue)
                 prune_unreachable(body, info.reachable)
             }
         }
         if merge_blocks(body, &info, merged) { pass_changed = true }
         if pass_changed { changed = true }
     }
-    queue.destroy()
-    cur.destroy()
-    next.destroy()
-    arena.destroy()
     changed
 }

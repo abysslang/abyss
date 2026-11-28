@@ -115,8 +115,8 @@ Promotion :: struct {
     next  &Inst
     state &State
     cfg   Maybe(CFG)
-    live  Vec(Block)
-    walk  Vec(Block)
+    live  &Vec(Block)
+    walk  &Vec(Block)
 
     block :: fn(self &Self, slot Val, block Block) &State {
         state := self.state + id.slot(block)
@@ -158,7 +158,7 @@ Promotion :: struct {
 
     place :: fn(self &Self, address Val, item &Slot, stores u32) bool {
         if self.cfg.is_none() {
-            self.cfg = Maybe(CFG).some(CFG.build(self.arena, self.body, &self.walk))
+            self.cfg = Maybe(CFG).some(CFG.build(self.arena, self.body, self.walk))
         }
         cfg := &self.cfg.value
         cursor: u64 = 0
@@ -245,22 +245,33 @@ Promotion :: struct {
     }
 }
 
+workspace :: @import("./workspace")
+Workspace :: workspace.Workspace
+
 run :: fn(body &Function, pointer_bytes u32) bool {
+    ws := Workspace.new()
+    result := run_in(body, pointer_bytes, &ws)
+    ws.destroy()
+    result
+}
+
+run_in :: fn(body &Function, pointer_bytes u32, ws &Workspace) bool {
     timing := profile.enter(Phase.backend_mem2reg)
-    result := run_impl(body, pointer_bytes)
+    result := run_impl(body, pointer_bytes, ws)
     profile.leave(timing)
     result
 }
 
-run_impl :: fn(body &Function, pointer_bytes u32) bool {
+run_impl :: fn(body &Function, pointer_bytes u32, ws &Workspace) bool {
     found := false
     for op in body.graph.ops {
         if op == Op.stack { found = true, break }
     }
     if not found { ret false }
-    arena := Arena.new(4096)
-    slots := table(Slot, &arena, body.value_count())
-    next := table(Inst, &arena, body.graph.ops.len)
+    ws.reset()
+    arena := &ws.arena
+    slots := table(Slot, arena, body.value_count())
+    next := table(Inst, arena, body.graph.ops.len)
     for index in Range.new(1, ((body.graph.ops.len + 1) as i32)) {
         inst := index as Inst
         if body.opcode(inst) == Op.stack and body.inst_block(inst) != Block.none and
@@ -298,12 +309,12 @@ run_impl :: fn(body &Function, pointer_bytes u32) bool {
     }
     pass: Promotion = .{
         body: body
-        arena: &arena
+        arena: arena
         next: next
-        state: table(State, &arena, body.block_count())
+        state: table(State, arena, body.block_count())
         cfg: Maybe(CFG).none()
-        live: Vec(Block).new()
-        walk: Vec(Block).new()
+        live: &ws.blocks
+        walk: &ws.blocks2
     }
     changed := false
     count := body.value_count()
@@ -320,8 +331,5 @@ run_impl :: fn(body &Function, pointer_bytes u32) bool {
         }
         if actual == item.count and pass.rewrite(address, item) { changed = true }
     }
-    pass.walk.destroy()
-    pass.live.destroy()
-    arena.destroy()
     changed
 }

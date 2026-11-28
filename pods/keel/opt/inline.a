@@ -1,0 +1,160 @@
+ir :: @import("../ir")
+id :: @import("../id")
+ops :: @import("../ops")
+program :: @import("../program")
+mem :: @import("std/mem")
+Function :: ir.Function
+Program :: program.Program
+Block :: id.Block
+Inst :: id.Inst
+Val :: id.Val
+Use :: id.Use
+Op :: ops.Op
+Ty :: ops.Ty
+
+eligible_callee :: fn(callee &Function) u8 {
+    if callee.block_count() != 1 { ret 0 }
+    last := callee.last_inst(Block.entry)
+    if last == Inst.none or callee.opcode(last) != Op.ret_ { ret 0 }
+    count: u64 = 0
+    inst := callee.first_inst(Block.entry)
+    while inst != Inst.none {
+        op := callee.opcode(inst)
+        if op == Op.stack or op == Op.call or op == Op.call_indirect or op == Op.trap or
+            op == Op.jump or
+            op == Op.branch {
+            ret 0
+        }
+        count = count + 1
+        if count > 16 { ret 0 }
+        inst = callee.next_inst(inst)
+    }
+    count as u8
+}
+
+inline_call :: fn(caller &Function, call_inst Inst, callee &Function, vmap &Vec(Val)) bool {
+    p_count := callee.parameter_count(Block.entry)
+    if caller.payload(call_inst, 2) != p_count { ret false }
+    call_res := caller.result(call_inst)
+    last := callee.last_inst(Block.entry)
+    ret_op := callee.operand(last, 0)
+    if call_res != Val.none {
+        if ret_op == Val.none { ret false }
+        if caller.value_type(call_res) != callee.value_type(ret_op) { ret false }
+    }
+    pi: u32 = 0
+    while pi < p_count {
+        param := callee.parameter(Block.entry, pi)
+        arg := caller.operand(call_inst, pi as u64)
+        if arg == Val.none or caller.value_type(arg) != callee.value_type(param) { ret false }
+        pi = pi + 1
+    }
+    v_count := callee.value_count()
+    vmap.clear()
+    vmap.reserve(v_count)
+    vmap.len = v_count
+    mem.mem_set(vmap.ptr as &u8, 0, v_count * @sizeof(Val))
+    pi = 0
+    while pi < p_count {
+        param := callee.parameter(Block.entry, pi)
+        vmap.set(param as u64 - 1, caller.operand(call_inst, pi as u64))
+        pi = pi + 1
+    }
+    ci := callee.first_inst(Block.entry)
+    while ci != Inst.none {
+        op := callee.opcode(ci)
+        if op == Op.ret_ {
+            if call_res != Val.none {
+                mapped_ret := vmap.get(ret_op as u64 - 1)
+                if not caller.replace_uses(call_res, mapped_ret) { ret false }
+            }
+            break
+        }
+        w0 := callee.payload(ci, 0)
+        w1 := callee.payload(ci, 1)
+        w2 := callee.payload(ci, 2)
+        n_uses := ir.fixed_uses(op)
+        if n_uses >= 1 {
+            w0 = caller.graph.uses.add(vmap.get(callee.operand(ci, 0) as u64 - 1)) as u32
+        }
+        if n_uses >= 2 {
+            w1 = caller.graph.uses.add(vmap.get(callee.operand(ci, 1) as u64 - 1)) as u32
+        }
+        if n_uses >= 3 {
+            w2 = caller.graph.uses.add(vmap.get(callee.operand(ci, 2) as u64 - 1)) as u32
+        }
+        res := callee.result(ci)
+        res_ty := if res == Val.none { Ty.void_ } else { callee.value_type(res) }
+        caller.layout.add_inst()
+        ni := caller.graph.inst(op, res_ty, w0, w1, w2)
+        caller.layout.insert_before(call_inst, ni)
+        if res != Val.none { vmap.set(res as u64 - 1, caller.result(ni)) }
+        ci = callee.next_inst(ci)
+    }
+    caller.remove(call_inst)
+    true
+}
+
+run_program :: fn(module &Program, changed &Vec(bool)) bool {
+    decl_count := module.declarations.len
+    func_count := module.functions.len
+    if decl_count == 0 or func_count == 0 { ret false }
+    eligible := Vec(u8).with_cap(decl_count + 1)
+    eligible.len = decl_count + 1
+    mem.mem_set(eligible.ptr as &u8, 0, decl_count + 1)
+    di: u64 = 0
+    while di < decl_count {
+        decl := module.declarations.get(di)
+        if decl.kind == program.Kind.function and decl.body != 0 {
+            callee := module.functions.ptr_at(decl.body as u64 - 1)
+            eligible.set(di + 1, eligible_callee(callee))
+        }
+        di = di + 1
+    }
+    vmap := Vec(Val).new()
+    any_inlined := false
+    changed.clear()
+    changed.reserve(func_count)
+    changed.len = func_count
+    mem.mem_set(changed.ptr as &u8, 0, func_count)
+    fi: u64 = 0
+    while fi < func_count {
+        caller := module.functions.ptr_at(fi)
+        if caller.graph.ops.len > 4096 {
+            fi = fi + 1
+            cont
+        }
+        budget: u64 = 128
+        inlined_here := false
+        bcount := caller.block_count()
+        for b in Range.new(1, ((bcount + 1) as i32)) {
+            inst := caller.first_inst(b as Block)
+            while inst != Inst.none {
+                next := caller.next_inst(inst)
+                if caller.opcode(inst) == Op.call {
+                    target := caller.payload(inst, 0) as u64
+                    if target > 0 and target <= decl_count and eligible.get(target) != 0 {
+                        decl := module.declarations.get(target - 1)
+                        if decl.body as u64 - 1 != fi {
+                            callee := module.functions.ptr_at(decl.body as u64 - 1)
+                            c_len := eligible.get(target) as u64
+                            if c_len <= budget and inline_call(caller, inst, callee, &vmap) {
+                                budget = budget - c_len
+                                inlined_here = true
+                                any_inlined = true
+                                if budget == 0 { break }
+                            }
+                        }
+                    }
+                }
+                inst = next
+            }
+            if budget == 0 { break }
+        }
+        if inlined_here { changed.set(fi, true) }
+        fi = fi + 1
+    }
+    vmap.destroy()
+    eligible.destroy()
+    any_inlined
+}

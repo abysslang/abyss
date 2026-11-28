@@ -4,9 +4,11 @@ ir :: @import("../ir")
 id :: @import("../id")
 ops :: @import("../ops")
 program :: @import("../program")
+workspace :: @import("./workspace")
 mem :: @import("std/mem")
 Arena :: @import("std/allocator").Arena
 Function :: ir.Function
+Workspace :: workspace.Workspace
 Program :: program.Program
 Block :: id.Block
 Edge :: id.Edge
@@ -65,7 +67,7 @@ operand_count :: fn(body &Function, inst Inst) u64 {
 
 WorkQueue :: struct {
     body   &Function
-    items  Vec(Inst)
+    items  &Vec(Inst)
     queued &bool
 
     push :: fn(self &Self, inst Inst) {
@@ -460,38 +462,42 @@ mark_sweep :: fn(body &Function, arena &Arena) bool {
 }
 
 run :: fn(body &Function) bool {
+    ws := Workspace.new()
+    result := run_in(body, &ws)
+    ws.destroy()
+    result
+}
+
+run_in :: fn(body &Function, ws &Workspace) bool {
     timing := profile.enter(Phase.backend_dce)
-    result := run_impl(body)
+    result := run_impl(body, ws)
     profile.leave(timing)
     result
 }
 
-run_impl :: fn(body &Function) bool {
+run_impl :: fn(body &Function, ws &Workspace) bool {
     count := body.graph.ops.len
     if count == 0 { ret false }
-    arena := Arena.new(4096)
+    ws.reset()
+    arena := &ws.arena
     wq: WorkQueue = .{
         body: body
-        items: Vec(Inst).new()
-        queued: table(bool, &arena, count)
+        items: &ws.insts
+        queued: table(bool, arena, count)
     }
-    operands := Vec(Val).new()
-    stored := Vec(Val).new()
+    operands := &ws.vals
+    stored := &ws.vals2
     changed := false
     pass_changed := true
     while pass_changed {
         pass_changed = false
-        if mark_sweep(body, &arena) { pass_changed = true }
-        if eliminate_dead_stacks(body, &arena, &wq, &stored) {
+        if mark_sweep(body, arena) { pass_changed = true }
+        if eliminate_dead_stacks(body, arena, &wq, stored) {
             pass_changed = true
-            if wq.drain(&operands) { pass_changed = true }
+            if wq.drain(operands) { pass_changed = true }
         }
         if pass_changed { changed = true }
     }
-    wq.items.destroy()
-    operands.destroy()
-    stored.destroy()
-    arena.destroy()
     changed
 }
 

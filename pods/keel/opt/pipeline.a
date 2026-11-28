@@ -2,9 +2,14 @@ profile :: @import("pods/keel/profile")
 Phase :: profile.Phase
 cfg :: @import("./cfg")
 dce :: @import("./dce")
+inline :: @import("./inline")
 mem2reg :: @import("./mem2reg")
+workspace :: @import("./workspace")
 ir :: @import("../ir")
+id :: @import("../id")
+ops :: @import("../ops")
 Program :: @import("../program").Program
+Workspace :: workspace.Workspace
 
 fold_body :: fn(body &ir.Function) bool {
     timing := profile.enter(Phase.backend_fold)
@@ -25,27 +30,59 @@ fold_body_impl :: fn(body &ir.Function) bool {
     changed
 }
 
+is_straight_entry :: fn(body &ir.Function) bool {
+    if body.block_count() != 1 { ret false }
+    last := body.last_inst(id.Block.entry)
+    if last == id.Inst.none { ret false }
+    op := body.opcode(last)
+    op == ops.Op.ret_ or op == ops.Op.trap
+}
+
 run :: fn(program &Program, pointer_bytes u32) {
     timing := profile.enter(Phase.backend_optimize)
     run_impl(program, pointer_bytes)
     profile.leave(timing)
 }
 
-run_impl :: fn(program &Program, pointer_bytes u32) {
-    for body in program.functions.iter_ref() {
-        cfg.run(body)
-        promoted := mem2reg.run(body, pointer_bytes)
-        if promoted { fold_body(body) }
-        round := 0
-        while round < 4 {
-            changed := false
-            if cfg.run(body) { changed = true }
-            if dce.run(body) { changed = true }
-            if fold_body(body) { changed = true }
-            if not changed { break }
-            round = round + 1
+optimize_body :: fn(body &ir.Function, pointer_bytes u32, ws &Workspace, do_mem2reg bool) {
+    straight := is_straight_entry(body)
+    if not straight { cfg.run_in(body, ws) }
+    promoted := if do_mem2reg { mem2reg.run_in(body, pointer_bytes, ws) } else { false }
+    folded0 := if promoted { fold_body(body) } else { false }
+    need_cfg := (promoted or folded0) and not is_straight_entry(body)
+    round := 0
+    while round < 4 {
+        changed := false
+        if need_cfg and cfg.run_in(body, ws) { changed = true }
+        need_cfg = false
+        dce_changed := dce.run_in(body, ws)
+        fold_changed := fold_body(body)
+        if dce_changed or fold_changed {
+            changed = true
+            need_cfg = not is_straight_entry(body)
         }
-        if cfg.run(body) { dce.run(body) }
+        if not changed { break }
+        round = round + 1
     }
+    if need_cfg and cfg.run_in(body, ws) { dce.run_in(body, ws) }
+}
+
+run_impl :: fn(program &Program, pointer_bytes u32) {
+    ws := Workspace.new()
+    for body in program.functions.iter_ref() {
+        optimize_body(body, pointer_bytes, &ws, true)
+    }
+    inlined := Vec(bool).new()
+    if inline.run_program(program, &inlined) {
+        fi: u64 = 0
+        while fi < program.functions.len {
+            if inlined.get(fi) {
+                optimize_body(program.functions.ptr_at(fi), pointer_bytes, &ws, false)
+            }
+            fi = fi + 1
+        }
+    }
+    inlined.destroy()
+    ws.destroy()
     dce.prune_program(program)
 }

@@ -96,7 +96,10 @@ grep -Fq 'div i32' "$work/keep_effects.air"
 
 cat > "$work/prune.a" <<'ABYSS'
 dead_helper :: fn(x i32) i32 { x * 77 + 1 }
-live_helper :: fn(x i32) i32 { x + 1 }
+live_helper :: fn(x i32) i32 {
+    if x < 0 { ret -x }
+    x + 1
+}
 main :: fn() {
     a := if 1 > 2 { dead_helper(3) } else { live_helper(4) }
     print(a)

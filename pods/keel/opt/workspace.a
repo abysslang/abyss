@@ -1,0 +1,48 @@
+id :: @import("../id")
+Arena :: @import("std/allocator").Arena
+
+Workspace :: struct {
+    arena   Arena
+    blocks  Vec(id.Block)
+    blocks2 Vec(id.Block)
+    vals    Vec(id.Val)
+    vals2   Vec(id.Val)
+    vals3   Vec(id.Val)
+    insts   Vec(id.Inst)
+    syms    Vec(id.Symbol)
+
+    new :: fn() Self {
+        .{
+            arena: Arena.new(65536)
+            blocks: Vec(id.Block).new()
+            blocks2: Vec(id.Block).new()
+            vals: Vec(id.Val).new()
+            vals2: Vec(id.Val).new()
+            vals3: Vec(id.Val).new()
+            insts: Vec(id.Inst).new()
+            syms: Vec(id.Symbol).new()
+        }
+    }
+
+    reset :: fn(self &Self) {
+        self.arena.reset()
+        self.blocks.clear()
+        self.blocks2.clear()
+        self.vals.clear()
+        self.vals2.clear()
+        self.vals3.clear()
+        self.insts.clear()
+        self.syms.clear()
+    }
+
+    destroy :: fn(self &Self) {
+        self.arena.destroy()
+        self.blocks.destroy()
+        self.blocks2.destroy()
+        self.vals.destroy()
+        self.vals2.destroy()
+        self.vals3.destroy()
+        self.insts.destroy()
+        self.syms.destroy()
+    }
+}
