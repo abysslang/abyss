@@ -62,8 +62,17 @@ ty_builtin_count :: fn() u32 {
     8
 }
 
+TY_HAS_INFER :: 1 as u8
+TY_HAS_UNTYPED :: 2 as u8
+TY_HAS_PARAM :: 4 as u8
+TY_UNSEALED :: 8 as u8
+TY_FUNC_PARAM :: 16 as u8
+TY_PROP_MASK :: 15 as u8
+TY_FINAL_MASK :: 3 as u8
+
 TypeStorage :: struct {
     kinds                      Vec(TyKind)
+    flags                      Vec(u8)
     payloads, next, extra_data Vec(u32)
     intern                     HashMap(u32, u32)
     names                      Vec(Str)
@@ -73,16 +82,20 @@ TypeStorage :: struct {
     nominal_struct_node        HashMap(u32, u32)
     dependent_funcs            HashSet(u32)
     new :: fn() Self {
-        result: Self = .{ kinds: Vec(TyKind).new(), payloads: Vec(u32).new(), next: Vec(u32).new(), extra_data: Vec(u32).new(), intern: HashMap(u32, u32).new(), names: Vec(Str).new(), origin_types: HashMap(u32, u32).new(), nominal_creators: HashMap(u32, u32).new(), nominal_creator_items: Vec(u32).new(), nominal_struct_node: HashMap(u32, u32).new(), dependent_funcs: HashSet(u32).new() }
+        result: Self = .{ kinds: Vec(TyKind).new(), flags: Vec(u8).new(), payloads: Vec(u32).new(), next: Vec(u32).new(), extra_data: Vec(u32).new(), intern: HashMap(u32, u32).new(), names: Vec(Str).new(), origin_types: HashMap(u32, u32).new(), nominal_creators: HashMap(u32, u32).new(), nominal_creator_items: Vec(u32).new(), nominal_struct_node: HashMap(u32, u32).new(), dependent_funcs: HashSet(u32).new() }
         builtins: [8]TyKind = .[ TyKind.unknown, TyKind.untyped_int, TyKind.untyped_float, TyKind.bool, TyKind.type_, TyKind.unit, TyKind.never, TyKind.error ]
-        for kind in Slice(TyKind).new(&builtins[0], 8) {
-            result.push(kind, 0)
+        builtin_flags: [8]u8 = .[ TY_HAS_INFER, TY_HAS_UNTYPED, TY_HAS_UNTYPED, 0, TY_HAS_PARAM, 0, 0, TY_HAS_INFER ]
+        i: u64 = 0
+        while i < 8 {
+            result.push_flagged(builtins[i], builtin_flags[i], 0)
+            i = i + 1
         }
         result
     }
 
     destroy :: fn(self &Self) {
         self.kinds.destroy()
+        self.flags.destroy()
         self.payloads.destroy()
         self.next.destroy()
         self.extra_data.destroy()
@@ -107,16 +120,32 @@ TypeStorage :: struct {
         }
     }
 
+    type_flags :: fn(self &Self, id u32) u8 {
+        if id == ty_id_none() {
+            ret 0
+        }
+        self.flags.get(id as u64)
+    }
+
+    needs_final :: fn(self &Self, id u32) bool {
+        (self.type_flags(id) & TY_FINAL_MASK) != 0
+    }
+
     payload :: fn(self &Self, id u32) u32 {
         self.payloads.get(id as u64)
     }
 
-    push :: fn(self &Self, kind TyKind, payload u32) u32 {
+    push_flagged :: fn(self &Self, kind TyKind, flag u8, payload u32) u32 {
         id := self.len()
         self.kinds.push(kind)
+        self.flags.push(flag)
         self.payloads.push(payload)
         self.next.push(ty_id_none())
         id
+    }
+
+    push :: fn(self &Self, kind TyKind, payload u32) u32 {
+        self.push_flagged(kind, 0, payload)
     }
 
     append_record :: fn(self &Self, header Slice(u32), items Slice(u32)) u32 {
@@ -172,7 +201,7 @@ TypeStorage :: struct {
         Slice(u32).new(self.extra_data.ptr_at(self.payload(id) as u64 + offset), count)
     }
 
-    intern_type :: fn(self &Self, kind TyKind, header Slice(u32), items Slice(u32)) u32 {
+    intern_type_flagged :: fn(self &Self, kind TyKind, flag u8, header Slice(u32), items Slice(u32)) u32 {
         inline := (kind != TyKind.array) and (kind != TyKind.func) and (kind != TyKind.struct_) and (kind != TyKind.union_)
         h := hash.hash_words(items, hash.hash_words(header, hash.hash_combine(2166136261, kind as u32)))
         bucket := self.intern.get(h)
@@ -200,44 +229,53 @@ TypeStorage :: struct {
         } else {
             self.append_record(header, items)
         }
-        id = self.push(kind, payload)
+        id = self.push_flagged(kind, flag, payload)
         self.next.set(id as u64, first)
         self.intern.insert(h, id)
         id
     }
 
-    get_or_insert_simple :: fn(self &Self, kind TyKind, payload u32) u32 {
-        self.intern_type(kind, Slice(u32).new(&payload, 1), Slice(u32).empty())
+    intern_type :: fn(self &Self, kind TyKind, header Slice(u32), items Slice(u32)) u32 {
+        self.intern_type_flagged(kind, 0, header, items)
+    }
+
+    get_or_insert_simple :: fn(self &Self, kind TyKind, flag u8, payload u32) u32 {
+        self.intern_type_flagged(kind, flag, Slice(u32).new(&payload, 1), Slice(u32).empty())
     }
 
     alloc_infer :: fn(self &Self, slot u32) u32 {
-        self.get_or_insert_simple(TyKind.infer, slot)
+        self.get_or_insert_simple(TyKind.infer, TY_HAS_INFER, slot)
     }
 
     alloc_int :: fn(self &Self, width u16) u32 {
-        self.get_or_insert_simple(TyKind.int, width as u32)
+        self.get_or_insert_simple(TyKind.int, 0, width as u32)
     }
 
     alloc_uint :: fn(self &Self, width u16) u32 {
-        self.get_or_insert_simple(TyKind.uint, width as u32)
+        self.get_or_insert_simple(TyKind.uint, 0, width as u32)
     }
 
     alloc_float :: fn(self &Self, width u16) u32 {
-        self.get_or_insert_simple(TyKind.float, width as u32)
+        self.get_or_insert_simple(TyKind.float, 0, width as u32)
     }
 
     alloc_ptr :: fn(self &Self, inner u32) u32 {
-        self.get_or_insert_simple(TyKind.ptr, inner)
+        self.get_or_insert_simple(TyKind.ptr, self.type_flags(inner) & TY_PROP_MASK, inner)
     }
 
     alloc_array :: fn(self &Self, ty u32, len u32) u32 {
         header: [2]u32 = .[ ty, len ]
-        self.intern_type(TyKind.array, Slice(u32).new(&header[0], 2), Slice(u32).empty())
+        self.intern_type_flagged(TyKind.array, self.type_flags(ty) & TY_PROP_MASK, Slice(u32).new(&header[0], 2), Slice(u32).empty())
     }
 
     alloc_func :: fn(self &Self, params Slice(u32), ret_ty u32, is_extern bool) u32 {
+        f := self.type_flags(ret_ty) & TY_PROP_MASK
+        for p in params {
+            f = f | (self.type_flags(p) & TY_PROP_MASK)
+            if p == ty_id_type() { f = f | TY_FUNC_PARAM }
+        }
         header: [2]u32 = .[ ((params.len as u32) << 16) | (is_extern as u32), ret_ty ]
-        self.intern_type(TyKind.func, Slice(u32).new(&header[0], 2), params)
+        self.intern_type_flagged(TyKind.func, f, Slice(u32).new(&header[0], 2), params)
     }
 
     alloc_nominal :: fn(self &Self, base u32, name Str, origin u32) u32 {
@@ -248,10 +286,11 @@ TypeStorage :: struct {
                 ret *existing
             }
         }
+        f := if base == ty_id_none() { TY_UNSEALED } else { self.type_flags(base) & TY_PROP_MASK }
         header: [3]u32 = .[ base, self.names.len as u32, origin ]
         self.names.push(name)
         payload := self.append_record(Slice(u32).new(&header[0], 3), Slice(u32).empty())
-        id := self.push(TyKind.nominal, payload)
+        id := self.push_flagged(TyKind.nominal, f, payload)
         if not generic {
             self.origin_types.insert(origin, id)
         }
@@ -264,6 +303,18 @@ TypeStorage :: struct {
 
     set_nominal_base :: fn(self &Self, id u32, base u32) {
         self.extra_data.set(self.payload(id) as u64, base)
+        if base != ty_id_none() {
+            existing := self.flags.get(id as u64) & ~TY_UNSEALED
+            self.flags.set(id as u64, existing | (self.type_flags(base) & TY_PROP_MASK))
+        }
+    }
+
+    mark_nominal_creator :: fn(self &Self, id u32, args Slice(u32)) {
+        f := self.flags.get(id as u64)
+        for arg in args {
+            f = f | (self.type_flags(arg) & (TY_HAS_INFER | TY_HAS_UNTYPED | TY_HAS_PARAM))
+        }
+        self.flags.set(id as u64, f)
     }
 
     nominal_origin :: fn(self &Self, id u32) u32 {
@@ -335,8 +386,14 @@ TypeStorage :: struct {
         if flags == 0 {
             sorting.sort_chunks(fields, 2)
         }
+        f: u8 = 0
+        i: u64 = 1
+        while i < fields.len {
+            f = f | (self.type_flags(*(fields.ptr + i)) & TY_PROP_MASK)
+            i = i + 2
+        }
         count := (((fields.len / 2) as u32) << 2) | flags
-        self.intern_type(TyKind.struct_, Slice(u32).new(&count, 1), fields)
+        self.intern_type_flagged(TyKind.struct_, f, Slice(u32).new(&count, 1), fields)
     }
 
     alloc_struct :: fn(self &Self, fields Slice(u32)) u32 {
@@ -373,7 +430,8 @@ TypeStorage :: struct {
         header: [4]u32 = .[ backing_ty, self.names.len as u32, origin, (variants.len / 2) as u32 ]
         self.names.push(name)
         payload := self.append_record(Slice(u32).new(&header[0], 4), variants)
-        id := self.push(TyKind.enum_, payload)
+        f := self.type_flags(backing_ty) & TY_PROP_MASK
+        id := self.push_flagged(TyKind.enum_, f, payload)
         self.origin_types.insert(origin, id)
         id
     }
@@ -418,8 +476,12 @@ TypeStorage :: struct {
 
     alloc_union :: fn(self &Self, members Slice(u32)) u32 {
         sorting.sort(members)
+        f: u8 = 0
+        for m in members {
+            f = f | (self.type_flags(m) & TY_PROP_MASK)
+        }
         count := members.len as u32
-        self.intern_type(TyKind.union_, Slice(u32).new(&count, 1), members)
+        self.intern_type_flagged(TyKind.union_, f, Slice(u32).new(&count, 1), members)
     }
 
     union_members_len :: fn(self &Self, id u32) u32 {
@@ -460,6 +522,42 @@ TypeStorage :: struct {
         if a == b {
             ret a
         }
+        len_a := if self.kind(a) == TyKind.union_ { self.union_members_len(a) as u64 } else { 1 }
+        len_b := if self.kind(b) == TyKind.union_ { self.union_members_len(b) as u64 } else { 1 }
+        total := len_a + len_b
+        if total <= 32 {
+            buf: [32]u32
+            pos: u64 = 0
+            if self.kind(a) == TyKind.union_ {
+                items := self.union_members(a)
+                for item in items { buf[pos] = item, pos = pos + 1 }
+            } else {
+                buf[pos] = a
+                pos = pos + 1
+            }
+            if self.kind(b) == TyKind.union_ {
+                items := self.union_members(b)
+                for item in items { buf[pos] = item, pos = pos + 1 }
+            } else {
+                buf[pos] = b
+                pos = pos + 1
+            }
+            slice := Slice(u32).new(&buf[0], pos)
+            sorting.sort(slice)
+            write: u64 = 0
+            for item in slice {
+                if write == 0 or buf[write - 1] != item {
+                    buf[write] = item
+                    write = write + 1
+                }
+            }
+            if write == 1 { ret buf[0] }
+            out := Slice(u32).new(&buf[0], write)
+            f: u8 = 0
+            for m in out { f = f | (self.type_flags(m) & TY_PROP_MASK) }
+            count := write as u32
+            ret self.intern_type_flagged(TyKind.union_, f, Slice(u32).new(&count, 1), out)
+        }
         members := Vec(u32).new()
         self.extend_union(&members, a)
         self.extend_union(&members, b)
@@ -468,8 +566,10 @@ TypeStorage :: struct {
         result := if members.len == 1 {
             members.get(0)
         } else {
+            f: u8 = 0
+            for m in members.as_slice() { f = f | (self.type_flags(m) & TY_PROP_MASK) }
             count := members.len as u32
-            self.intern_type(TyKind.union_, Slice(u32).new(&count, 1), members.as_slice())
+            self.intern_type_flagged(TyKind.union_, f, Slice(u32).new(&count, 1), members.as_slice())
         }
         members.destroy()
         result
@@ -514,6 +614,9 @@ TypeStorage :: struct {
 
     record_dependent_func :: fn(self &Self, func u32) {
         self.dependent_funcs.insert(func)
+        if func < self.len() {
+            self.flags.set(func as u64, self.flags.get(func as u64) | TY_FUNC_PARAM)
+        }
     }
 
     is_dependent_func :: fn(self &Self, func u32) bool {
@@ -524,7 +627,7 @@ TypeStorage :: struct {
         if self.kind(func) != TyKind.func {
             ret false
         }
-        self.is_dependent_func(func) or self.func_params(func).contains(ty_id_type())
+        (self.flags.get(func as u64) & TY_FUNC_PARAM) != 0
     }
 
     func_leading_type_params :: fn(self &Self, func u32) u32 {
@@ -780,10 +883,17 @@ TypeStorage :: struct {
     }
 
     has_infer :: fn(self &Self, ty_id u32) bool {
+        if (self.type_flags(ty_id) & (TY_HAS_INFER | TY_UNSEALED)) == 0 {
+            ret false
+        }
         visited := Vec(u32).new()
         res := self.has_infer_seen(ty_id, &visited)
         visited.destroy()
         res
+    }
+
+    has_infer_slot_flag :: fn(self &Self, ty_id u32) bool {
+        (self.type_flags(ty_id) & (TY_HAS_INFER | TY_UNSEALED)) != 0
     }
 
     name :: fn(a &Arena, id u32) Str {

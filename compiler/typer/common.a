@@ -233,7 +233,7 @@ check_value :: fn(db &Nexus, expr u32, expected u32) {
             db.unify.bind_type(&db.types, slot, expected)
             ret
         }
-        unify_ptr.types.set(root as u64, expected)
+        unify_ptr.set_slot_type(&db.types, slot, root, expected)
         ret
     }
     db.unify.bind_type(&db.types, slot, expected)

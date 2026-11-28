@@ -558,6 +558,9 @@ Nexus :: struct {
 
     set_const_type :: fn(self &Self, hir_id u32, ty_id u32) {
         self.const_types.insert(hir_id, ty_id)
+        if ty_id != type_defs.ty_id_none() and self.types.needs_final(ty_id) {
+            self.unify.mark_dirty_node(hir_id)
+        }
     }
 
     get_const_type :: fn(self &Self, hir_id u32) u32 {
@@ -1260,6 +1263,7 @@ Nexus :: struct {
         }
         val := ((ty as u64) << 32) | (idx as u64)
         self.union_coerce.insert(expr, val)
+        self.unify.mark_dirty_node(expr)
     }
 
     has_union_coerce :: fn(self &Self, expr u32) bool {

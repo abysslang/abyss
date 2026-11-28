@@ -151,6 +151,7 @@ specialize_nominal_impl :: fn(
         types_ptr.record_nominal_struct_node(nom_origin, struct_node)
         db.add_mono_nominal(callee_sym, concrete_args.as_slice(), nom_ty)
         types_ptr.record_nominal_creator(nom_origin, callee_sym, concrete_args.as_slice())
+        types_ptr.mark_nominal_creator(nom_ty, concrete_args.as_slice())
 
         names_list := if is_nom_tuple { hir.hir_none() } else { tbl.lhs(struct_node) }
         types_list := if is_nom_tuple { tbl.lhs(struct_node) } else { tbl.rhs(struct_node) }
@@ -496,6 +497,12 @@ transform_type :: fn(
     if ty == type_defs.ty_id_none() {
         ret type_defs.ty_id_none()
     }
+    if not is_instantiate and not types.needs_final(ty) {
+        ret ty
+    }
+    if is_instantiate and not types.has_infer_slot_flag(ty) {
+        ret ty
+    }
     db := &eng.nexus
     tbl := &db.hir
     kind := types.kind(ty)
@@ -551,6 +558,7 @@ transform_type :: fn(
             types
             is_instantiate
         )
+        if res_inner == inner { ret ty }
         ret types.alloc_ptr(res_inner)
     }
     if kind == type_defs.TyKind.array {
@@ -565,12 +573,39 @@ transform_type :: fn(
             types
             is_instantiate
         )
+        if res_inner == inner { ret ty }
         ret types.alloc_array(res_inner, len)
     }
     if kind == type_defs.TyKind.struct_ {
         fields := types.get_struct_fields(ty)
         count := fields.len / 2
+        if count <= 32 {
+            buf: [64]u32
+            changed := false
+            i: u64 = 0
+            while i < count {
+                fields = types.get_struct_fields(ty)
+                f_name := *(fields.ptr + (i * 2))
+                f_ty := *(fields.ptr + (i * 2) + 1)
+                new_f_ty := transform_type(
+                    eng
+                    f_ty
+                    tmpl_slots
+                    fresh_slots
+                    unify_ptr
+                    types
+                    is_instantiate
+                )
+                if new_f_ty != f_ty { changed = true }
+                buf[i * 2] = f_name
+                buf[i * 2 + 1] = new_f_ty
+                i = i + 1
+            }
+            if not changed { ret ty }
+            ret types.alloc_record(Slice(u32).new(&buf[0], count * 2), types.record_flags(ty))
+        }
         fields_vec := Vec(u32).new()
+        changed := false
         i: u64 = 0
         while i < count {
             fields = types.get_struct_fields(ty)
@@ -585,11 +620,16 @@ transform_type :: fn(
                 types
                 is_instantiate
             )
+            if new_f_ty != f_ty { changed = true }
             fields_vec.push(f_name)
             fields_vec.push(new_f_ty)
             i = i + 1
         }
-        res := types.alloc_record(fields_vec.as_slice(), types.record_flags(ty))
+        res := if changed {
+            types.alloc_record(fields_vec.as_slice(), types.record_flags(ty))
+        } else {
+            ty
+        }
         fields_vec.destroy()
         ret res
     }
@@ -598,9 +638,10 @@ transform_type :: fn(
             ret ty
         }
         count := types.func_params(ty).len
+        orig_ret := types.func_return(ty)
         ret_ty := transform_type(
             eng
-            types.func_return(ty)
+            orig_ret
             tmpl_slots
             fresh_slots
             unify_ptr
@@ -608,24 +649,53 @@ transform_type :: fn(
             is_instantiate
         )
         is_ext := types.func_is_extern(ty)
-        params_vec := Vec(u32).new()
-        i: u64 = 0
-        while i < count {
-            params := types.func_params(ty)
-            params_vec.push(
-                transform_type(
+        if count <= 32 {
+            buf: [32]u32
+            changed := ret_ty != orig_ret
+            i: u64 = 0
+            while i < count {
+                params := types.func_params(ty)
+                p_ty := *(params.ptr + i)
+                new_p_ty := transform_type(
                     eng
-                    *(params.ptr + i)
+                    p_ty
                     tmpl_slots
                     fresh_slots
                     unify_ptr
                     types
                     is_instantiate
                 )
+                if new_p_ty != p_ty { changed = true }
+                buf[i] = new_p_ty
+                i = i + 1
+            }
+            if not changed { ret ty }
+            ret types.alloc_func(Slice(u32).new(&buf[0], count), ret_ty, is_ext)
+        }
+        params_vec := Vec(u32).new()
+        changed := ret_ty != orig_ret
+        i: u64 = 0
+        while i < count {
+            params := types.func_params(ty)
+            p_ty := *(params.ptr + i)
+            new_p_ty := transform_type(
+                eng
+                p_ty
+                tmpl_slots
+                fresh_slots
+                unify_ptr
+                types
+                is_instantiate
             )
+            if new_p_ty != p_ty { changed = true }
+            params_vec.push(new_p_ty)
             i = i + 1
         }
-        result := types.alloc_func(params_vec.as_slice(), ret_ty, is_ext)
+        result := if changed {
+            types.alloc_func(params_vec.as_slice(), ret_ty, is_ext)
+        } else {
+            ty
+        }
         params_vec.destroy()
         ret result
     }

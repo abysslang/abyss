@@ -772,7 +772,7 @@ synth_generic_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot u3
             }
             arg_slot := unify_ptr.get_slot(arg_node)
             arg_root := unify_ptr.find(arg_slot)
-            unify_ptr.types.set(arg_root as u64, target_ty)
+            unify_ptr.set_slot_type(types_ptr, arg_slot, arg_root, target_ty)
         }
         i = i + 1
     }
@@ -781,7 +781,7 @@ synth_generic_call :: fn(eng &Engine, id u32, callee u32, callee_ty u32, slot u3
     tmpl_slots.destroy()
     fresh_slots.destroy()
     root := unify_ptr.find(slot)
-    unify_ptr.types.set(root as u64, final_ret)
+    unify_ptr.set_slot_type(types_ptr, slot, root, final_ret)
     register_call_mono_sym(db, id, callee, mono_func_ty)
 }
 
@@ -823,6 +823,34 @@ synth_call_impl :: fn(eng &Engine, id u32) {
         db.print_loc(callee)
         print("\n")
         #fall
+    }
+    if (types_ptr.func_return(callee_ty) != types.ty_id_type()) and
+        (not types_ptr.func_has_type_param(callee_ty)) {
+        params_len := types_ptr.func_params(callee_ty).len
+        p0 := if params_len > 0 { *(types_ptr.func_params(callee_ty).ptr + 0) } else { 0 }
+        p0_slice := Slice(u32).new(&p0, if params_len > 0 { 1 } else { 0 })
+        rhs_node := tbl.rhs(id)
+        args_len := if rhs_node != hir.hir_none() { db.get_list(rhs_node).len } else { 0 }
+        lhs_is_instance := false
+        is_struct_generic := false
+        param_start := check_method_receiver(db, callee, &p0_slice, &lhs_is_instance, &is_struct_generic)
+        ret_ty := types_ptr.func_return(callee_ty)
+        unify_ptr.bind_type(types_ptr, slot, ret_ty)
+        if is_struct_generic {
+            register_call_mono_sym(db, id, callee, callee_ty)
+        }
+        expected := params_len - param_start
+        if args_len != expected {
+            report_arg_count_error(db, id, callee, params_len, args_len, lhs_is_instance, 0)
+        }
+        i: u64 = 0
+        while i < args_len {
+            arg_id := *(db.get_list(rhs_node).ptr + i)
+            param_ty := *(types_ptr.func_params(callee_ty).ptr + (i + param_start))
+            unify_call_arg(eng, arg_id, param_ty)
+            i = i + 1
+        }
+        ret
     }
     params_slice := types_ptr.func_params(callee_ty)
     params_vec := Vec(u32).new()
