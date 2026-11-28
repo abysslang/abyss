@@ -1551,25 +1551,34 @@ Encoder :: struct {
                 to := self.allocation.get(result)
                 dest := if regalloc.in_register(to) { to } else { 0 }
                 imm: i64 = 0
-                if op == Op.mul and Encoder.const_i32(body, second, &imm) {
-                    l_home := self.allocation.get(first)
-                    src := if Encoder.in_gp(l_home) { l_home } else {
-                        load_home(code, l_home, dest)
-                        dest
-                    }
-                    code.put(0x48 | ((dest >> 3) << 2) | (src >> 3), 1)
-                    if imm >= -128 and imm <= 127 {
-                        code.put(0x6b, 1)
-                        code.put(0xc0 | ((dest & 7) << 3) | (src & 7), 1)
-                        code.put(imm as u64, 1)
+                if op == Op.mul {
+                    src_val := if Encoder.const_i32(body, second, &imm) {
+                        first
+                    } else if Encoder.const_i32(body, first, &imm) {
+                        second
                     } else {
-                        code.put(0x69, 1)
-                        code.put(0xc0 | ((dest & 7) << 3) | (src & 7), 1)
-                        code.put(imm as u64, 4)
+                        Val.none
                     }
-                    normalize_reg(code, ty, dest)
-                    save_home(code, to, dest)
-                    ret
+                    if src_val != Val.none {
+                        l_home := self.allocation.get(src_val)
+                        src := if Encoder.in_gp(l_home) { l_home } else {
+                            load_home(code, l_home, dest)
+                            dest
+                        }
+                        code.put(0x48 | ((dest >> 3) << 2) | (src >> 3), 1)
+                        if imm >= -128 and imm <= 127 {
+                            code.put(0x6b, 1)
+                            code.put(0xc0 | ((dest & 7) << 3) | (src & 7), 1)
+                            code.put(imm as u64, 1)
+                        } else {
+                            code.put(0x69, 1)
+                            code.put(0xc0 | ((dest & 7) << 3) | (src & 7), 1)
+                            code.put(imm as u64, 4)
+                        }
+                        normalize_reg(code, ty, dest)
+                        save_home(code, to, dest)
+                        ret
+                    }
                 }
                 subop := Encoder.alu_imm_subop(op)
                 if subop != 99 {
