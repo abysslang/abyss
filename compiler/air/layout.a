@@ -1,3 +1,4 @@
+mem :: @import("std/mem")
 keel :: @import("pods/keel")
 types :: @import("compiler/types")
 Nexus :: @import("compiler/nexus/nexus").Nexus
@@ -9,10 +10,211 @@ topo :: @import("compiler/topo_sort")
 
 Shape :: struct {
     size, align u32
+
+    new :: fn(size, align u32) Self {
+        .{ size: size, align: align }
+    }
 }
 
 Field :: struct {
     offset, ty, index u32
+}
+
+RecordField :: struct {
+    name, offset, ty, index u32
+}
+
+Record :: struct {
+    field_start, field_count u32
+    packed                   bool
+}
+
+LayoutCache :: struct {
+    shapes        Vec(Shape)
+    union_offsets Vec(u32)
+    records       Vec(u32)
+    record_pool   Vec(Record)
+    record_fields Vec(RecordField)
+
+    new :: fn(type_count u64) Self {
+        cap := type_count + 16
+        shapes := Vec(Shape).with_cap(cap)
+        shapes.len = cap
+        mem.mem_set(shapes.ptr as &u8, 0, cap * @sizeof(Shape))
+        union_offsets := Vec(u32).with_cap(cap)
+        union_offsets.len = cap
+        mem.mem_set(union_offsets.ptr as &u8, 0, cap * @sizeof(u32))
+        records := Vec(u32).with_cap(cap)
+        records.len = cap
+        mem.mem_set(records.ptr as &u8, 0, cap * @sizeof(u32))
+        .{
+            shapes: shapes
+            union_offsets: union_offsets
+            records: records
+            record_pool: Vec(Record).new()
+            record_fields: Vec(RecordField).new()
+        }
+    }
+
+    destroy :: fn(self &Self) {
+        self.shapes.destroy()
+        self.union_offsets.destroy()
+        self.records.destroy()
+        self.record_pool.destroy()
+        self.record_fields.destroy()
+    }
+
+    ensure_ty :: fn(self &Self, ty u32) {
+        idx := ty as u64
+        if idx < self.shapes.len { ret }
+        new_len := idx + 16
+        old := self.shapes.len
+        self.shapes.reserve(new_len)
+        self.shapes.len = new_len
+        self.union_offsets.reserve(new_len)
+        self.union_offsets.len = new_len
+        self.records.reserve(new_len)
+        self.records.len = new_len
+        i := old
+        while i < new_len {
+            self.shapes.set(i, .{ size: 0, align: 0 })
+            self.union_offsets.set(i, 0)
+            self.records.set(i, 0)
+            i = i + 1
+        }
+    }
+
+    shape :: fn(self &Self, db &Nexus, ty, node u32) Shape {
+        self.shape_at(db, ty, node, 0)
+    }
+
+    shape_at :: fn(self &Self, db &Nexus, ty, node, depth u32) Shape {
+        self.ensure_ty(ty)
+        cached := self.shapes.get(ty as u64)
+        if cached.align != 0 { ret cached }
+        table := &db.types
+        if depth == 64 {
+            queue := Vec(u32).new()
+            queue.push(ty)
+            sorted := topo.topo_sort(db, &queue)
+            sorted.destroy()
+            queue.destroy()
+        }
+        res := match table.kind(ty) {
+            nominal {
+                if db.native_type_node(ty) != hir_none() {
+                    error(db, node, "AIR cannot determine the layout of a C header type")
+                }
+                self.shape_at(db, table.nominal_base(ty), node, depth + 1)
+            }
+            array {
+                item := self.shape_at(db, table.get_array_type(ty), node, depth + 1)
+                size := item.size as u64 * table.get_array_len(ty) as u64
+                if size > 4294967295 as u64 { error(db, node, "AIR object exceeds 4 GiB") }
+                Shape.new(size as u32, item.align)
+            }
+            struct_ {
+                fields := table.get_struct_fields(ty)
+                offset: u32 = 0
+                alignment: u32 = 1
+                i: u64 = 1
+                while i < fields.len {
+                    item := self.shape_at(db, fields.get(i), node, depth + 1)
+                    offset = align_up(offset, item.align) + item.size
+                    if alignment < item.align { alignment = item.align }
+                    i = i + 2
+                }
+                Shape.new(align_up(offset, alignment), alignment)
+            }
+            union_ {
+                alignment: u32 = 4
+                size: u32 = 0
+                for member in table.union_members(ty) {
+                    item := self.shape_at(db, member, node, depth + 1)
+                    if size < item.size { size = item.size }
+                    if alignment < item.align { alignment = item.align }
+                }
+                Shape.new(align_up(alignment + size, alignment), alignment)
+            }
+            else {
+                size := match scalar(db, ty, node) {
+                    void_ { 0 as u32 }
+                    i1, i8_, u8_ { 1 as u32 }
+                    i16_, u16_ { 2 as u32 }
+                    i32_, u32_, f32_ { 4 as u32 }
+                    i64_, u64_, f64_ { 8 as u32 }
+                    i128_, u128_ { 16 as u32 }
+                    ptr { if db.target_arch == Arch.wasm32 { 4 as u32 } else { 8 as u32 } }
+                }
+                Shape.new(size, if size == 0 { 1 as u32 } else { size })
+            }
+        }
+        self.shapes.set(ty as u64, res)
+        res
+    }
+
+    union_align :: fn(self &Self, db &Nexus, ty, node u32) u32 {
+        self.ensure_ty(ty)
+        cached := self.union_offsets.get(ty as u64)
+        if cached != 0 { ret cached }
+        align: u32 = 4
+        for member in db.types.union_members(ty) {
+            item := self.shape(db, member, node)
+            if align < item.align { align = item.align }
+        }
+        self.union_offsets.set(ty as u64, align)
+        align
+    }
+
+    ensure_record :: fn(self &Self, db &Nexus, ty, node u32, dynamic bool) u32 {
+        self.ensure_ty(ty)
+        cached := self.records.get(ty as u64)
+        if cached != 0 { ret cached }
+        fields := db.types.get_struct_fields(ty)
+        start := self.record_fields.len as u32
+        pos: u32 = 0
+        contiguous := true
+        i: u64 = 0
+        idx: u32 = 0
+        while i < fields.len {
+            fname := fields.get(i)
+            fty := fields.get(i + 1)
+            off: u32 = 0
+            if not dynamic {
+                item := self.shape(db, fty, node)
+                off = align_up(pos, item.align)
+                if off != pos { contiguous = false }
+                pos = off + item.size
+            }
+            self.record_fields.push(.{ name: fname, offset: off, ty: fty, index: idx })
+            i = i + 2
+            idx = idx + 1
+        }
+        total_size := if not dynamic { self.shape(db, ty, node).size } else { 0 as u32 }
+        packed := not dynamic and contiguous and pos == total_size
+        self.record_pool.push(.{ field_start: start, field_count: idx, packed: packed })
+        rec_id := self.record_pool.len as u32
+        self.records.set(ty as u64, rec_id)
+        rec_id
+    }
+
+    is_packed :: fn(self &Self, db &Nexus, ty, node u32, dynamic bool) bool {
+        rec_id := self.ensure_record(db, ty, node, dynamic)
+        self.record_pool.get(rec_id as u64 - 1).packed
+    }
+
+    field :: fn(self &Self, db &Nexus, ty, name, node u32, dynamic bool) Field {
+        rec_id := self.ensure_record(db, ty, node, dynamic)
+        rec := self.record_pool.get(rec_id as u64 - 1)
+        i: u32 = 0
+        while i < rec.field_count {
+            rf := self.record_fields.ptr_at((rec.field_start + i) as u64)
+            if rf.name == name { ret .{ offset: rf.offset, ty: rf.ty, index: rf.index } }
+            i = i + 1
+        }
+        error(db, node, "field has no runtime offset")
+        .{ offset: 0, ty: types.ty_id_none(), index: 0 }
+    }
 }
 
 error :: fn(db &Nexus, node u32, message Str) {

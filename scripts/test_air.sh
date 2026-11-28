@@ -9,8 +9,8 @@ mkdir -p "$work"
 diff -u - "$work/demo.out" <<'AIR'
 air add
 b0(v0: i32, v1: i32):
-  v6 = iadd i32 v0, v1
-  ret v6
+  v2 = iadd i32 v0, v1
+  ret v2
 AIR
 
 cat > "$work/functions.a" <<'ABYSS'
@@ -23,21 +23,21 @@ ABYSS
 diff -u - "$work/custom.out" <<'AIR'
 air sum
 b0(v0: i32, v1: i32, v2: i32):
-  v9 = iadd i32 v2, v0
-  v10 = iadd i32 v1, v9
-  ret v10
+  v3 = iadd i32 v2, v0
+  v4 = iadd i32 v1, v3
+  ret v4
 AIR
 
 "$compiler" --dump-air "$work/functions.a" select > "$work/select.out"
 diff -u - "$work/select.out" <<'AIR'
 air select
 b0(v0: i1, v1: i32, v2: i32):
-  branch v0, b1, b3(v2)
+  branch v0, b1, b2
 b1:
-  v10 = iadd i32 v1, v2
-  jump b3(v10)
-b3(v7: i32):
-  ret v7
+  v3 = iadd i32 v1, v2
+  ret v3
+b2:
+  ret v2
 AIR
 
 "$compiler" --dump-air "$work/functions.a" > "$work/module.out"

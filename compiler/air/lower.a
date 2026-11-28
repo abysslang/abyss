@@ -7,16 +7,21 @@ opt :: @import("pods/keel/opt/pipeline")
 Arch :: @import("core/target").Arch
 hir :: @import("compiler/hir")
 storage :: @import("./layout")
+Shape :: storage.Shape
 Field :: storage.Field
+LayoutCache :: storage.LayoutCache
 abi :: @import("./abi")
+AbiField :: @import("pods/keel/abi_types").Field
 types :: @import("compiler/types")
 Nexus :: @import("compiler/nexus/nexus").Nexus
 String :: @import("std/string").String
 Arena :: @import("std/allocator").Arena
+mem :: @import("std/mem")
 legacy :: @import("compiler/lower")
 parse_float :: @import("compiler/vm/codegen").parse_float
 vm :: @import("compiler/vm/codegen")
 func_has_self :: @import("compiler/typer/fn").func_has_self
+reflection :: @import("compiler/typer/reflection")
 k :: hir.hir_kind
 Kind :: types.TyKind
 Ty :: keel.Ty
@@ -37,45 +42,181 @@ Metadata :: struct {
     target          Symbol
 }
 
-Module :: struct {
-    db          &Nexus
-    arena       &Arena
-    air         Program
-    symbols     HashMap(u32, Symbol)
-    strings     HashMap(u32, Symbol)
-    pending     Vec(Pending)
-    globals     Vec(Pending)
-    metadata    Vec(Metadata)
-    reflected   HashMap(u64, Symbol)
-    abi_types   HashMap(u32, u32)
-    abi_layouts HashMap(u32, bool)
-    locals      HashMap(u32, Val)
-    heap        HeapHooks
+Lit :: struct {
+    symbol Symbol
+    len    u64
+}
 
+Module :: struct {
+    db               &Nexus
+    arena            &Arena
+    air              Program
+    symbols          Vec(Symbol)
+    strings          Vec(Symbol)
+    literals         Vec(Lit)
+    pending          Vec(Pending)
+    globals          Vec(Pending)
+    metadata         Vec(Metadata)
+    reflected        HashMap(u64, Symbol)
+    layout           LayoutCache
+    abi_types        Vec(u32)
+    abi_layouts      Vec(u8)
+    abi_scratch      Vec(AbiField)
+    locals           Vec(Val)
+    local_kinds      Vec(u8)
+    local_dirty      Vec(u32)
+    init_locals      Vec(Val)
+    init_kinds       Vec(u8)
+    init_dirty       Vec(u32)
+    heap             HeapHooks
+    sym_ptr_name     u32
+    sym_len_name     u32
+    sym_index_name   u32
+    sym_present_name u32
+    sym_value_name   u32
+    sym_fields_name  u32
+    sym_members_name u32
+    sym_params_name  u32
     new :: fn(db &Nexus, arena &Arena) Self {
+        sym_cap := db.sym_count() as u64 + 16
+        ty_cap := db.types.kinds.len + 16
+        str_cap := db.interner.strings.len + 64
+        lit_cap := (db.interner.strings.len + 16) * 2
+        symbols := Vec(Symbol).with_cap(sym_cap)
+        symbols.len = sym_cap
+        mem.mem_set(symbols.ptr as &u8, 0, sym_cap * @sizeof(Symbol))
+        strings := Vec(Symbol).with_cap(str_cap)
+        strings.len = str_cap
+        mem.mem_set(strings.ptr as &u8, 0, str_cap * @sizeof(Symbol))
+        literals := Vec(Lit).with_cap(lit_cap)
+        literals.len = lit_cap
+        mem.mem_set(literals.ptr as &u8, 0, lit_cap * @sizeof(Lit))
+        abi_types := Vec(u32).with_cap(ty_cap)
+        abi_types.len = ty_cap
+        mem.mem_set(abi_types.ptr as &u8, 0, ty_cap * @sizeof(u32))
+        abi_layouts := Vec(u8).with_cap(ty_cap)
+        abi_layouts.len = ty_cap
+        mem.mem_set(abi_layouts.ptr as &u8, 0, ty_cap)
+        locals := Vec(Val).with_cap(sym_cap)
+        locals.len = sym_cap
+        mem.mem_set(locals.ptr as &u8, 0, sym_cap * @sizeof(Val))
+        local_kinds := Vec(u8).with_cap(sym_cap)
+        local_kinds.len = sym_cap
+        mem.mem_set(local_kinds.ptr as &u8, 0, sym_cap)
         .{
             db: db
             arena: arena
             air: Program.new()
-            symbols: HashMap(u32, Symbol).new()
-            strings: HashMap(u32, Symbol).new()
+            symbols: symbols
+            strings: strings
+            literals: literals
             pending: Vec(Pending).new()
             globals: Vec(Pending).new()
             metadata: Vec(Metadata).new()
             reflected: HashMap(u64, Symbol).new()
-            abi_types: HashMap(u32, u32).new()
-            abi_layouts: HashMap(u32, bool).new()
-            locals: HashMap(u32, Val).new()
+            layout: LayoutCache.new(db.types.kinds.len)
+            abi_types: abi_types
+            abi_layouts: abi_layouts
+            abi_scratch: Vec(AbiField).new()
+            locals: locals
+            local_kinds: local_kinds
+            local_dirty: Vec(u32).new()
+            init_locals: Vec(Val).empty()
+            init_kinds: Vec(u8).empty()
+            init_dirty: Vec(u32).empty()
             heap: HeapHooks.find(db)
+            sym_ptr_name: db.interner.intern("ptr")
+            sym_len_name: db.interner.intern("len")
+            sym_index_name: db.interner.intern("index")
+            sym_present_name: db.interner.intern("present")
+            sym_value_name: db.interner.intern("value")
+            sym_fields_name: db.interner.intern("fields")
+            sym_members_name: db.interner.intern("members")
+            sym_params_name: db.interner.intern("params")
         }
     }
 
+    destroy_scratch :: fn(self &Self) {
+        self.symbols.destroy()
+        self.strings.destroy()
+        self.literals.destroy()
+        self.pending.destroy()
+        self.globals.destroy()
+        self.metadata.destroy()
+        self.reflected.destroy()
+        self.layout.destroy()
+        self.abi_types.destroy()
+        self.abi_layouts.destroy()
+        self.abi_scratch.destroy()
+        self.locals.destroy()
+        self.local_kinds.destroy()
+        self.local_dirty.destroy()
+        self.init_locals.destroy()
+        self.init_kinds.destroy()
+        self.init_dirty.destroy()
+    }
+
+    ensure_symbol_slot :: fn(self &Self, sym u32) {
+        idx := sym as u64
+        if idx < self.symbols.len { ret }
+        old := self.symbols.len
+        new_len := idx + 16
+        self.symbols.reserve(new_len)
+        self.symbols.len = new_len
+        mem.mem_set((self.symbols.ptr + old) as &u8, 0, (new_len - old) * @sizeof(Symbol))
+    }
+
+    ensure_string_slot :: fn(self &Self, key u32) {
+        idx := key as u64
+        if idx < self.strings.len { ret }
+        old := self.strings.len
+        new_len := idx + 64
+        self.strings.reserve(new_len)
+        self.strings.len = new_len
+        mem.mem_set((self.strings.ptr + old) as &u8, 0, (new_len - old) * @sizeof(Symbol))
+    }
+
+    ensure_literal_slot :: fn(self &Self, idx u64) {
+        if idx < self.literals.len { ret }
+        old := self.literals.len
+        new_len := idx + 32
+        self.literals.reserve(new_len)
+        self.literals.len = new_len
+        mem.mem_set((self.literals.ptr + old) as &u8, 0, (new_len - old) * @sizeof(Lit))
+    }
+
+    intern_data :: fn(self &Self, bytes Str) Symbol {
+        key := self.db.interner.intern(bytes)
+        self.ensure_string_slot(key)
+        sym := self.strings.get(key as u64)
+        if sym != Symbol.none { ret sym }
+        added := self.air.data(self.db.interner.get(key))
+        self.strings.set(key as u64, added)
+        added
+    }
+
     abi_type :: fn(self &Self, ty, node u32) u32 {
-        abi.lower(self.db, &self.air, &self.abi_types, ty, node)
+        abi.lower(self.db, &self.air, &self.abi_types, &self.abi_scratch, ty, node)
     }
 
     native_layout :: fn(self &Self, ty u32) bool {
         abi.dependent(self.db, &self.abi_layouts, ty)
+    }
+
+    shape :: fn(self &Self, ty, node u32) Shape {
+        self.layout.shape(self.db, ty, node)
+    }
+
+    field :: fn(self &Self, ty, name, node u32) Field {
+        self.layout.field(self.db, ty, name, node, self.native_layout(ty))
+    }
+
+    union_offset :: fn(self &Self, ty, node u32) u32 {
+        self.layout.union_align(self.db, ty, node)
+    }
+
+    is_packed :: fn(self &Self, ty, node u32) bool {
+        self.layout.is_packed(self.db, ty, node, self.native_layout(ty))
     }
 
     function_address :: fn(self &Self, sym, node u32) Symbol {
@@ -93,7 +234,7 @@ Module :: struct {
     reflect :: fn(self &Self, source u64, ty, count, node u32) Symbol {
         found := self.reflected.get(source)
         if found != (0 as &Symbol) { ret *found }
-        shape := storage.shape(self.db, ty, node)
+        shape := self.shape(ty, node)
         size := shape.size * (if count == 0 { 1 as u32 } else { count })
         target := self.air.global("$typeinfo", size, shape.align)
         self.reflected.insert(source, target)
@@ -104,12 +245,13 @@ Module :: struct {
     register :: fn(self &Self, sym, node u32) Symbol {
         db := self.db
         real := db.resolve_sym(sym)
-        found := self.symbols.get(real)
-        if found != (0 as &Symbol) { ret *found }
+        self.ensure_symbol_slot(real)
+        cached := self.symbols.get(real as u64)
+        if cached != Symbol.none { ret cached }
         replacement := self.heap.replacement(db, real)
         if replacement != none() {
             key := self.register(replacement, node)
-            self.symbols.insert(real, key)
+            self.symbols.set(real as u64, key)
             ret key
         }
         global := db.global_var(real)
@@ -119,10 +261,10 @@ Module :: struct {
             key := if self.native_layout(ty) {
                 self.air.typed_global(name, self.abi_type(ty, global))
             } else {
-                shape := storage.shape(db, ty, global)
+                shape := self.shape(ty, global)
                 self.air.global(name, shape.size, shape.align)
             }
-            self.symbols.insert(real, key)
+            self.symbols.set(real as u64, key)
             if db.hir.extra(global) != none() {
                 self.globals.push(.{ source: global, target: key })
             }
@@ -136,34 +278,58 @@ Module :: struct {
         }
         result := db.types.func_return(signature)
         external := db.is_extern_fn(func) and db.hir.extra(func) == none()
-        params := Vec(Ty).new()
-        if storage.aggregate(db, result) {
-            params.push(Ty.ptr)
-        }
         args := db.types.func_params(signature)
-        position: u64 = 0
-        while position < args.len {
-            ty := args.get(position)
-            if runtime_arg(db, func, position, ty) {
-                params.push(storage.scalar(db, ty, func))
-            }
-            position = position + 1
-        }
+        need := args.len + (if storage.aggregate(db, result) { 1 as u64 } else { 0 as u64 })
         name := if db.is_extern_fn(func) { db.extern_link_name(real, func) } else {
             db.sym_name(real)
         }
         output := if storage.aggregate(db, result) { Ty.void_ } else {
             storage.scalar(db, result, func)
         }
-        key := self.air.declare(db.interner.get(name), params.as_slice(), output, external)
+        key := if need > 16 {
+            heap_params := Vec(Ty).with_cap(need)
+            if storage.aggregate(db, result) { heap_params.push(Ty.ptr) }
+            position: u64 = 0
+            while position < args.len {
+                ty := args.get(position)
+                if runtime_arg(db, func, position, ty) {
+                    heap_params.push(storage.scalar(db, ty, func))
+                }
+                position = position + 1
+            }
+            k := self.air.declare(db.interner.get(name), heap_params.as_slice(), output, external)
+            heap_params.destroy()
+            k
+        } else {
+            stack_params: [16]Ty
+            param_count: u64 = 0
+            if storage.aggregate(db, result) {
+                stack_params[0] = Ty.ptr
+                param_count = 1
+            }
+            position: u64 = 0
+            while position < args.len {
+                ty := args.get(position)
+                if runtime_arg(db, func, position, ty) {
+                    stack_params[param_count] = storage.scalar(db, ty, func)
+                    param_count = param_count + 1
+                }
+                position = position + 1
+            }
+            params_slice := if param_count == 0 {
+                Slice(Ty).empty()
+            } else {
+                Slice(Ty).new(&stack_params[0], param_count)
+            }
+            self.air.declare(db.interner.get(name), params_slice, output, external)
+        }
         decl := self.air.declarations.ptr_at(key as u64 - 1)
         decl.exported = db.is_extern_fn(func) and not external
         decl.foreign_module = db.extern_module(func)
         decl.header = db.extern_header(func)
         if decl.header.len != 0 { abi.require_headers(db, func) }
         if external or decl.exported { decl.abi_signature = self.abi_type(signature, func) }
-        params.destroy()
-        self.symbols.insert(real, key)
+        self.symbols.set(real as u64, key)
         if not external { self.pending.push(.{ source: real, target: key }) }
         key
     }
@@ -226,18 +392,32 @@ Context :: struct {
     module                &Module
     db                    &Nexus
     out                   keel.Function
-    locals                &HashMap(u32, Val)
+    locals                &Vec(Val)
+    local_kinds           &Vec(u8)
+    local_dirty           &Vec(u32)
     break_to, continue_to Block
     return_ty             u32
     return_slot           Val
 
-    new :: fn(module &Module, result u32, locals &HashMap(u32, Val)) Self {
-        locals.clear()
+    new :: fn(
+        module &Module
+        result u32
+        locals &Vec(Val)
+        local_kinds &Vec(u8)
+        local_dirty &Vec(u32)
+    ) Self {
+        for sym in *local_dirty {
+            locals.set(sym as u64, Val.none)
+            local_kinds.set(sym as u64, 0)
+        }
+        local_dirty.clear()
         .{
             module: module
             db: module.db
             out: keel.Function.new()
             locals: locals
+            local_kinds: local_kinds
+            local_dirty: local_dirty
             break_to: Block.none
             continue_to: Block.none
             return_ty: result
@@ -247,6 +427,68 @@ Context :: struct {
 
     open :: fn(self &Self) bool {
         self.out.current != Block.none
+    }
+
+    ensure_local_cap :: fn(self &Self, idx u64) {
+        if idx < self.locals.len { ret }
+        old := self.locals.len
+        new_len := idx + 16
+        grow := new_len - old
+        self.locals.reserve(grow)
+        self.locals.len = new_len
+        mem.mem_set((self.locals.ptr + old) as &u8, 0, grow * @sizeof(Val))
+        self.local_kinds.reserve(grow)
+        self.local_kinds.len = new_len
+        mem.mem_set(self.local_kinds.ptr + old, 0, grow)
+    }
+
+    mark_need_slot :: fn(self &Self, sym u32) {
+        if sym == none() { ret }
+        idx := sym as u64
+        self.ensure_local_cap(idx)
+        if self.local_kinds.get(idx) == 0 {
+            self.local_dirty.push(sym)
+            self.local_kinds.set(idx, 3)
+        }
+    }
+
+    needs_slot :: fn(self &Self, sym u32) bool {
+        if sym == none() or sym as u64 >= self.local_kinds.len { ret false }
+        self.local_kinds.get(sym as u64) == 3
+    }
+
+    bind_local :: fn(self &Self, sym u32, slot Val) {
+        idx := sym as u64
+        self.ensure_local_cap(idx)
+        if self.local_kinds.get(idx) == 0 { self.local_dirty.push(sym) }
+        self.locals.set(idx, slot)
+        self.local_kinds.set(idx, 1)
+    }
+
+    bind_val :: fn(self &Self, sym u32, value Val) {
+        idx := sym as u64
+        self.ensure_local_cap(idx)
+        if self.local_kinds.get(idx) == 0 { self.local_dirty.push(sym) }
+        self.locals.set(idx, value)
+        self.local_kinds.set(idx, 2)
+    }
+
+    find_local :: fn(self &Self, sym u32) Val {
+        if sym == none() or sym as u64 >= self.locals.len { ret Val.none }
+        if self.local_kinds.get(sym as u64) != 1 { ret Val.none }
+        self.locals.get(sym as u64)
+    }
+
+    find_val :: fn(self &Self, sym u32) Val {
+        if sym == none() or sym as u64 >= self.locals.len { ret Val.none }
+        if self.local_kinds.get(sym as u64) != 2 { ret Val.none }
+        self.locals.get(sym as u64)
+    }
+
+    has_local :: fn(self &Self, sym u32) bool {
+        if sym == none() or sym as u64 >= self.local_kinds.len { ret false }
+        kind := self.local_kinds.get(sym as u64)
+        kind == 1 or kind == 2
     }
 
     offset :: fn(self &Self, base Val, bytes u32) Val {
@@ -259,7 +501,7 @@ Context :: struct {
         if self.module.native_layout(ty) {
             ret self.out.stack_layout(self.module.abi_type(ty, node))
         }
-        shape := storage.shape(self.db, ty, node)
+        shape := self.module.shape(ty, node)
         self.out.stack(shape.size, shape.align)
     }
 
@@ -267,14 +509,16 @@ Context :: struct {
         if self.module.native_layout(ty) {
             ret self.out.size_of(self.module.abi_type(ty, node))
         }
-        self.out.constant(Ty.u64_, storage.shape(self.db, ty, node).size as u64)
+        self.out.constant(Ty.u64_, self.module.shape(ty, node).size as u64)
     }
 
     copy :: fn(self &Self, ty, node u32, dest, value Val) {
+        if dest == value { ret }
         if self.module.native_layout(ty) {
             self.out.copy_bytes(dest, value, self.size(ty, node))
         } else {
-            self.out.copy(dest, value, storage.shape(self.db, ty, node).size)
+            size := self.module.shape(ty, node).size
+            if size != 0 { self.out.copy(dest, value, size) }
         }
     }
 
@@ -282,7 +526,8 @@ Context :: struct {
         if self.module.native_layout(ty) {
             self.out.zero_layout(dest, self.module.abi_type(ty, node))
         } else {
-            self.out.zero(dest, storage.shape(self.db, ty, node).size)
+            size := self.module.shape(ty, node).size
+            if size != 0 { self.out.zero(dest, size) }
         }
     }
 
@@ -291,11 +536,11 @@ Context :: struct {
             offset := self.out.binary(Op.mul, self.out.cast(Ty.u64_, index), self.size(ty, node))
             ret self.out.offset(base, offset, 1)
         }
-        self.out.offset(base, index, storage.shape(self.db, ty, node).size)
+        self.out.offset(base, index, self.module.shape(ty, node).size)
     }
 
     field :: fn(self &Self, ty, name, node u32) Field {
-        storage.field(self.db, ty, name, node, self.module.native_layout(ty))
+        self.module.field(ty, name, node)
     }
 
     union_payload :: fn(self &Self, base Val, ty, node u32) Val {
@@ -303,12 +548,12 @@ Context :: struct {
             field := self.out.field_offset(self.module.abi_type(ty, node), 0, 2)
             ret self.out.offset(base, field, 1)
         }
-        self.offset(base, storage.union_align(self.db, ty, node))
+        self.offset(base, self.module.union_offset(ty, node))
     }
 
-    read :: fn(self &Self, ty, node u32, address Val) Val {
+    read :: fn(self &Self, ty, node u32, address, dest Val) Val {
         if storage.aggregate(self.db, ty) {
-            value := self.slot(ty, node)
+            value := if dest != Val.none { dest } else { self.slot(ty, node) }
             self.copy(ty, node, value, address)
             ret value
         }
@@ -323,9 +568,27 @@ Context :: struct {
         }
     }
 
+    fit :: fn(self &Self, val Val, ty, node u32, dest Val) Val {
+        if dest == Val.none or val == Val.none or not storage.aggregate(self.db, ty) { ret val }
+        self.copy(ty, node, dest, val)
+        dest
+    }
+
     local :: fn(self &Self, name, ty u32, value Val) {
+        sym := self.db.get_hir_symbol(name)
+        if not self.needs_slot(sym) and not storage.aggregate(self.db, ty) {
+            scalar := storage.scalar(self.db, ty, name)
+            if scalar == Ty.void_ { ret }
+            bound := if value != Val.none {
+                self.out.cast(scalar, value)
+            } else {
+                self.out.constant(scalar, 0)
+            }
+            self.bind_val(sym, bound)
+            ret
+        }
         address := self.slot(ty, name)
-        self.locals.insert(self.db.get_hir_symbol(name), address)
+        self.bind_local(sym, address)
         if value != Val.none {
             self.write(ty, name, address, value)
         } else if storage.aggregate(self.db, ty) {
@@ -370,11 +633,57 @@ open_join :: fn(ctx &Context, block Block, ty Ty) Val {
     Val.none
 }
 
-conditional :: fn(ctx &Context, node, left, right, extra u32) Val {
+into :: fn(ctx &Context, node, want_ty u32, dest Val) {
+    if storage.aggregate(ctx.db, want_ty) {
+        val := expr_into(ctx, node, dest)
+        if ctx.open() and val != dest and val != Val.none {
+            ctx.copy(want_ty, node, dest, val)
+        }
+        ret
+    }
+    val := expr(ctx, node)
+    if ctx.open() { ctx.write(want_ty, node, dest, val) }
+}
+
+quiet :: fn(ctx &Context, node, except_sym u32) bool {
+    if node == none() { ret false }
+    db := ctx.db
+    table := &db.hir
+    match table.kind(node) {
+        lit_bool_true, lit_bool_false, lit_int, lit_float, lit_char, lit_str, lit_cstr {
+            ret true
+        }
+        ident {
+            sym := db.get_hir_symbol(node)
+            ret sym != except_sym and ctx.has_local(sym) and
+                not storage.aggregate(db, db.get_node_type(node))
+        }
+        struct_init {
+            for item in items(db, table.rhs(node)) {
+                if not quiet(ctx, item, except_sym) { ret false }
+            }
+            ret true
+        }
+        array_init {
+            for item in items(db, table.lhs(node)) {
+                if not quiet(ctx, item, except_sym) { ret false }
+            }
+            ret true
+        }
+        else { ret false }
+    }
+}
+
+conditional :: fn(ctx &Context, node, left, right, extra u32, dest Val) Val {
     result_ty := ctx.db.get_node_type(node)
-    ty := if extra == none() or result_ty == types.ty_id_none() {
-        Ty.void_
+    has_else := extra != none() and result_ty != types.ty_id_none()
+    is_agg := has_else and storage.aggregate(ctx.db, result_ty)
+    agg_dest := if is_agg {
+        if dest != Val.none { dest } else { ctx.slot(result_ty, node) }
     } else {
+        Val.none
+    }
+    ty := if not has_else or is_agg { Ty.void_ } else {
         storage.scalar(ctx.db, result_ty, node)
     }
     cond := expr(ctx, left)
@@ -384,15 +693,25 @@ conditional :: fn(ctx &Context, node, left, right, extra u32) Val {
     end := join(ctx, ty)
     ctx.out.branch(cond, yes, no)
     ctx.out.begin(yes)
-    on_yes := expr(ctx, right)
+    on_yes := expr_into(ctx, right, agg_dest)
+    if ctx.open() and is_agg and on_yes != agg_dest and on_yes != Val.none {
+        ctx.copy(result_ty, node, agg_dest, on_yes)
+    }
     yes_open := ctx.open()
     jump_to(ctx, end, ty, on_yes)
     ctx.out.begin(no)
-    on_no := expr(ctx, extra)
+    on_no := expr_into(ctx, extra, agg_dest)
+    if ctx.open() and is_agg and on_no != agg_dest and on_no != Val.none {
+        ctx.copy(result_ty, node, agg_dest, on_no)
+    }
     no_open := ctx.open()
     jump_to(ctx, end, ty, on_no)
     result := open_join(ctx, end, ty)
-    if not yes_open and not no_open { ctx.out.trap() }
+    if not yes_open and not no_open {
+        ctx.out.trap()
+        ret Val.none
+    }
+    if is_agg { ret agg_dest }
     result
 }
 
@@ -495,8 +814,8 @@ number :: fn(ctx &Context, ty Ty, value f64) Val {
 
 find_address :: fn(ctx &Context, sym, node u32) Val {
     if sym == none() { ret Val.none }
-    local := ctx.locals.get(sym)
-    if local != (0 as &Val) { ret *local }
+    local := ctx.find_local(sym)
+    if local != Val.none { ret local }
     if ctx.db.global_var(sym) != none() {
         ret ctx.out.address(ctx.module.register(sym, node))
     }
@@ -522,8 +841,8 @@ addressable :: fn(ctx &Context, node u32) bool {
     db := ctx.db
     match db.hir.kind(node) {
         ident {
-            ret ctx.locals.contains_key(db.get_hir_symbol(node)) or
-                db.global_var(db.get_hir_symbol(node)) != none()
+            sym := db.get_hir_symbol(node)
+            ret ctx.find_local(sym) != Val.none or db.global_var(sym) != none()
         }
         member {
             base := db.hir.lhs(node)
@@ -557,6 +876,7 @@ place :: fn(ctx &Context, node u32) Val {
             if table.kind(node) == k.member {
                 ty := db.get_node_type(left)
                 base := record_base(ctx, left)
+                if not ctx.open() { ret Val.none }
                 while db.types.kind(ty) == Kind.ptr {
                     ty = db.types.payload(ty)
                     if db.types.kind(ty) == Kind.ptr { base = ctx.out.load(Ty.ptr, base) }
@@ -568,23 +888,26 @@ place :: fn(ctx &Context, node u32) Val {
         }
         unary_deref {
             address := expr(ctx, left)
+            if not ctx.open() { ret Val.none }
             if db.get_node_type(left) == db.str_type {
-                field := record_field(ctx, address, db.str_type, db.interner.intern("ptr"), node)
+                field := record_field(ctx, address, db.str_type, ctx.module.sym_ptr_name, node)
                 ret ctx.out.load(Ty.ptr, field)
             }
             ret address
         }
         index {
             base := record_base(ctx, left)
+            if not ctx.open() { ret Val.none }
             source := db.get_node_type(left)
             if db.types.kind(source) == Kind.nominal or db.types.kind(source) == Kind.struct_ {
                 base = ctx.out.load(
                     Ty.ptr
-                    record_field(ctx, base, source, db.interner.intern("ptr"), node)
+                    record_field(ctx, base, source, ctx.module.sym_ptr_name, node)
                 )
             }
             ty := db.get_node_type(node)
             index := expr(ctx, table.rhs(node))
+            if not ctx.open() { ret Val.none }
             ret ctx.element(base, index, ty, node)
         }
         else { storage.error(db, node, "expression has no AIR address"), ret Val.none }
@@ -617,6 +940,7 @@ receiver :: fn(ctx &Context, node, want u32) Val {
     } else {
         expr(ctx, node)
     }
+    if not ctx.open() { ret Val.none }
     while have_depth < want_depth {
         if not storage.aggregate(db, actual) {
             temp := ctx.slot(actual, node)
@@ -628,69 +952,109 @@ receiver :: fn(ctx &Context, node, want u32) Val {
     }
     while have_depth > want_depth {
         actual = db.types.payload(actual)
-        value = ctx.read(actual, node, value)
+        value = ctx.read(actual, node, value, Val.none)
         have_depth = have_depth - 1
     }
     value
 }
 
-string_value :: fn(ctx &Context, bytes Str, pointer_only bool, node u32) Val {
-    key := ctx.db.interner.intern(bytes)
-    found := ctx.module.strings.get(key)
-    sym := if found != (0 as &Symbol) { *found } else {
-        added := ctx.module.air.data(ctx.db.interner.get(key))
-        ctx.module.strings.insert(key, added)
-        added
-    }
+string_from_sym :: fn(
+    ctx &Context
+    sym Symbol
+    len u64
+    pointer_only bool
+    node u32
+    dest Val
+) Val {
     pointer := ctx.out.address(sym)
     if pointer_only { ret pointer }
     ty := ctx.db.str_type
-    result := ctx.slot(ty, node)
-    ctx.out.store(record_field(ctx, result, ty, ctx.db.interner.intern("ptr"), node), pointer)
-    length := ctx.out.constant(Ty.u64_, bytes.len)
-    ctx.out.store(record_field(ctx, result, ty, ctx.db.interner.intern("len"), node), length)
+    result := if dest != Val.none { dest } else { ctx.slot(ty, node) }
+    ctx.out.store(record_field(ctx, result, ty, ctx.module.sym_ptr_name, node), pointer)
+    length := ctx.out.constant(Ty.u64_, len)
+    ctx.out.store(record_field(ctx, result, ty, ctx.module.sym_len_name, node), length)
     result
 }
 
-literal_text :: fn(ctx &Context, node u32, c_string bool) Val {
-    quoted := ctx.db.interner.get(ctx.db.hir.lhs(node))
+string_value :: fn(ctx &Context, bytes Str, pointer_only bool, node u32, dest Val) Val {
+    sym := ctx.module.intern_data(bytes)
+    string_from_sym(ctx, sym, bytes.len, pointer_only, node, dest)
+}
+
+has_escape :: fn(raw Str) bool {
+    i: u64 = 0
+    while i < raw.len {
+        if raw.ptr[i] == 92 { ret true }
+        i = i + 1
+    }
+    false
+}
+
+literal_text :: fn(ctx &Context, node u32, c_string bool, dest Val) Val {
+    tok := ctx.db.hir.lhs(node)
+    cache_idx := (tok as u64) * 2 + (if c_string { 1 as u64 } else { 0 as u64 })
+    ctx.module.ensure_literal_slot(cache_idx)
+    cached := ctx.module.literals.get(cache_idx)
+    if cached.symbol != Symbol.none {
+        ret string_from_sym(ctx, cached.symbol, cached.len, c_string, node, dest)
+    }
+    quoted := ctx.db.interner.get(tok)
     source := if c_string and quoted.starts_with("c\"") { quoted.sub(1, quoted.len - 1) } else {
         quoted
     }
     raw := source.trim_quotes()
     backtick := source.len != 0 and source.ptr[0] == 96
-    decoded := String.new(ctx.module.arena)
+    if not c_string and not has_escape(raw) {
+        sym := ctx.module.intern_data(raw)
+        ctx.module.literals.set(cache_idx, .{ symbol: sym, len: raw.len })
+        ret string_from_sym(ctx, sym, raw.len, false, node, dest)
+    }
+    out := ctx.module.arena.alloc(raw.len + 1) as &u8
+    out_len: u64 = 0
     index: u64 = 0
     while index < raw.len {
-        ch := raw.ptr[index]
-        index = index + 1
-        if ch == 92 and index < raw.len {
-            escape := raw.ptr[index]
-            if escape == 96 and backtick {
-                ch = 96
-                index = index + 1
-            } else if not backtick {
-                index = index + 1
-                if escape == 'n' { ch = 10 } else if escape == 'r' { ch = 13 } else if escape ==
-                    't' { ch = 9 } else if escape >= '0' and escape <= '7' {
-                    ch = escape - '0'
-                    digits: u32 = 1
-                    while digits < 3 and index < raw.len and raw.ptr[index] >= '0' and
-                        raw.ptr[index] <= '7' {
-                        ch = (ch << 3) | (raw.ptr[index] - '0')
-                        index = index + 1
-                        digits = digits + 1
-                    }
-                } else if escape == 'x' and index + 1 < raw.len {
-                    ch = hex(raw.ptr[index]) * 16 + hex(raw.ptr[index + 1])
-                    index = index + 2
-                } else { ch = escape }
-            }
-        }
-        decoded.push_char(ch)
+        out[out_len] = next_literal_byte(raw, backtick, &index)
+        out_len = out_len + 1
     }
-    if c_string { decoded.push_char(0) }
-    string_value(ctx, decoded.as_str(), c_string, node)
+    text_len := out_len
+    if c_string {
+        out[out_len] = 0
+        out_len = out_len + 1
+    }
+    sym := ctx.module.intern_data(Str.new(out, out_len))
+    ctx.module.literals.set(cache_idx, .{ symbol: sym, len: text_len })
+    string_from_sym(ctx, sym, text_len, c_string, node, dest)
+}
+
+next_literal_byte :: fn(raw Str, backtick bool, index &u64) u8 {
+    i := *index
+    ch := raw.ptr[i]
+    i = i + 1
+    if ch == 92 and i < raw.len {
+        escape := raw.ptr[i]
+        if escape == 96 and backtick {
+            ch = 96
+            i = i + 1
+        } else if not backtick {
+            i = i + 1
+            if escape == 'n' { ch = 10 } else if escape == 'r' { ch = 13 } else if escape == 't' {
+                ch = 9
+            } else if escape >= '0' and escape <= '7' {
+                ch = escape - '0'
+                digits: u32 = 1
+                while digits < 3 and i < raw.len and raw.ptr[i] >= '0' and raw.ptr[i] <= '7' {
+                    ch = (ch << 3) | (raw.ptr[i] - '0')
+                    i = i + 1
+                    digits = digits + 1
+                }
+            } else if escape == 'x' and i + 1 < raw.len {
+                ch = hex(raw.ptr[i]) * 16 + hex(raw.ptr[i + 1])
+                i = i + 2
+            } else { ch = escape }
+        }
+    }
+    *index = i
+    ch
 }
 
 hex :: fn(ch u8) u8 {
@@ -698,33 +1062,47 @@ hex :: fn(ch u8) u8 {
     (ch | 32) - 'a' + 10
 }
 
-record_init :: fn(ctx &Context, node, ty u32) Val {
+record_init :: fn(ctx &Context, node, ty u32, dest Val) Val {
     db := ctx.db
-    target := ctx.slot(ty, node)
-    ctx.zero(ty, node, target)
-    values := items(db, db.hir.rhs(node))
+    target := if dest != Val.none { dest } else { ctx.slot(ty, node) }
     if db.hir.kind(node) == k.array_init {
         elem := db.types.get_array_type(ty)
+        elems := items(db, db.hir.lhs(node))
+        arr_len := db.types.get_array_len(ty)
+        if elems.len != arr_len as u64 { ctx.zero(ty, node, target) }
         offset: u32 = 0
-        for item in items(db, db.hir.lhs(node)) {
-            value := expr(ctx, item)
-            if not ctx.open() { ret Val.none }
+        for item in elems {
             index := ctx.out.constant(Ty.u32_, offset as u64)
-            ctx.write(elem, item, ctx.element(target, index, elem, item), value)
+            into(ctx, item, elem, ctx.element(target, index, elem, item))
+            if not ctx.open() { ret Val.none }
             offset = offset + 1
         }
-    } else {
-        fields := items(db, db.hir.lhs(node))
+        ret target
+    }
+    values := items(db, db.hir.rhs(node))
+    fields := items(db, db.hir.lhs(node))
+    decl_fields := db.types.get_struct_fields(ty)
+    full := fields.len == values.len and fields.len * 2 == decl_fields.len and
+        ctx.module.is_packed(ty, node)
+    if full {
         pos: u64 = 0
-        while pos < fields.len and pos < values.len {
-            name := db.hir.lhs(fields.get(pos))
-            item := values.get(pos)
-            field := ctx.field(ty, name, item)
-            value := expr(ctx, item)
-            if not ctx.open() { ret Val.none }
-            ctx.write(field.ty, item, record_field(ctx, target, ty, name, item), value)
+        while pos < fields.len {
+            if db.hir.lhs(fields.get(pos)) != decl_fields.get(pos * 2) {
+                full = false
+                break
+            }
             pos = pos + 1
         }
+    }
+    if not full { ctx.zero(ty, node, target) }
+    pos: u64 = 0
+    while pos < fields.len and pos < values.len {
+        name := db.hir.lhs(fields.get(pos))
+        item := values.get(pos)
+        field := ctx.field(ty, name, item)
+        into(ctx, item, field.ty, record_field(ctx, target, ty, name, item))
+        if not ctx.open() { ret Val.none }
+        pos = pos + 1
     }
     target
 }
@@ -737,10 +1115,16 @@ unpack :: fn(ctx &Context, list, ty u32, value Val) {
         if kind == k.empty or db.get_hir_symbol(item) != none() {
             name := db.tuple_field_name(index)
             field := ctx.field(ty, name, item)
-            part := ctx.read(field.ty, item, record_field(ctx, value, ty, name, item))
+            field_addr := record_field(ctx, value, ty, name, item)
             if kind == k.empty or kind == k.tuple_type {
+                part := ctx.read(field.ty, item, field_addr, Val.none)
                 unpack(ctx, db.hir.lhs(item), field.ty, part)
+            } else if storage.aggregate(db, field.ty) {
+                slot := ctx.slot(field.ty, item)
+                ctx.copy(field.ty, item, slot, field_addr)
+                ctx.bind_local(db.get_hir_symbol(item), slot)
             } else {
+                part := ctx.read(field.ty, item, field_addr, Val.none)
                 ctx.local(item, field.ty, part)
             }
         }
@@ -748,20 +1132,20 @@ unpack :: fn(ctx &Context, list, ty u32, value Val) {
     }
 }
 
-constant_value :: fn(ctx &Context, node, ty u32, bits u64) Val {
-    convert_constant(ctx, node, ty, ty, bits)
+constant_value :: fn(ctx &Context, node, ty u32, bits u64, dest Val) Val {
+    convert_constant(ctx, node, ty, ty, bits, dest)
 }
 
-convert_constant :: fn(ctx &Context, node, source, ty u32, bits u64) Val {
+convert_constant :: fn(ctx &Context, node, source, ty u32, bits u64, dest Val) Val {
     db := ctx.db
     if ty == db.str_type {
-        if bits == 0 { ret string_value(ctx, Str.empty(), false, node) }
+        if bits == 0 { ret string_value(ctx, Str.empty(), false, node, dest) }
         ptr := reflection.reflection_read(db, bits, ty, "ptr") as &u8
         len := reflection.reflection_read(db, bits, ty, "len")
-        ret string_value(ctx, Str.new(ptr, len), false, node)
+        ret string_value(ctx, Str.new(ptr, len), false, node, dest)
     }
     if storage.aggregate(db, ty) {
-        target := ctx.slot(ty, node)
+        target := if dest != Val.none { dest } else { ctx.slot(ty, node) }
         ctx.zero(ty, node, target)
         if bits == 0 { ret target }
         kind := db.types.kind(ty)
@@ -771,16 +1155,25 @@ convert_constant :: fn(ctx &Context, node, source, ty u32, bits u64) Val {
             stride := vm.vm_element_size(&db.types, source_elem)
             for index in Range.new(0, db.types.get_array_len(ty) as i32) {
                 raw := legacy.read_vm_constant((bits + index as u64 * stride) as &u8, stride)
-                value := convert_constant(ctx, node, source_elem, elem, raw)
                 address := ctx.element(target, ctx.out.constant(Ty.u32_, index as u64), elem, node)
-                ctx.write(elem, node, address, value)
+                if storage.aggregate(db, elem) {
+                    convert_constant(ctx, node, source_elem, elem, raw, address)
+                } else {
+                    value := convert_constant(ctx, node, source_elem, elem, raw, Val.none)
+                    ctx.write(elem, node, address, value)
+                }
             }
         } else if kind == Kind.union_ {
             tag := (bits as &u64)[0] as u32
             member := db.types.union_members(ty).get(tag as u64)
             ctx.out.store(target, ctx.out.constant(Ty.u32_, tag as u64))
-            value := constant_value(ctx, node, member, (bits as &u64)[1])
-            ctx.write(member, node, ctx.union_payload(target, ty, node), value)
+            payload_addr := ctx.union_payload(target, ty, node)
+            if storage.aggregate(db, member) {
+                constant_value(ctx, node, member, (bits as &u64)[1], payload_addr)
+            } else {
+                value := constant_value(ctx, node, member, (bits as &u64)[1], Val.none)
+                ctx.write(member, node, payload_addr, value)
+            }
         } else {
             fields := db.types.get_struct_fields(ty)
             source_fields := db.types.get_struct_fields(source)
@@ -788,9 +1181,20 @@ convert_constant :: fn(ctx &Context, node, source, ty u32, bits u64) Val {
             while position < fields.len / 2 {
                 item := fields.get(position * 2 + 1)
                 old_ty := source_fields.get(position * 2 + 1)
-                value := convert_constant(ctx, node, old_ty, item, (bits as &u64)[position])
                 address := record_field(ctx, target, ty, fields.get(position * 2), node)
-                ctx.write(item, node, address, value)
+                if storage.aggregate(db, item) {
+                    convert_constant(ctx, node, old_ty, item, (bits as &u64)[position], address)
+                } else {
+                    value := convert_constant(
+                        ctx
+                        node
+                        old_ty
+                        item
+                        (bits as &u64)[position]
+                        Val.none
+                    )
+                    ctx.write(item, node, address, value)
+                }
                 position = position + 1
             }
         }
@@ -811,20 +1215,22 @@ convert_constant :: fn(ctx &Context, node, source, ty u32, bits u64) Val {
     ctx.out.constant(storage.scalar(db, ty, node), bits)
 }
 
-name_value :: fn(ctx &Context, node, ty u32) Val {
+name_value :: fn(ctx &Context, node, ty u32, dest Val) Val {
     db := ctx.db
     table := &db.hir
     if table.kind(node) == k.member { module_effect(ctx, table.lhs(node)) }
     if not ctx.open() { ret Val.none }
     sym := db.resolve_sym(db.get_hir_symbol(node))
+    direct := ctx.find_val(sym)
+    if direct != Val.none { ret ctx.out.cast(storage.scalar(db, ty, node), direct) }
     address := find_address(ctx, sym, node)
-    if address != Val.none { ret ctx.read(ty, node, address) }
+    if address != Val.none { ret ctx.read(ty, node, address, dest) }
     if db.types.kind(ty) == Kind.func and db.get_fn_node(sym) != none() {
         chosen := resolve_call(db, node, node)
         ret ctx.out.address(ctx.module.function_address(chosen, node))
     }
     if db.has_const_val(node) and not storage.aggregate(db, ty) {
-        ret constant_value(ctx, node, ty, db.get_const_val(node))
+        ret constant_value(ctx, node, ty, db.get_const_val(node), Val.none)
     }
     if table.kind(node) == k.member {
         lhs := table.lhs(node)
@@ -836,18 +1242,20 @@ name_value :: fn(ctx &Context, node, ty u32) Val {
         if lhs_type != types.ty_id_type() and db.module_receiver(lhs) == none() {
             address = place(ctx, node)
             if not ctx.open() { ret Val.none }
-            ret ctx.read(ty, node, address)
+            ret ctx.read(ty, node, address, dest)
         }
     }
     if db.is_sym_const(sym) {
         declaration := db.get_sym_hir(sym)
         if declaration != none() and db.has_const_val(declaration) {
-            ret constant_value(ctx, node, ty, db.get_const_val(declaration))
+            ret constant_value(ctx, node, ty, db.get_const_val(declaration), dest)
         }
         init := db.binding_value(sym)
         if init != none() {
-            value := expr(ctx, init)
+            mark_addressed(ctx, init)
+            value := expr_into(ctx, init, dest)
             if not ctx.open() { ret Val.none }
+            if storage.aggregate(db, ty) { ret ctx.fit(value, ty, node, dest) }
             ret ctx.out.cast(storage.scalar(db, ty, node), value)
         }
     }
@@ -855,18 +1263,20 @@ name_value :: fn(ctx &Context, node, ty u32) Val {
     Val.none
 }
 
-builtin :: fn(ctx &Context, node, ty u32) Val {
+builtin :: fn(ctx &Context, node, ty u32, dest Val) Val {
     db := ctx.db
     table := &db.hir
     name := db.interner.get(table.lhs(node))
     if name.eq("import") {
-        ret ctx.slot(ty, node)
+        ret if dest != Val.none { dest } else { ctx.slot(ty, node) }
     }
     if name.eq("trap") { ctx.out.trap(), ret Val.none }
     if name.eq("sizeof") {
         ret ctx.out.cast(storage.scalar(db, ty, node), ctx.size(db.get_const_type(node), node))
     }
-    if name.eq("type_name") or name.eq("source_location") { ret expr(ctx, table.extra(node)) }
+    if name.eq("type_name") or name.eq("source_location") {
+        ret expr_into(ctx, table.extra(node), dest)
+    }
     if name.eq("type_info") { ret reflection_address(ctx, node) }
     args := items(db, table.rhs(node))
     if name.eq("c_value") {
@@ -876,10 +1286,10 @@ builtin :: fn(ctx &Context, node, ty u32) Val {
         ret ctx.out.header_value(storage.scalar(db, ty, node), header, key)
     }
     if name.eq("memcpy") {
-        dest := expr(ctx, args.get(0))
+        dest_ptr := expr(ctx, args.get(0))
         source := expr(ctx, args.get(1))
         count := expr(ctx, args.get(2))
-        ctx.out.copy_bytes(dest, source, count)
+        if ctx.open() { ctx.out.copy_bytes(dest_ptr, source, count) }
         ret Val.none
     }
     if name.eq("is") or name.eq("tag") {
@@ -888,6 +1298,7 @@ builtin :: fn(ctx &Context, node, ty u32) Val {
         source := db.get_node_type(arg)
         union := db.types.kind(source) == Kind.union_
         value := expr(ctx, arg)
+        if not ctx.open() { ret Val.none }
         tag := if union { ctx.out.load(Ty.u32_, value) } else { ctx.out.constant(Ty.u32_, 0) }
         if name.eq("tag") { ret ctx.out.cast(storage.scalar(db, ty, node), tag) }
         if not union or not db.types.union_contains(source, target) {
@@ -901,6 +1312,10 @@ builtin :: fn(ctx &Context, node, ty u32) Val {
 }
 
 expr :: fn(ctx &Context, node u32) Val {
+    expr_into(ctx, node, Val.none)
+}
+
+expr_into :: fn(ctx &Context, node u32, dest Val) Val {
     if node == none() or not ctx.open() { ret Val.none }
     db := ctx.db
     ty := db.get_node_type(node)
@@ -909,23 +1324,70 @@ expr :: fn(ctx &Context, node u32) Val {
         target := db.get_union_coerce_ty(node)
         index := db.get_union_coerce_idx(node)
         member := db.types.union_members(target).get(index as u64)
-        value := raw_expr(ctx, node, member)
+        slot := if dest != Val.none { dest } else { ctx.slot(target, node) }
+        ctx.zero(target, node, slot)
+        ctx.out.store(slot, ctx.out.constant(Ty.u32_, index as u64))
+        payload := ctx.union_payload(slot, target, node)
+        inner_dest := if storage.aggregate(db, member) { payload } else { Val.none }
+        value := raw_expr(ctx, node, member, inner_dest)
         if not ctx.open() { ret Val.none }
-        ret pack_union(ctx, node, target, index, member, value)
+        if not storage.aggregate(db, member) or value != payload {
+            ctx.write(member, node, payload, value)
+        }
+        ret slot
     }
-    raw_expr(ctx, node, ty)
+    raw_expr(ctx, node, ty, dest)
 }
 
-pack_union :: fn(ctx &Context, node, target, index, member u32, value Val) Val {
-    db := ctx.db
-    result := ctx.slot(target, node)
+pack_union :: fn(ctx &Context, node, target, index, member u32, value Val, dest Val) Val {
+    result := if dest != Val.none { dest } else { ctx.slot(target, node) }
     ctx.zero(target, node, result)
     ctx.out.store(result, ctx.out.constant(Ty.u32_, index as u64))
     ctx.write(member, node, ctx.union_payload(result, target, node), value)
     result
 }
 
-raw_expr :: fn(ctx &Context, node, ty u32) Val {
+returning :: fn(ctx &Context, node u32) {
+    if not ctx.open() { ret }
+    db := ctx.db
+    table := &db.hir
+    if node != none() and not db.has_union_coerce(node) {
+        kind := table.kind(node)
+        if kind == k.block {
+            xs := items(db, table.lhs(node))
+            if xs.len != 0 {
+                last := xs.len - 1
+                i: u64 = 0
+                while i < last {
+                    expr(ctx, xs.get(i))
+                    if not ctx.open() { ret }
+                    i = i + 1
+                }
+                returning(ctx, xs.get(last))
+                ret
+            }
+        } else if kind == k.k_if and table.extra(node) != none() {
+            test := expr(ctx, table.lhs(node))
+            if not ctx.open() { ret }
+            yes := ctx.out.block()
+            no := ctx.out.block()
+            ctx.out.branch(test, yes, no)
+            ctx.out.begin(yes)
+            returning(ctx, table.rhs(node))
+            ctx.out.begin(no)
+            returning(ctx, table.extra(node))
+            ret
+        }
+    }
+    if ctx.return_slot != Val.none and quiet(ctx, node, none()) {
+        into(ctx, node, ctx.return_ty, ctx.return_slot)
+        if ctx.open() { ctx.out.ret_void() }
+        ret
+    }
+    ctx.finish(expr(ctx, node), node)
+}
+
+raw_expr :: fn(ctx &Context, node, ty u32, dest Val) Val {
     db := ctx.db
     table := &db.hir
     kind := table.kind(node)
@@ -947,25 +1409,41 @@ raw_expr :: fn(ctx &Context, node, ty u32) Val {
             ret number(ctx, storage.scalar(db, ty, node), parse_float(db.interner.get(left)))
         }
         lit_str, lit_cstr {
-            ret literal_text(ctx, node, kind == k.lit_cstr or db.types.kind(ty) == Kind.ptr)
+            ret literal_text(
+                ctx
+                node
+                kind == k.lit_cstr or db.types.kind(ty) == Kind.ptr
+                dest
+            )
         }
-        ident, member { ret name_value(ctx, node, ty) }
+        ident, member { ret name_value(ctx, node, ty, dest) }
         function {
             if db.types.func_has_type_param(ty) { ret Val.none }
             ret ctx.out.address(ctx.module.function_address(db.get_hir_symbol(node), node))
         }
-        call { ret call(ctx, node, left, Val.none) }
+        call { ret call(ctx, node, left, Val.none, dest) }
         block {
-            result := Val.none
-            for child in items(db, left) {
-                result = expr(ctx, child)
-                if not ctx.open() { break }
+            xs := items(db, left)
+            if xs.len == 0 { ret Val.none }
+            last := xs.len - 1
+            i: u64 = 0
+            while i < last {
+                expr(ctx, xs.get(i))
+                if not ctx.open() { ret Val.none }
+                i = i + 1
             }
-            ret result
+            ret expr_into(ctx, xs.get(last), dest)
         }
         var {
             decl_ty := db.get_node_type(left)
             if decl_ty == types.ty_id_type() or db.types.func_has_type_param(decl_ty) {
+                ret Val.none
+            }
+            local_sym := db.get_hir_symbol(left)
+            if storage.aggregate(db, decl_ty) and quiet(ctx, extra, local_sym) {
+                slot := ctx.slot(decl_ty, left)
+                ctx.bind_local(local_sym, slot)
+                into(ctx, extra, decl_ty, slot)
                 ret Val.none
             }
             value := expr(ctx, extra)
@@ -982,7 +1460,7 @@ raw_expr :: fn(ctx &Context, node, ty u32) Val {
             value := expr(ctx, right)
             if not ctx.open() { ret Val.none }
             ctx.write(db.get_node_type(left), node, address, value)
-            ret value
+            ret ctx.fit(value, ty, node, dest)
         }
         binary_add, binary_sub, binary_mul, binary_div, binary_mod, binary_eq_eq, binary_neq, binary_lt, binary_lt_eq, binary_gt, binary_gt_eq, binary_bit_and, binary_bit_or, binary_bit_xor, binary_shl, binary_shr {
             ret binary_expr(ctx, node, left, right)
@@ -998,7 +1476,7 @@ raw_expr :: fn(ctx &Context, node, ty u32) Val {
         unary_deref, index {
             address := place(ctx, node)
             if not ctx.open() { ret Val.none }
-            ret ctx.read(ty, node, address)
+            ret ctx.read(ty, node, address, dest)
         }
         cast {
             if table.kind(left) == k.lit_int and table.lhs(left) > 2147483647 {
@@ -1008,10 +1486,10 @@ raw_expr :: fn(ctx &Context, node, ty u32) Val {
                 }
                 ret ctx.out.constant(target, table.lhs(left) as u64)
             }
-            value := expr(ctx, left)
-            if not ctx.open() { ret Val.none }
             source := db.get_node_type(left)
             if db.types.kind(source) == Kind.union_ and source != ty {
+                value := expr(ctx, left)
+                if not ctx.open() { ret Val.none }
                 tag := ctx.out.load(Ty.u32_, value)
                 chosen := db.types.union_member_index(source, ty)
                 pass := ctx.out.block()
@@ -1024,18 +1502,21 @@ raw_expr :: fn(ctx &Context, node, ty u32) Val {
                 ctx.out.begin(fail)
                 ctx.out.trap()
                 ctx.out.begin(pass)
-                ret ctx.read(ty, node, ctx.union_payload(value, source, node))
+                ret ctx.read(ty, node, ctx.union_payload(value, source, node), dest)
             }
+            value := expr_into(ctx, left, if storage.aggregate(db, ty) { dest } else { Val.none })
+            if not ctx.open() { ret Val.none }
+            if storage.aggregate(db, ty) { ret ctx.fit(value, ty, node, dest) }
             ret ctx.out.cast(storage.scalar(db, ty, node), value)
         }
-        k_if { ret conditional(ctx, node, left, right, extra) }
+        k_if { ret conditional(ctx, node, left, right, extra, dest) }
         k_while { while_loop(ctx, left, right), ret Val.none }
         k_for { for_loop(ctx, node), ret Val.none }
-        k_match { ret match_expr(ctx, node, ty) }
-        k_ret { ctx.finish(expr(ctx, left), node), ret Val.none }
+        k_match { ret match_expr(ctx, node, ty, dest) }
+        k_ret { returning(ctx, left), ret Val.none }
         k_break { ctx.out.jump(ctx.break_to), ret Val.none }
         k_cont { ctx.out.jump(ctx.continue_to), ret Val.none }
-        struct_init, array_init { ret record_init(ctx, node, ty) }
+        struct_init, array_init { ret record_init(ctx, node, ty, dest) }
         k_cmpt {
             if db.has_const_val(node) {
                 bits := db.get_const_val(node)
@@ -1043,25 +1524,32 @@ raw_expr :: fn(ctx &Context, node, ty u32) Val {
                     db.has_union_coerce(left) {
                     index := db.get_union_coerce_idx(left)
                     member := db.types.union_members(ty).get(index as u64)
-                    item := convert_constant(ctx, node, right, member, bits)
-                    ret pack_union(ctx, node, ty, index, member, item)
+                    slot := if dest != Val.none { dest } else { ctx.slot(ty, node) }
+                    ctx.zero(ty, node, slot)
+                    ctx.out.store(slot, ctx.out.constant(Ty.u32_, index as u64))
+                    payload := ctx.union_payload(slot, ty, node)
+                    if storage.aggregate(db, member) {
+                        convert_constant(ctx, node, right, member, bits, payload)
+                    } else {
+                        item := convert_constant(ctx, node, right, member, bits, Val.none)
+                        ctx.write(member, node, payload, item)
+                    }
+                    ret slot
                 }
-                ret convert_constant(ctx, node, right, ty, bits)
+                ret convert_constant(ctx, node, right, ty, bits, dest)
             }
             storage.error(db, node, "comptime expression has no evaluated value")
             ret Val.none
         }
         splice {
-            if right == 1 { ret call(ctx, extra, table.lhs(extra), Val.none) }
-            ret expr(ctx, extra)
+            if right == 1 { ret call(ctx, extra, table.lhs(extra), Val.none, dest) }
+            ret expr_into(ctx, extra, dest)
         }
-        builtin_call { ret builtin(ctx, node, ty) }
+        builtin_call { ret builtin(ctx, node, ty, dest) }
         else { storage.error(db, node, hir.hir_kind_name(kind)), ret Val.none }
     }
     Val.none
 }
-
-reflection :: @import("compiler/typer/reflection")
 
 reflection_address :: fn(ctx &Context, node u32) Val {
     db := ctx.db
@@ -1097,23 +1585,28 @@ lower_metadata_impl :: fn(ctx &Context, data Metadata) {
     for index in Range.new(0, (fields.len / 2) as i32) {
         name := fields.get(index as u64 * 2)
         ty := fields.get(index as u64 * 2 + 1)
-        shape := storage.shape(db, ty, data.node)
+        shape := ctx.module.shape(ty, data.node)
         offset := storage.align_up(position as u32, shape.align)
         address := ctx.offset(dest, offset)
         position = (offset + shape.size) as u64
         raw := bits[index]
         if raw == 0 { cont }
         value := if table.kind(ty) == Kind.ptr {
-            text := db.interner.get(name)
-            count_name := if text.eq("fields") { "field_count" } else if text.eq("members") {
+            count_name := if name == ctx.module.sym_fields_name {
+                "field_count"
+            } else if name == ctx.module.sym_members_name {
                 "member_count"
-            } else if text.eq("params") { "param_count" } else { Str.empty() }
+            } else if name == ctx.module.sym_params_name {
+                "param_count"
+            } else {
+                Str.empty()
+            }
             count := if count_name.len == 0 { 0 as u32 } else {
                 reflection.reflection_read(db, data.source, data.ty, count_name) as u32
             }
             ctx.out.address(ctx.module.reflect(raw, table.payload(ty), count, data.node))
         } else {
-            constant_value(ctx, data.node, ty, raw)
+            constant_value(ctx, data.node, ty, raw, Val.none)
         }
         ctx.write(ty, data.node, address, value)
     }
@@ -1125,13 +1618,127 @@ lower_body :: fn(module &Module, pending Pending) {
     profile.leave(timing)
 }
 
+mark_ident_slot :: fn(ctx &Context, node u32) {
+    sym := ctx.db.get_hir_symbol(node)
+    if sym == none() { ret }
+    ctx.mark_need_slot(sym)
+    resolved := ctx.db.resolve_sym(sym)
+    if resolved != sym and resolved != none() { ctx.mark_need_slot(resolved) }
+}
+
+mark_place_sym :: fn(ctx &Context, node u32) {
+    db := ctx.db
+    table := &db.hir
+    cur := node
+    while cur != none() {
+        kind := table.kind(cur)
+        if kind == k.ident {
+            mark_ident_slot(ctx, cur)
+            ret
+        }
+        if kind != k.member and kind != k.index { ret }
+        base := table.lhs(cur)
+        if base == none() or db.types.kind(db.get_node_type(base)) == Kind.ptr { ret }
+        cur = base
+    }
+}
+
+mark_addressed :: fn(ctx &Context, node u32) {
+    if node == none() { ret }
+    db := ctx.db
+    table := &db.hir
+    kind := table.kind(node)
+    left := table.lhs(node)
+    right := table.rhs(node)
+    extra := table.extra(node)
+    match kind {
+        unary_addr_of {
+            mark_place_sym(ctx, left)
+            mark_addressed(ctx, left)
+        }
+        binary_assign, binary_assign_add, binary_assign_sub, binary_assign_mul, binary_assign_div, binary_assign_mod, binary_assign_bit_and, binary_assign_bit_or, binary_assign_bit_xor, binary_assign_shl, binary_assign_shr {
+            mark_place_sym(ctx, left)
+            mark_addressed(ctx, left)
+            mark_addressed(ctx, right)
+        }
+        call {
+            if left != none() and table.kind(left) == k.member {
+                base := table.lhs(left)
+                if base != none() and table.kind(base) == k.ident and
+                    db.module_receiver(base) == none() {
+                    bty := db.get_node_type(base)
+                    if bty != types.ty_id_type() and db.types.kind(bty) != Kind.ptr and
+                        not storage.aggregate(db, bty) {
+                        mark_ident_slot(ctx, base)
+                    }
+                }
+            }
+            mark_addressed(ctx, left)
+            for arg in items(db, right) { mark_addressed(ctx, arg) }
+        }
+        block {
+            for item in items(db, left) { mark_addressed(ctx, item) }
+        }
+        struct_init {
+            for item in items(db, right) { mark_addressed(ctx, item) }
+        }
+        array_init {
+            for item in items(db, left) { mark_addressed(ctx, item) }
+        }
+        builtin_call {
+            for item in items(db, right) { mark_addressed(ctx, item) }
+        }
+        k_if {
+            mark_addressed(ctx, left)
+            mark_addressed(ctx, right)
+            mark_addressed(ctx, extra)
+        }
+        k_while {
+            mark_addressed(ctx, left)
+            mark_addressed(ctx, right)
+        }
+        k_for {
+            for iter in items(db, right) {
+                if table.kind(iter) == k.for_iter {
+                    mark_addressed(ctx, table.lhs(iter))
+                    mark_addressed(ctx, table.rhs(iter))
+                } else {
+                    mark_addressed(ctx, iter)
+                }
+            }
+            mark_addressed(ctx, extra)
+        }
+        k_match {
+            mark_addressed(ctx, left)
+            for arm in items(db, right) { mark_addressed(ctx, table.rhs(arm)) }
+        }
+        var, destructure, splice {
+            mark_addressed(ctx, extra)
+        }
+        binary_add, binary_sub, binary_mul, binary_div, binary_mod, binary_eq_eq, binary_neq, binary_lt, binary_lt_eq, binary_gt, binary_gt_eq, binary_and, binary_or, binary_bit_and, binary_bit_or, binary_bit_xor, binary_shl, binary_shr, index {
+            mark_addressed(ctx, left)
+            mark_addressed(ctx, right)
+        }
+        member, unary_neg, unary_not, unary_bit_not, unary_deref, cast, k_ret {
+            mark_addressed(ctx, left)
+        }
+        else {}
+    }
+}
+
 lower_body_impl :: fn(module &Module, pending Pending) {
     db := module.db
     sym := pending.source
     node := db.get_fn_node(sym)
     if db.is_mono_sym(sym) { db.restore_mono_func(sym) }
     sig := func_type(db, sym, node)
-    ctx := Context.new(module, db.types.func_return(sig), &module.locals)
+    ctx := Context.new(
+        module
+        db.types.func_return(sig)
+        &module.locals
+        &module.local_kinds
+        &module.local_dirty
+    )
     decl := module.air.get(pending.target)
     signature := if decl.count == 0 { Slice(Ty).empty() } else {
         Slice(Ty).new(module.air.types.ptr_at(decl.params as u64), decl.count as u64)
@@ -1143,6 +1750,8 @@ lower_body_impl :: fn(module &Module, pending Pending) {
         ctx.return_slot = ctx.out.parameter(entry, 0)
         index = 1
     }
+    body := db.hir.extra(node)
+    mark_addressed(&ctx, body)
     args := items(db, db.hir.lhs(node))
     params := db.types.func_params(sig)
     pos: u64 = 0
@@ -1156,8 +1765,7 @@ lower_body_impl :: fn(module &Module, pending Pending) {
         }
         pos = pos + 1
     }
-    body := db.hir.extra(node)
-    ctx.finish(expr(&ctx, body), body)
+    returning(&ctx, body)
     module.air.define(pending.target, ctx.out)
 }
 
@@ -1170,8 +1778,20 @@ lower_globals :: fn(module &Module, lowered &u64) {
 lower_globals_impl :: fn(module &Module, lowered &u64) {
     if module.globals.len == 0 and module.metadata.len == 0 { ret }
     module.air.initializer = module.air.declare("$init", Slice(Ty).empty(), Ty.void_, false)
-    globals_locals := HashMap(u32, Val).new()
-    ctx := Context.new(module, types.ty_id_unit(), &globals_locals)
+    sym_cap := module.db.sym_count() as u64 + 16
+    module.init_locals.reserve(sym_cap)
+    module.init_locals.len = sym_cap
+    mem.mem_set(module.init_locals.ptr as &u8, 0, sym_cap * @sizeof(Val))
+    module.init_kinds.reserve(sym_cap)
+    module.init_kinds.len = sym_cap
+    mem.mem_set(module.init_kinds.ptr as &u8, 0, sym_cap)
+    ctx := Context.new(
+        module
+        types.ty_id_unit()
+        &module.init_locals
+        &module.init_kinds
+        &module.init_dirty
+    )
     ctx.out.begin(ctx.out.block())
     index: u64 = 0
     prepared: u64 = 0
@@ -1190,6 +1810,7 @@ lower_globals_impl :: fn(module &Module, lowered &u64) {
         init := module.globals.get(index)
         name := module.db.hir.lhs(init.source)
         node := module.db.hir.extra(init.source)
+        mark_addressed(&ctx, node)
         address := ctx.out.address(init.target)
         value := expr(&ctx, node)
         if not ctx.open() { storage.error(module.db, node, "global initializer cannot terminate") }
@@ -1197,7 +1818,6 @@ lower_globals_impl :: fn(module &Module, lowered &u64) {
         index = index + 1
     }
     ctx.out.ret_void()
-    globals_locals.destroy()
     module.air.define(module.air.initializer, ctx.out)
 }
 
@@ -1241,15 +1861,7 @@ lower_impl :: fn(db &Nexus, arena &Arena, file, entry, selected u32) Program {
         index = index + 1
     }
     lower_globals(&module, &index)
-    module.symbols.destroy()
-    module.strings.destroy()
-    module.pending.destroy()
-    module.globals.destroy()
-    module.reflected.destroy()
-    module.abi_types.destroy()
-    module.abi_layouts.destroy()
-    module.locals.destroy()
-    module.metadata.destroy()
+    module.destroy_scratch()
     opt.run(&module.air, if db.target_arch == Arch.wasm32 { 4 } else { 8 })
     module.air
 }
@@ -1259,41 +1871,128 @@ for_loop :: fn(ctx &Context, node u32) {
     table := &db.hir
     iterators := items(db, table.rhs(node))
     variables := items(db, table.lhs(node))
-    states := Vec(Val).with_cap(iterators.len)
-    addresses := Vec(Val).with_cap(variables.len)
+    if iterators.len > 4 or variables.len > 4 {
+        for_loop_heap(ctx, node, iterators, variables)
+        ret
+    }
+    s_states: [4]Val
+    s_addrs: [4]Val
+    s_vals: [4]Val
+    state_count: u64 = 0
     for iter in iterators {
         source := if table.kind(iter) == k.for_iter { table.lhs(iter) } else { iter }
-        states.push(expr(ctx, source))
+        s_states[state_count] = expr(ctx, source)
+        state_count = state_count + 1
     }
+    addr_count: u64 = 0
     for name in variables {
         address := ctx.slot(db.get_node_type(name), name)
-        ctx.locals.insert(db.get_hir_symbol(name), address)
-        addresses.push(address)
+        ctx.bind_local(db.get_hir_symbol(name), address)
+        s_addrs[addr_count] = address
+        addr_count = addr_count + 1
     }
     head := ctx.out.block()
     end := ctx.out.block()
     ctx.out.jump(head)
     ctx.out.begin(head)
-    present := db.interner.intern("present")
-    value_name := db.interner.intern("value")
-    ptr_name := db.interner.intern("ptr")
-    index_name := db.interner.intern("index")
-    len_name := db.interner.intern("len")
-    values := Vec(Val).with_cap(iterators.len)
+    present := ctx.module.sym_present_name
+    value_name := ctx.module.sym_value_name
+    ptr_name := ctx.module.sym_ptr_name
+    index_name := ctx.module.sym_index_name
+    len_name := ctx.module.sym_len_name
+    val_count: u64 = 0
     position: u64 = 0
     for iter in iterators {
-        state := states.get(position)
+        state := s_states[position]
         ty := db.get_node_type(iter)
         run := ctx.out.block()
         if table.kind(iter) == k.for_iter {
             next := table.rhs(iter)
-            result := call(ctx, next, table.lhs(next), state)
+            result := call(ctx, next, table.lhs(next), state, Val.none)
             ty = db.get_node_type(next)
             condition := ctx.out.load(Ty.i1, record_field(ctx, result, ty, present, next))
             ctx.out.branch(condition, run, end)
             ctx.out.begin(run)
             item := ctx.field(ty, value_name, next)
-            values.push(ctx.read(item.ty, next, ctx.offset(result, item.offset)))
+            s_vals[val_count] = ctx.read(item.ty, next, ctx.offset(result, item.offset), Val.none)
+            val_count = val_count + 1
+        } else {
+            index := ctx.field(ty, index_name, iter)
+            index_ty := storage.scalar(db, index.ty, iter)
+            index_slot := ctx.offset(state, index.offset)
+            offset := ctx.out.load(index_ty, index_slot)
+            length := ctx.out.load(index_ty, record_field(ctx, state, ty, len_name, iter))
+            ctx.out.branch(ctx.out.binary(Op.lt, offset, length), run, end)
+            ctx.out.begin(run)
+            ptr_type := ctx.field(ty, ptr_name, iter).ty
+            pointer := ctx.out.load(Ty.ptr, record_field(ctx, state, ty, ptr_name, iter))
+            element := db.types.payload(ptr_type)
+            address := ctx.element(pointer, offset, element, iter)
+            item_ty := db.get_node_type(variables.get(position))
+            s_vals[val_count] = if legacy.iterator_is_ref(db, ty) { address } else {
+                ctx.read(item_ty, iter, address, Val.none)
+            }
+            val_count = val_count + 1
+            ctx.out.store(
+                index_slot
+                ctx.out.binary(Op.iadd, offset, ctx.out.constant(index_ty, 1))
+            )
+        }
+        position = position + 1
+    }
+    position = 0
+    for name in variables {
+        ctx.write(db.get_node_type(name), name, s_addrs[position], s_vals[position])
+        position = position + 1
+    }
+    saved := .(ctx.break_to, ctx.continue_to)
+    ctx.break_to = end
+    ctx.continue_to = head
+    expr(ctx, table.extra(node))
+    jump_to(ctx, head, Ty.void_, Val.none)
+    ctx.break_to = saved.0
+    ctx.continue_to = saved.1
+    ctx.out.begin(end)
+}
+
+for_loop_heap :: fn(ctx &Context, node u32, iterators, variables Slice(u32)) {
+    db := ctx.db
+    table := &db.hir
+    h_states := Vec(Val).with_cap(iterators.len)
+    h_addrs := Vec(Val).with_cap(variables.len)
+    h_vals := Vec(Val).with_cap(iterators.len)
+    for iter in iterators {
+        source := if table.kind(iter) == k.for_iter { table.lhs(iter) } else { iter }
+        h_states.push(expr(ctx, source))
+    }
+    for name in variables {
+        address := ctx.slot(db.get_node_type(name), name)
+        ctx.bind_local(db.get_hir_symbol(name), address)
+        h_addrs.push(address)
+    }
+    head := ctx.out.block()
+    end := ctx.out.block()
+    ctx.out.jump(head)
+    ctx.out.begin(head)
+    present := ctx.module.sym_present_name
+    value_name := ctx.module.sym_value_name
+    ptr_name := ctx.module.sym_ptr_name
+    index_name := ctx.module.sym_index_name
+    len_name := ctx.module.sym_len_name
+    position: u64 = 0
+    for iter in iterators {
+        state := h_states.get(position)
+        ty := db.get_node_type(iter)
+        run := ctx.out.block()
+        if table.kind(iter) == k.for_iter {
+            next := table.rhs(iter)
+            result := call(ctx, next, table.lhs(next), state, Val.none)
+            ty = db.get_node_type(next)
+            condition := ctx.out.load(Ty.i1, record_field(ctx, result, ty, present, next))
+            ctx.out.branch(condition, run, end)
+            ctx.out.begin(run)
+            item := ctx.field(ty, value_name, next)
+            h_vals.push(ctx.read(item.ty, next, ctx.offset(result, item.offset), Val.none))
         } else {
             index := ctx.field(ty, index_name, iter)
             index_ty := storage.scalar(db, index.ty, iter)
@@ -1308,9 +2007,9 @@ for_loop :: fn(ctx &Context, node u32) {
             address := ctx.element(pointer, offset, element, iter)
             item_ty := db.get_node_type(variables.get(position))
             value := if legacy.iterator_is_ref(db, ty) { address } else {
-                ctx.read(item_ty, iter, address)
+                ctx.read(item_ty, iter, address, Val.none)
             }
-            values.push(value)
+            h_vals.push(value)
             ctx.out.store(
                 index_slot
                 ctx.out.binary(Op.iadd, offset, ctx.out.constant(index_ty, 1))
@@ -1320,12 +2019,12 @@ for_loop :: fn(ctx &Context, node u32) {
     }
     position = 0
     for name in variables {
-        ctx.write(db.get_node_type(name), name, addresses.get(position), values.get(position))
+        ctx.write(db.get_node_type(name), name, h_addrs.get(position), h_vals.get(position))
         position = position + 1
     }
-    states.destroy()
-    addresses.destroy()
-    values.destroy()
+    h_states.destroy()
+    h_addrs.destroy()
+    h_vals.destroy()
     saved := .(ctx.break_to, ctx.continue_to)
     ctx.break_to = end
     ctx.continue_to = head
@@ -1336,7 +2035,7 @@ for_loop :: fn(ctx &Context, node u32) {
     ctx.out.begin(end)
 }
 
-match_expr :: fn(ctx &Context, node, result_ty u32) Val {
+match_expr :: fn(ctx &Context, node, result_ty u32, dest Val) Val {
     db := ctx.db
     table := &db.hir
     source := table.lhs(node)
@@ -1346,7 +2045,13 @@ match_expr :: fn(ctx &Context, node, result_ty u32) Val {
     union := db.types.kind(ty) == Kind.union_
     tag := if union { ctx.out.load(Ty.u32_, value) } else { value }
     tag_ty := ctx.out.value_type(tag)
-    result := storage.scalar(db, result_ty, node)
+    is_agg := result_ty != types.ty_id_none() and storage.aggregate(db, result_ty)
+    agg_dest := if is_agg {
+        if dest != Val.none { dest } else { ctx.slot(result_ty, node) }
+    } else {
+        Val.none
+    }
+    result := if is_agg { Ty.void_ } else { storage.scalar(db, result_ty, node) }
     end := join(ctx, result)
     incoming := false
     for arm in items(db, table.rhs(node)) {
@@ -1374,37 +2079,57 @@ match_expr :: fn(ctx &Context, node, result_ty u32) Val {
             if binder != none() and table.extra(node) != none() and
                 table.kind(table.extra(node)) == k.match_binding {
                 item_ty := db.get_node_type(binder)
-                item := if union {
-                    ctx.read(item_ty, binder, ctx.union_payload(value, ty, node))
+                if union and storage.aggregate(db, item_ty) {
+                    slot := ctx.slot(item_ty, binder)
+                    ctx.copy(item_ty, binder, slot, ctx.union_payload(value, ty, node))
+                    ctx.bind_local(db.get_hir_symbol(binder), slot)
                 } else {
-                    value
+                    item := if union {
+                        ctx.read(item_ty, binder, ctx.union_payload(value, ty, node), Val.none)
+                    } else {
+                        value
+                    }
+                    ctx.local(binder, item_ty, item)
                 }
-                ctx.local(binder, item_ty, item)
             }
-            item := expr(ctx, table.rhs(arm))
-            if ctx.open() { incoming = true }
+            item := expr_into(ctx, table.rhs(arm), agg_dest)
+            if ctx.open() {
+                incoming = true
+                if is_agg and item != agg_dest and item != Val.none {
+                    ctx.copy(result_ty, node, agg_dest, item)
+                }
+            }
             jump_to(ctx, end, result, item)
             ctx.out.begin(resume)
         } else {
-            item := expr(ctx, table.rhs(arm))
-            if ctx.open() { incoming = true }
+            item := expr_into(ctx, table.rhs(arm), agg_dest)
+            if ctx.open() {
+                incoming = true
+                if is_agg and item != agg_dest and item != Val.none {
+                    ctx.copy(result_ty, node, agg_dest, item)
+                }
+            }
             jump_to(ctx, end, result, item)
             break
         }
     }
     if ctx.open() { ctx.out.trap() }
     output := open_join(ctx, end, result)
-    if not incoming { ctx.out.trap() }
+    if not incoming {
+        ctx.out.trap()
+        ret Val.none
+    }
+    if is_agg { ret agg_dest }
     output
 }
 
-call :: fn(ctx &Context, node, callee u32, supplied Val) Val {
+call :: fn(ctx &Context, node, callee u32, supplied, dest Val) Val {
     db := ctx.db
     if db.hir.kind(callee) == k.member {
         base := db.hir.lhs(callee)
         array := db.types.unwrap_ptr(db.get_node_type(base))
         if db.types.kind(array) == Kind.array {
-            ret array_iterator(ctx, node, callee, base, array)
+            ret array_iterator(ctx, node, callee, base, array, dest)
         }
     }
     sym := resolve_call(db, node, callee)
@@ -1413,19 +2138,37 @@ call :: fn(ctx &Context, node, callee u32, supplied Val) Val {
     if db.types.kind(sig) != Kind.func { storage.error(db, node, "unresolved call signature") }
     target := if sym == none() { Symbol.none } else { ctx.module.register(sym, node) }
     address := if target == Symbol.none { expr(ctx, callee) } else { Val.none }
+    if target == Symbol.none and not ctx.open() { ret Val.none }
     result := db.types.func_return(sig)
     params := db.types.func_params(sig)
     raw_args := items(db, db.hir.rhs(node))
-    use_heap := raw_args.len > 14
+    if raw_args.len > 14 {
+        ret call_heap(
+            ctx
+            node
+            callee
+            supplied
+            dest
+            sym
+            func
+            sig
+            target
+            address
+            result
+            params
+            raw_args
+        )
+    }
     stack_args: [16]Val
-    heap_args := if use_heap { Vec(Val).with_cap(raw_args.len + 2) } else { Vec(Val).new() }
     arg_count: u64 = 0
-    result_slot := if storage.aggregate(db, result) { ctx.slot(result, node) } else { Val.none }
+    result_slot := if storage.aggregate(db, result) {
+        if dest != Val.none { dest } else { ctx.slot(result, node) }
+    } else {
+        Val.none
+    }
     if result_slot != Val.none {
-        if use_heap { heap_args.push(result_slot) } else {
-            stack_args[arg_count] = result_slot
-            arg_count = arg_count + 1
-        }
+        stack_args[0] = result_slot
+        arg_count = 1
     }
     if target != Symbol.none and db.hir.kind(callee) == k.member {
         base := db.hir.lhs(callee)
@@ -1433,43 +2176,30 @@ call :: fn(ctx &Context, node, callee u32, supplied Val) Val {
             module_effect(ctx, base)
         } else if func_has_self(db, func) {
             arg := if supplied != Val.none { supplied } else { receiver(ctx, base, params.get(0)) }
-            if use_heap { heap_args.push(arg) } else {
-                stack_args[arg_count] = arg
-                arg_count = arg_count + 1
-            }
+            stack_args[arg_count] = arg
+            arg_count = arg_count + 1
         }
-        if not ctx.open() {
-            if use_heap { heap_args.destroy() }
-            ret Val.none
-        }
+        if not ctx.open() { ret Val.none }
     }
     index: u32 = 0
     for arg in raw_args {
         ty := db.get_node_type(arg)
         if not db.is_const_call_arg(node, index) and ty != types.ty_id_type() {
             value := expr(ctx, arg)
-            if not ctx.open() {
-                if use_heap { heap_args.destroy() }
-                ret Val.none
-            }
+            if not ctx.open() { ret Val.none }
             if target != Symbol.none {
                 decl := ctx.module.air.get(target)
-                cur_len := if use_heap { heap_args.len } else { arg_count }
-                if cur_len < decl.count as u64 {
-                    want := ctx.module.air.types.get(decl.params as u64 + cur_len)
+                if arg_count < decl.count as u64 {
+                    want := ctx.module.air.types.get(decl.params as u64 + arg_count)
                     value = ctx.out.cast(want, value)
                 }
             }
-            if use_heap { heap_args.push(value) } else {
-                stack_args[arg_count] = value
-                arg_count = arg_count + 1
-            }
+            stack_args[arg_count] = value
+            arg_count = arg_count + 1
         }
         index = index + 1
     }
-    args_slice := if use_heap {
-        heap_args.as_slice()
-    } else if arg_count == 0 {
+    args_slice := if arg_count == 0 {
         Slice(Val).empty()
     } else {
         Slice(Val).new(&stack_args[0], arg_count)
@@ -1480,8 +2210,77 @@ call :: fn(ctx &Context, node, callee u32, supplied Val) Val {
     } else {
         ctx.out.call(target, ty, args_slice)
     }
-    if use_heap { heap_args.destroy() }
-    if result == types.ty_id_never() { ctx.out.trap() }
+    if result == types.ty_id_never() {
+        ctx.out.trap()
+        ret Val.none
+    }
+    if result_slot != Val.none { ret result_slot }
+    value
+}
+
+call_heap :: fn(
+    ctx &Context
+    node, callee u32
+    supplied, dest Val
+    sym, func, sig u32
+    target Symbol
+    address Val
+    result u32
+    params Slice(u32)
+    raw_args Slice(u32)
+) Val {
+    db := ctx.db
+    heap_args := Vec(Val).with_cap(raw_args.len + 2)
+    result_slot := if storage.aggregate(db, result) {
+        if dest != Val.none { dest } else { ctx.slot(result, node) }
+    } else {
+        Val.none
+    }
+    if result_slot != Val.none { heap_args.push(result_slot) }
+    if target != Symbol.none and db.hir.kind(callee) == k.member {
+        base := db.hir.lhs(callee)
+        if db.module_receiver(base) != none() {
+            module_effect(ctx, base)
+        } else if func_has_self(db, func) {
+            arg := if supplied != Val.none { supplied } else { receiver(ctx, base, params.get(0)) }
+            heap_args.push(arg)
+        }
+        if not ctx.open() {
+            heap_args.destroy()
+            ret Val.none
+        }
+    }
+    index: u32 = 0
+    for arg in raw_args {
+        ty := db.get_node_type(arg)
+        if not db.is_const_call_arg(node, index) and ty != types.ty_id_type() {
+            value := expr(ctx, arg)
+            if not ctx.open() {
+                heap_args.destroy()
+                ret Val.none
+            }
+            if target != Symbol.none {
+                decl := ctx.module.air.get(target)
+                if heap_args.len < decl.count as u64 {
+                    want := ctx.module.air.types.get(decl.params as u64 + heap_args.len)
+                    value = ctx.out.cast(want, value)
+                }
+            }
+            heap_args.push(value)
+        }
+        index = index + 1
+    }
+    ty := if result_slot != Val.none { Ty.void_ } else { storage.scalar(db, result, node) }
+    value := if target == Symbol.none {
+        ctx.out.call_abi(address, ty, heap_args.as_slice(), ctx.module.abi_type(sig, node))
+    } else {
+        ctx.out.call(target, ty, heap_args.as_slice())
+    }
+    heap_args.destroy()
+    if result == types.ty_id_never() {
+        ctx.out.trap()
+        ret Val.none
+    }
     if result_slot != Val.none { ret result_slot }
     value
 }
@@ -1492,9 +2291,10 @@ module_effect :: fn(ctx &Context, node u32) {
     }
 }
 
-array_iterator :: fn(ctx &Context, node, callee, base, array u32) Val {
+array_iterator :: fn(ctx &Context, node, callee, base, array u32, dest Val) Val {
     db := ctx.db
     pointer := record_base(ctx, base)
+    if not ctx.open() { ret Val.none }
     actual := db.get_node_type(base)
     while db.types.kind(actual) == Kind.ptr {
         actual = db.types.payload(actual)
@@ -1502,14 +2302,11 @@ array_iterator :: fn(ctx &Context, node, callee, base, array u32) Val {
     }
     signature := db.get_node_type(callee)
     ty := db.types.func_return(signature)
-    iter := ctx.slot(ty, node)
-    ptr := db.interner.intern("ptr")
-    len := db.interner.intern("len")
-    index := db.interner.intern("index")
-    ctx.out.store(record_field(ctx, iter, ty, ptr, node), pointer)
+    iter := if dest != Val.none { dest } else { ctx.slot(ty, node) }
+    ctx.out.store(record_field(ctx, iter, ty, ctx.module.sym_ptr_name, node), pointer)
     length := ctx.out.constant(Ty.u64_, db.types.get_array_len(array) as u64)
-    ctx.out.store(record_field(ctx, iter, ty, len, node), length)
+    ctx.out.store(record_field(ctx, iter, ty, ctx.module.sym_len_name, node), length)
     zero := ctx.out.constant(Ty.u64_, 0)
-    ctx.out.store(record_field(ctx, iter, ty, index, node), zero)
+    ctx.out.store(record_field(ctx, iter, ty, ctx.module.sym_index_name, node), zero)
     iter
 }

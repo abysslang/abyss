@@ -11,11 +11,38 @@ require_headers :: fn(db &Nexus, node u32) {
     }
 }
 
-dependent :: fn(db &Nexus, cache &HashMap(u32, bool), ty u32) bool {
+ensure_u8 :: fn(vec &Vec(u8), idx u64) {
+    if idx < vec.len { ret }
+    old := vec.len
+    new_len := idx + 16
+    vec.reserve(new_len)
+    vec.len = new_len
+    i := old
+    while i < new_len {
+        vec.set(i, 0)
+        i = i + 1
+    }
+}
+
+ensure_u32 :: fn(vec &Vec(u32), idx u64) {
+    if idx < vec.len { ret }
+    old := vec.len
+    new_len := idx + 16
+    vec.reserve(new_len)
+    vec.len = new_len
+    i := old
+    while i < new_len {
+        vec.set(i, 0)
+        i = i + 1
+    }
+}
+
+dependent :: fn(db &Nexus, cache &Vec(u8), ty u32) bool {
     if not storage.aggregate(db, ty) { ret false }
-    found := cache.get(ty)
-    if found != (0 as &bool) { ret *found }
-    cache.insert(ty, false)
+    ensure_u8(cache, ty as u64)
+    cached := cache.get(ty as u64)
+    if cached != 0 { ret cached == 2 }
+    cache.set(ty as u64, 1)
     table := &db.types
     result := storage.native(db, ty) != storage.hir_none()
     if not result {
@@ -33,19 +60,26 @@ dependent :: fn(db &Nexus, cache &HashMap(u32, bool), ty u32) bool {
             }
         }
     }
-    cache.insert(ty, result)
+    cache.set(ty as u64, if result { 2 as u8 } else { 1 as u8 })
     result
 }
 
-lower :: fn(db &Nexus, air &keel.Program, cache &HashMap(u32, u32), ty, node u32) u32 {
-    found := cache.get(ty)
-    if found != (0 as &u32) { ret *found }
+lower :: fn(
+    db &Nexus
+    air &keel.Program
+    cache &Vec(u32)
+    scratch &Vec(abi.Field)
+    ty, node u32
+) u32 {
+    ensure_u32(cache, ty as u64)
+    found := cache.get(ty as u64)
+    if found != 0 { ret found }
     key := (air.abi_types.len + 1) as u32
-    cache.insert(ty, key)
+    cache.set(ty as u64, key)
     value := abi.Type.new(abi.Kind.scalar)
     air.abi_types.push(value)
     table := &db.types
-    fields := Vec(abi.Field).new()
+    start_mark := scratch.len
     native := storage.native(db, ty)
     if native != storage.hir_none() {
         require_headers(db, node)
@@ -56,45 +90,50 @@ lower :: fn(db &Nexus, air &keel.Program, cache &HashMap(u32, u32), ty, node u32
         match table.kind(ty) {
             ptr {
                 value.kind = abi.Kind.pointer
-                value.inner = lower(db, air, cache, table.payload(ty), node)
+                value.inner = lower(db, air, cache, scratch, table.payload(ty), node)
                 {}
             }
             struct_, nominal {
                 value.kind = abi.Kind.record
                 for pair in table.get_struct_fields(ty).chunks(2) {
-                    child := lower(db, air, cache, pair.get(1), node)
-                    fields.push(.{ ty: child, name: Str.empty() })
+                    child := lower(db, air, cache, scratch, pair.get(1), node)
+                    scratch.push(.{ ty: child, name: Str.empty() })
                 }
             }
             union_ {
                 value.kind = abi.Kind.union_
                 for item in table.union_members(ty) {
-                    fields.push(.{ ty: lower(db, air, cache, item, node), name: Str.empty() })
+                    scratch.push(
+                        .{ ty: lower(db, air, cache, scratch, item, node), name: Str.empty() }
+                    )
                 }
             }
             array {
                 value.kind = abi.Kind.array
-                value.inner = lower(db, air, cache, table.get_array_type(ty), node)
+                value.inner = lower(db, air, cache, scratch, table.get_array_type(ty), node)
                 value.count = table.get_array_len(ty)
                 {}
             }
             func {
                 value.kind = abi.Kind.function
-                value.inner = lower(db, air, cache, table.func_return(ty), node)
+                value.inner = lower(db, air, cache, scratch, table.func_return(ty), node)
                 for param in table.func_params(ty) {
                     if param == types.ty_id_type() { cont }
-                    child := lower(db, air, cache, param, node)
+                    child := lower(db, air, cache, scratch, param, node)
                     if child == 0 { cont }
-                    fields.push(.{ ty: child, name: Str.empty() })
+                    scratch.push(.{ ty: child, name: Str.empty() })
                 }
             }
             else { value.scalar = storage.scalar(db, ty, node), {} }
         }
     }
+    count := scratch.len - start_mark
     value.start = air.abi_fields.len as u32
-    if value.kind != abi.Kind.array { value.count = fields.len as u32 }
-    air.abi_fields.extend(fields.ptr, fields.len)
-    fields.destroy()
+    if value.kind != abi.Kind.array { value.count = count as u32 }
+    if count != 0 {
+        air.abi_fields.extend(scratch.ptr_at(start_mark), count)
+        scratch.len = start_mark
+    }
     air.abi_types.set(key as u64 - 1, value)
     air.abi_order.push(key)
     key
