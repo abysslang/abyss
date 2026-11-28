@@ -64,12 +64,11 @@ Use the sizes of the published assets and report only verification that ran. To 
 - **English Only**: International, objective, technical prose.
 - **Zero Fluff**: No hyperbolic marketing language ("revolutionary", "game-changing"). Let the technical merits and benchmarks speak.
 - **Precise**: Reference concrete components (`compiler/vm/host.a`, `abyssc.wasm`, fixed-point hashes, test counts).
+- **No Duplicate Title Heading**: The GitHub release title already sets `Abyss <VERSION>` (via the release workflow), so begin the release notes directly with the executive summary without repeating `# Abyss <VERSION>`.
 
 ### Standard Release Note Template
 
 ```markdown
-# Abyss <VERSION>
-
 <One to two sentence executive summary stating the primary milestone or theme of the release.>
 
 ## Highlights
