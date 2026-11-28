@@ -2,6 +2,7 @@ profile :: @import("pods/keel/profile")
 Phase :: profile.Phase
 Arena :: @import("std/allocator").Arena
 String :: @import("std/string").String
+mem :: @import("std/mem")
 Os :: @import("core/target").Os
 id :: @import("pods/keel/id")
 ir :: @import("pods/keel/ir")
@@ -75,13 +76,60 @@ operator :: fn(op Op) Str {
     symbols[op as u64]
 }
 
+write_u32_fast :: fn(dst &u8, n u32) u64 {
+    if n < 10 {
+        *dst = ('0' as u32 + n) as u8
+        ret 1
+    }
+    if n < 100 {
+        q := n / 10
+        *dst = ('0' as u32 + q) as u8
+        *(dst + 1) = ('0' as u32 + (n - q * 10)) as u8
+        ret 2
+    }
+    buf: [10]u8
+    i: u64 = 10
+    v := n
+    while v > 0 {
+        i = i - 1
+        q := v / 10
+        buf[i] = ('0' as u32 + (v - q * 10)) as u8
+        v = q
+    }
+    count := 10 - i
+    mem.mem_copy(dst, &buf[0] + i, count)
+    count
+}
+
+put_u32 :: fn(out &String, n u32) &String {
+    out.reserve(out.len + 10)
+    out.len = out.len + write_u32_fast(out.ptr + out.len, n)
+    out
+}
+
+put_str_u32 :: fn(out &String, prefix Str, n u32) &String {
+    out.reserve(out.len + prefix.len + 10)
+    if prefix.len != 0 {
+        mem.mem_copy(out.ptr + out.len, prefix.ptr, prefix.len)
+        out.len = out.len + prefix.len
+    }
+    out.len = out.len + write_u32_fast(out.ptr + out.len, n)
+    out
+}
+
+put_v :: fn(out &String, val u32) &String {
+    out.reserve(out.len + 11)
+    *(out.ptr + out.len) = 'v'
+    out.len = out.len + 1 + write_u32_fast(out.ptr + out.len + 1, val)
+    out
+}
+
 number :: fn(out &String, value id.Val) {
-    out.push_char('v')
-    out.push_u32(value as u32)
+    put_v(out, value as u32)
 }
 
 internal_name :: fn(out &String, symbol Symbol) {
-    out.append("k_").push_u32(symbol as u32)
+    put_str_u32(out, "k_", symbol as u32)
 }
 
 foreign_name :: fn(out &String, air &program.Program, symbol Symbol) {
@@ -89,7 +137,8 @@ foreign_name :: fn(out &String, air &program.Program, symbol Symbol) {
     if decl.exported or (decl.kind == program.Kind.external and decl.foreign_module.len == 0) {
         out.push_str(decl.name)
     } else {
-        out.append("ka_").push_u32(symbol as u32)
+        put_str_u32(out, "ka_", symbol as u32)
+        ret
     }
 }
 
@@ -99,7 +148,10 @@ abi_name :: fn(out &String, air &program.Program, key u32) {
         scalar { out.push_str(type_name(ty.scalar)) }
         pointer { abi_name(out, air, ty.inner), out.push_char('*') }
         header { out.push_str(ty.name) }
-        else { out.append("kt_").push_u32(key) }
+        else {
+            put_str_u32(out, "kt_", key)
+            ret
+        }
     }
 }
 
@@ -108,7 +160,7 @@ abi_params :: fn(out &String, air &program.Program, signature AbiType, named boo
     for index in Range.new(0, signature.count as i32) {
         if index > 0 { out.push_str(", ") }
         abi_name(out, air, air.abi_field(signature, index as u32).ty)
-        if named { out.append(" p").push_u32(index as u32) }
+        if named { put_str_u32(out, " p", index as u32) }
     }
 }
 
@@ -318,7 +370,7 @@ locals :: fn(out &String, body &ir.Function) {
         ty := body.value_type(value)
         if ty == Ty.void_ { cont }
         if value as u32 <= body.parameter_count(id.Block.entry) { cont }
-        out.append(type_name(ty)).append(" v").append_u32((value as u32) as u32).push_str(";\n")
+        put_str_u32(out.append(type_name(ty)), " v", value as u32).push_str(";\n")
     }
 }
 
@@ -328,22 +380,19 @@ edge :: fn(out &String, body &ir.Function, target id.Edge) {
     for index in Range.new(0, count) {
         pos := index as u32
         arg := body.argument(target, pos)
-        out.append(type_name(body.value_type(arg))).append(" edge_").append_u32(
-            (pos) as u32
-        ).append(" = v").append_u32((arg as u32) as u32).push_str(";\n")
+        put_str_u32(out.append(type_name(body.value_type(arg))), " edge_", pos)
+        put_str_u32(out, " = v", arg as u32).push_str(";\n")
     }
     for index in Range.new(0, count) {
         pos := index as u32
-        out.append("v").append_u32((body.parameter(block, pos) as u32) as u32).append(
-            " = edge_"
-        ).append_u32((pos) as u32).push_str(";\n")
+        put_str_u32(put_v(out, body.parameter(block, pos) as u32), " = edge_", pos).push_str(";\n")
     }
-    out.append("goto b").append_u32((block as u32) as u32).push_str(";\n")
+    put_str_u32(out, "goto b", block as u32).push_str(";\n")
 }
 
 assignment :: fn(out &String, value id.Val) {
     if value == id.Val.none { ret }
-    number(out, value)
+    put_v(out, value as u32)
     out.push_str(" = ")
 }
 
@@ -365,24 +414,34 @@ instruction :: fn(out &String, air &program.Program, body &ir.Function, inst id.
         assignment(out, result)
         if integer(ty) and (op as u8 <= Op.mul as u8 or op == Op.shl) {
             unsigned := unsigned_word(ty)
-            out.append("(").append(type_name(ty)).append(")((").append(unsigned).append(
-                ")v"
-            ).append_u32((lhs) as u32).append(" ").append(operator(op)).push_str(" (")
+            out.push_char('(')
+            out.push_str(type_name(ty))
+            out.push_str(")((")
+            out.push_str(unsigned)
+            put_str_u32(out, ")v", lhs)
+            out.push_char(' ')
+            out.push_str(operator(op))
+            out.push_str(" (")
             if op == Op.shl {
-                out.append("(uint32_t)v").append_u32((rhs) as u32).append(" & ").append_u32(
-                    (width(ty) - 1) as u32
-                ).push_str("));\n")
+                put_str_u32(out, "(uint32_t)v", rhs)
+                put_str_u32(out, " & ", (width(ty) - 1) as u32)
+                out.push_str("));\n")
             } else {
-                out.append(unsigned).append(")v").append_u32((rhs) as u32).push_str(");\n")
+                out.push_str(unsigned)
+                put_str_u32(out, ")v", rhs)
+                out.push_str(");\n")
             }
         } else if op == Op.shr {
-            out.append("v").append_u32((lhs) as u32).append(" >> ((uint32_t)v").append_u32(
-                (rhs) as u32
-            ).append(" & ").append_u32((width(ty) - 1) as u32).push_str(");\n")
+            put_v(out, lhs)
+            put_str_u32(out, " >> ((uint32_t)v", rhs)
+            put_str_u32(out, " & ", (width(ty) - 1) as u32)
+            out.push_str(");\n")
         } else {
-            out.append("v").append_u32((lhs) as u32).append(" ").append(operator(op)).append(
-                " v"
-            ).append_u32((rhs) as u32).push_str(";\n")
+            put_v(out, lhs)
+            out.push_char(' ')
+            out.push_str(operator(op))
+            put_str_u32(out, " v", rhs)
+            out.push_str(";\n")
         }
         ret
     }
@@ -390,70 +449,87 @@ instruction :: fn(out &String, air &program.Program, body &ir.Function, inst id.
     match op {
         neg {
             if integer(ty) {
-                out.append("v").append_u32(value).append(" = (").append(type_name(ty)).append(
-                    ")(-("
-                ).append(unsigned_word(ty)).append(")v").append_u32(lhs).push_str(");\n")
+                put_v(out, value)
+                out.push_str(" = (")
+                out.push_str(type_name(ty))
+                out.push_str(")(-(")
+                out.push_str(unsigned_word(ty))
+                put_str_u32(out, ")v", lhs)
+                out.push_str(");\n")
             } else {
-                out.append("v").append_u32((value) as u32).append(" = -v").append_u32(
-                    (lhs) as u32
-                ).push_str(";\n")
+                put_v(out, value)
+                put_str_u32(out, " = -v", lhs)
+                out.push_str(";\n")
             }
         }
         invert {
             sign := if ty == Ty.i1 { "!" } else { "~" }
-            out.append("v").append_u32((value) as u32).append(" = ").append(sign).append(
-                "v"
-            ).append_u32((lhs) as u32).push_str(";\n")
+            put_v(out, value)
+            out.push_str(" = ")
+            out.push_str(sign)
+            put_v(out, lhs)
+            out.push_str(";\n")
         }
         cast {
             if ty == Ty.ptr {
-                out.append("v").append_u32((value) as u32).append(
-                    " = (void *)(uintptr_t)v"
-                ).append_u32((lhs) as u32).push_str(";\n")
+                put_v(out, value)
+                put_str_u32(out, " = (void *)(uintptr_t)v", lhs)
+                out.push_str(";\n")
             } else if arg_ty == Ty.ptr and ty != Ty.i1 {
-                out.append("v").append_u32((value) as u32).append(" = (").append(
-                    type_name(ty)
-                ).append(")(uintptr_t)v").append_u32((lhs) as u32).push_str(";\n")
+                put_v(out, value)
+                out.push_str(" = (")
+                out.push_str(type_name(ty))
+                put_str_u32(out, ")(uintptr_t)v", lhs)
+                out.push_str(";\n")
             } else {
-                out.append("v").append_u32((value) as u32).append(" = (").append(
-                    type_name(ty)
-                ).append(")v").append_u32((lhs) as u32).push_str(";\n")
+                put_v(out, value)
+                out.push_str(" = (")
+                out.push_str(type_name(ty))
+                put_str_u32(out, ")v", lhs)
+                out.push_str(";\n")
             }
         }
         constant {
             bits := (arg1 as u64 << 32) | arg0 as u64
+            put_v(out, value)
             if ty == Ty.f32_ {
-                out.append("v").append_u32((value) as u32).append(
-                    " = ((union { uint32_t bits; float value; }){ .bits = "
-                ).append_u32((arg0) as u32).push_str("U }).value;\n")
+                put_str_u32(out, " = ((union { uint32_t bits; float value; }){ .bits = ", arg0)
+                out.push_str("U }).value;\n")
             } else if ty == Ty.f64_ {
-                out.append("v").append_u32((value) as u32).append(
-                    " = ((union { uint64_t bits; double value; }){ .bits = "
-                ).append_u64(bits).push_str("ULL }).value;\n")
+                out.push_str(" = ((union { uint64_t bits; double value; }){ .bits = ")
+                out.append_u64(bits)
+                out.push_str("ULL }).value;\n")
             } else if ty == Ty.ptr {
-                out.append("v").append_u32((value) as u32).append(
-                    " = (void *)(uintptr_t)"
-                ).append_u64(bits).push_str("ULL;\n")
+                out.push_str(" = (void *)(uintptr_t)")
+                out.append_u64(bits)
+                out.push_str("ULL;\n")
             } else {
-                out.append("v").append_u32((value) as u32).append(" = (").append(
-                    type_name(ty)
-                ).append(")").append_u64(bits).push_str("ULL;\n")
+                out.push_str(" = (")
+                out.push_str(type_name(ty))
+                out.push_char(')')
+                out.append_u64(bits)
+                out.push_str("ULL;\n")
             }
         }
         stack {
             if arg2 == 0 {
                 size := if arg0 == 0 { 1 as u32 } else { arg0 }
-                out.append("uint8_t stack_").append_u32(value).append("[").append_u32(size).append(
-                    "] __attribute__((aligned("
-                ).append_u32(arg1).push_str(")));\n")
+                put_str_u32(out, "uint8_t stack_", value)
+                put_str_u32(out, "[", size)
+                put_str_u32(out, "] __attribute__((aligned(", arg1)
+                out.push_str(")));\n")
             } else {
                 abi_name(out, air, arg0)
-                out.append(" stack_").append_u32(value).push_str(";\n")
+                put_str_u32(out, " stack_", value)
+                out.push_str(";\n")
             }
-            out.append("v").append_u32(value).append(" = &stack_").append_u32(value).push_str(";\n")
+            put_v(out, value)
+            put_str_u32(out, " = &stack_", value)
+            out.push_str(";\n")
         }
         address {
-            out.append("v").append_u32((value) as u32).push_str(" = (void *)&")
+            put_v(out, value)
+            out.push_str(" = (void *)&")
             symbol := arg0 as Symbol
             if air.get(symbol).abi_signature == 0 { internal_name(out, symbol) } else {
                 foreign_name(out, air, symbol)
@@ -461,43 +537,45 @@ instruction :: fn(out &String, air &program.Program, body &ir.Function, inst id.
             out.push_str(";\n")
         }
         offset {
-            out.append("v").append_u32(value).append(" = (void *)((uintptr_t)v").append_u32(
-                lhs
-            ).append(" + (uintptr_t)v").append_u32(rhs).append(" * ").append_u32(arg2).push_str(
-                "U);\n"
-            )
+            put_v(out, value)
+            put_str_u32(out, " = (void *)((uintptr_t)v", lhs)
+            put_str_u32(out, " + (uintptr_t)v", rhs)
+            put_str_u32(out, " * ", arg2)
+            out.push_str("U);\n")
         }
         load {
-            out.append("keel_scalar(&v").append_u32(value).append(", v").append_u32(lhs).append(
-                ", sizeof(v"
-            ).append_u32(value).push_str("));\n")
+            put_str_u32(out, "keel_scalar(&v", value)
+            put_str_u32(out, ", v", lhs)
+            put_str_u32(out, ", sizeof(v", value)
+            out.push_str("));\n")
         }
         store {
-            out.append("keel_scalar(v").append_u32(lhs).append(", &v").append_u32(rhs).append(
-                ", sizeof(v"
-            ).append_u32(rhs).push_str("));\n")
+            put_str_u32(out, "keel_scalar(v", lhs)
+            put_str_u32(out, ", &v", rhs)
+            put_str_u32(out, ", sizeof(v", rhs)
+            out.push_str("));\n")
         }
         copy {
             if arg2 != 0 {
-                out.append("keel_copy(v").append_u32((lhs) as u32).append(", v").append_u32(
-                    (rhs) as u32
-                ).append(", ").append_u32((arg2) as u32).push_str("U);\n")
+                put_str_u32(out, "keel_copy(v", lhs)
+                put_str_u32(out, ", v", rhs)
+                put_str_u32(out, ", ", arg2)
+                out.push_str("U);\n")
             }
         }
         copy_bytes {
-            out.append("keel_copy(v").append_u32((lhs) as u32).append(", v").append_u32(
-                (rhs) as u32
-            ).append(", v").append_u32((body.operand(inst, 2) as u32) as u32).push_str(");\n")
+            put_str_u32(out, "keel_copy(v", lhs)
+            put_str_u32(out, ", v", rhs)
+            put_str_u32(out, ", v", body.operand(inst, 2) as u32)
+            out.push_str(");\n")
         }
         zero {
             if arg2 != 0 {
-                out.append("keel_zero(v").append_u32(lhs).push_str(", sizeof(")
+                put_str_u32(out, "keel_zero(v", lhs).push_str(", sizeof(")
                 abi_name(out, air, arg1)
                 out.push_str("));\n")
             } else if arg1 != 0 {
-                out.append("keel_zero(v").append_u32(lhs).append(", ").append_u32(arg1).push_str(
-                    "U);\n"
-                )
+                put_str_u32(put_str_u32(out, "keel_zero(v", lhs), ", ", arg1).push_str("U);\n")
             }
         }
         abi_size {
@@ -567,7 +645,7 @@ instruction :: fn(out &String, air &program.Program, body &ir.Function, inst id.
             out.push_str("}\n")
         }
         branch {
-            out.append("if (v").append_u32((lhs) as u32).push_str(") {\n")
+            put_str_u32(out, "if (v", lhs).push_str(") {\n")
             edge(out, body, body.successor(inst, 0))
             out.push_str("} else {\n")
             edge(out, body, body.successor(inst, 1))
@@ -575,7 +653,7 @@ instruction :: fn(out &String, air &program.Program, body &ir.Function, inst id.
         }
         ret_ {
             if first == id.Val.none { out.push_str("return;\n") } else {
-                out.append("return v").append_u32((lhs) as u32).push_str(";\n")
+                put_str_u32(out, "return v", lhs).push_str(";\n")
             }
         }
         trap { out.push_str("__builtin_trap();\n") }
@@ -594,7 +672,7 @@ signature :: fn(out &String, air &program.Program, symbol Symbol) {
     for index in Range.new(0, decl.count as i32) {
         if index != 0 { out.push_str(", ") }
         ty := air.types.get(decl.params as u64 + index as u64)
-        out.append(type_name(ty)).append(" v").append_u32((index + 1) as u32)
+        put_str_u32(out.append(type_name(ty)), " v", (index + 1) as u32)
     }
     out.push_char(')')
 }
@@ -608,6 +686,7 @@ emit :: fn(arena &Arena, air &program.Program, os Os, executable bool) Str {
 
 emit_impl :: fn(arena &Arena, air &program.Program, os Os, executable bool) Str {
     out := String.new(arena)
+    out.reserve(air.functions.len * 1024 + 8192)
     out.push_str(
         `#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -722,17 +801,23 @@ static void keel_zero(void *dest, size_t n) {
                 }
             }
             data {
-                out.append("static const uint8_t k_").append_u32(index).push_str("[] = \"")
+                put_str_u32(&out, "static const uint8_t k_", index).push_str("[] = \"")
+                out.reserve(out.len + decl.bytes.len * 4 + 4)
+                dst := out.ptr + out.len
+                wrote: u64 = 0
                 for ch in Slice(u8).new(decl.bytes.ptr, decl.bytes.len) {
                     if ch >= 32 and ch <= 126 and ch != 34 and ch != 92 and ch != '?' {
-                        out.push_char(ch)
+                        *(dst + wrote) = ch
+                        wrote = wrote + 1
                     } else {
-                        out.push_char(92)
-                        out.push_char('0' + (ch >> 6))
-                        out.push_char('0' + ((ch >> 3) & 7))
-                        out.push_char('0' + (ch & 7))
+                        *(dst + wrote) = 92
+                        *(dst + wrote + 1) = '0' + (ch >> 6)
+                        *(dst + wrote + 2) = '0' + ((ch >> 3) & 7)
+                        *(dst + wrote + 3) = '0' + (ch & 7)
+                        wrote = wrote + 4
                     }
                 }
+                out.len = out.len + wrote
                 out.push_str("\";\n")
             }
         }
@@ -750,7 +835,7 @@ static void keel_zero(void *dest, size_t n) {
             block := pos as id.Block
             inst := body.first_inst(block)
             if inst == id.Inst.none { cont }
-            out.append("b").append_u32((pos) as u32).push_str(": ;\n")
+            put_str_u32(&out, "b", pos as u32).push_str(": ;\n")
             while inst != id.Inst.none {
                 instruction(&out, air, body, inst)
                 inst = body.next_inst(inst)
