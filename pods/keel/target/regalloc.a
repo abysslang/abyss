@@ -1,12 +1,14 @@
 ir :: @import("../ir")
+id :: @import("../id")
+ops :: @import("../ops")
 mem :: @import("std/mem")
-Val :: ir.Val
-Ty :: ir.Ty
-Op :: ir.Op
-Block :: ir.Block
-Inst :: ir.Inst
-Edge :: ir.Edge
 Function :: ir.Function
+Block :: id.Block
+Edge :: id.Edge
+Inst :: id.Inst
+Val :: id.Val
+Op :: ops.Op
+Ty :: ops.Ty
 
 spill :: fn() u64 { 32 }
 memory :: fn(offset u64) u64 { offset + spill() }
@@ -20,219 +22,554 @@ wide :: fn(ty Ty) bool { ty == Ty.i128_ or ty == Ty.u128_ }
 callee :: fn(index u64) u64 { if index == 0 { 3 } else { 11 + index } }
 
 Info :: struct {
-    def_block, use_block Block
-    last, barrier, uses  u32
-    diverse              bool
-
-    local :: fn(self &Self) bool {
-        not self.diverse and (self.uses == 0 or self.def_block == self.use_block)
-    }
-}
-
-Active :: struct {
-    value Val
-    last  u32
+    def_block Block
+    def_pos   u32
+    end_pos   u32
+    weight    u64
+    hint      Val
 }
 
 Allocation :: struct {
     homes &u64
     info  &Info
-    saved u32
     bytes u64
+    saved u32
 
     get :: fn(self &Self, value Val) u64 { self.homes[value as u64 - 1] }
 
     block :: fn(self &Self, value Val) Block { self.info[value as u64 - 1].def_block }
 }
 
-Workspace :: struct {
-    info  Vec(Info)
-    homes Vec(u64)
+operand_count :: fn(body &Function, inst Inst, op Op) u64 {
+    if op == Op.call or op == Op.call_indirect { ret body.payload(inst, 2) as u64 }
+    ir.fixed_uses(op)
+}
 
-    new :: fn() Self { .{ info: Vec(Info).new(), homes: Vec(u64).new() } }
+Workspace :: struct {
+    info        Vec(Info)
+    homes       Vec(u64)
+    rpo         Vec(Block)
+    post        Vec(Block)
+    rpo_idx     Vec(u32)
+    visit_state Vec(u8)
+    stk_blk     Vec(Block)
+    stk_edge    Vec(u8)
+    blk_start   Vec(u32)
+    blk_end     Vec(u32)
+    blk_depth   Vec(u32)
+    back_hdr    Vec(u32)
+    back_tail   Vec(u32)
+    call_bar    Vec(u32)
+    mem_bar     Vec(u32)
+    div_bar     Vec(u32)
+    order       Vec(Val)
+    spill_slots Vec(u64)
+    spill_ends  Vec(u32)
+
+    new :: fn() Self {
+        .{
+            info: Vec(Info).new()
+            homes: Vec(u64).new()
+            rpo: Vec(Block).new()
+            post: Vec(Block).new()
+            rpo_idx: Vec(u32).new()
+            visit_state: Vec(u8).new()
+            stk_blk: Vec(Block).new()
+            stk_edge: Vec(u8).new()
+            blk_start: Vec(u32).new()
+            blk_end: Vec(u32).new()
+            blk_depth: Vec(u32).new()
+            back_hdr: Vec(u32).new()
+            back_tail: Vec(u32).new()
+            call_bar: Vec(u32).new()
+            mem_bar: Vec(u32).new()
+            div_bar: Vec(u32).new()
+            order: Vec(Val).new()
+            spill_slots: Vec(u64).new()
+            spill_ends: Vec(u32).new()
+        }
+    }
 
     destroy :: fn(self &Self) {
         self.info.destroy()
         self.homes.destroy()
+        self.rpo.destroy()
+        self.post.destroy()
+        self.rpo_idx.destroy()
+        self.visit_state.destroy()
+        self.stk_blk.destroy()
+        self.stk_edge.destroy()
+        self.blk_start.destroy()
+        self.blk_end.destroy()
+        self.blk_depth.destroy()
+        self.back_hdr.destroy()
+        self.back_tail.destroy()
+        self.call_bar.destroy()
+        self.mem_bar.destroy()
+        self.div_bar.destroy()
+        self.order.destroy()
+        self.spill_slots.destroy()
+        self.spill_ends.destroy()
     }
 
     at :: fn(self &Self, value Val) &Info { self.info.ptr_at(value as u64 - 1) }
 
-    record :: fn(self &Self, value Val, block Block, position, barrier u32) {
-        if value == Val.none { ret }
-        item := self.at(value)
-        if item.uses == 0 {
-            item.use_block = block
-        } else if item.use_block != block {
-            item.diverse = true
-        }
-        item.uses = item.uses + 1
-        item.last = position
-        if barrier > item.barrier { item.barrier = barrier }
+    prepare_u32 :: fn(vec &Vec(u32), count u64) {
+        vec.clear()
+        vec.reserve(count)
+        mem.mem_set(vec.ptr as &u8, 0, count * @sizeof(u32))
+        vec.len = count
     }
 
-    inspect :: fn(self &Self, body &Function) {
-        count := body.value_count()
-        self.info.clear()
-        self.info.reserve(count)
-        self.info.len = count
-        mem.mem_set(self.info.ptr as &u8, 0, count * @sizeof(Info))
-        self.homes.clear()
-        self.homes.reserve(count)
-        self.homes.len = count
-
-        position: u32 = 0
-        for index in Range.new(1, (body.block_count() + 1) as i32) {
-            block := index as Block
-            position = position + 1
-            for param in Range.new(0, body.parameter_count(block) as i32) {
-                self.at(body.parameter(block, param as u32)).def_block = block
-            }
-            barrier: u32 = 0
-            inst := body.first_inst(block)
-            while inst != Inst.none {
-                position = position + 1
-                op := body.opcode(inst)
-                if clobbers(body, inst, op) { barrier = position }
-                value := body.result(inst)
-                if value != Val.none { self.at(value).def_block = block }
-                arity := if op == Op.call or op == Op.call_indirect {
-                    body.payload(inst, 2) as u64
-                } else { ir.fixed_uses(op) }
-                for operand in Range.new(0, arity as i32) {
-                    self.record(body.operand(inst, operand as u64), block, position, barrier)
+    build_rpo :: fn(self &Self, body &Function, block_count u64) {
+        self.rpo.clear()
+        self.post.clear()
+        self.visit_state.clear()
+        self.visit_state.reserve(block_count + 1)
+        mem.mem_set(self.visit_state.ptr as &u8, 0, block_count + 1)
+        self.visit_state.len = block_count + 1
+        self.stk_blk.clear()
+        self.stk_edge.clear()
+        self.stk_blk.push(Block.entry)
+        self.stk_edge.push(0)
+        self.visit_state.set(Block.entry as u64, 1)
+        while not self.stk_blk.is_empty() {
+            top := self.stk_blk.len - 1
+            b := self.stk_blk.get(top)
+            e := self.stk_edge.get(top)
+            last := body.last_inst(b)
+            pushed := false
+            if last != Inst.none and e < 2 {
+                self.stk_edge.set(top, e + 1)
+                edge := body.successor(last, e as u64)
+                if edge != Edge.none {
+                    target := body.edge_target(edge)
+                    if self.visit_state.get(target as u64) == 0 {
+                        self.visit_state.set(target as u64, 1)
+                        self.stk_blk.push(target)
+                        self.stk_edge.push(0)
+                        pushed = true
+                    }
                 }
-                if op == Op.jump or op == Op.branch {
-                    for arm in Range.new(0, if op == Op.jump { 1 } else { 2 }) {
-                        edge := body.successor(inst, arm as u64)
-                        for arg in Range.new(0, body.argument_count(edge) as i32) {
-                            self.record(body.argument(edge, arg as u32), block, position, barrier)
+            }
+            if not pushed and
+                (last == Inst.none or e >= 2 or body.successor(last, e as u64) == Edge.none) {
+                self.stk_blk.pop()
+                self.stk_edge.pop()
+                self.visit_state.set(b as u64, 2)
+                self.post.push(b)
+            }
+        }
+        Workspace.prepare_u32(&self.rpo_idx, block_count + 1)
+        i := self.post.len
+        while i > 0 {
+            i = i - 1
+            b := self.post.get(i)
+            idx := self.rpo.len as u32 + 1
+            self.rpo_idx.set(b as u64, idx)
+            self.rpo.push(b)
+        }
+        self.back_hdr.clear()
+        self.back_tail.clear()
+        Workspace.prepare_u32(&self.blk_depth, block_count + 1)
+        ri: u64 = 0
+        while ri < self.rpo.len {
+            b := self.rpo.get(ri)
+            u_idx := ri as u32 + 1
+            last := body.last_inst(b)
+            if last != Inst.none {
+                for pos in Range.new(0, 2) {
+                    edge := body.successor(last, pos as u64)
+                    if edge == Edge.none { break }
+                    target := body.edge_target(edge)
+                    v_idx := self.rpo_idx.get(target as u64)
+                    if v_idx != 0 and v_idx <= u_idx {
+                        self.back_hdr.push(v_idx)
+                        self.back_tail.push(u_idx)
+                        k := v_idx
+                        while k <= u_idx {
+                            self.blk_depth.set(k as u64, self.blk_depth.get(k as u64) + 1)
+                            k = k + 1
                         }
                     }
                 }
+            }
+            ri = ri + 1
+        }
+    }
+
+    inspect :: fn(self &Self, body &Function) {
+        value_count := body.value_count()
+        block_count := body.block_count()
+        self.info.clear()
+        self.info.reserve(value_count)
+        mem.mem_set(self.info.ptr as &u8, 0, value_count * @sizeof(Info))
+        self.info.len = value_count
+        self.homes.clear()
+        self.homes.reserve(value_count)
+        self.homes.len = value_count
+        for i in Range.new(0, value_count as i32) { self.homes.set(i as u64, 999) }
+        self.order.clear()
+        if block_count == 0 or value_count == 0 { ret }
+        self.build_rpo(body, block_count)
+        Workspace.prepare_u32(&self.blk_start, block_count + 1)
+        Workspace.prepare_u32(&self.blk_end, block_count + 1)
+        self.call_bar.clear()
+        self.mem_bar.clear()
+        self.div_bar.clear()
+        self.call_bar.push(0)
+        self.mem_bar.push(0)
+        self.div_bar.push(0)
+        self.order.clear()
+        pos: u32 = 0
+        ri: u64 = 0
+        while ri < self.rpo.len {
+            b := self.rpo.get(ri)
+            r_idx := ri as u32 + 1
+            depth := self.blk_depth.get(r_idx as u64)
+            shift := if depth > 6 { 6 as u64 } else { depth as u64 }
+            w := (1 as u64) << shift
+            self.blk_start.set(b as u64, pos)
+            p_count := body.parameter_count(b)
+            for p_i in Range.new(0, p_count as i32) {
+                val := body.parameter(b, p_i as u32)
+                slot := self.at(val)
+                slot.def_block = b
+                slot.def_pos = pos
+                slot.end_pos = pos + 1
+                slot.weight = w
+                slot.hint = Val.none
+                self.order.push(val)
+            }
+            self.call_bar.push(self.call_bar.get(pos as u64))
+            self.mem_bar.push(self.mem_bar.get(pos as u64))
+            self.div_bar.push(self.div_bar.get(pos as u64))
+            pos = pos + 1
+            inst := body.first_inst(b)
+            while inst != Inst.none {
+                op := body.opcode(inst)
+                res := body.result(inst)
+                n_ops := operand_count(body, inst, op)
+                is_wide := (res != Val.none and wide(body.value_type(res))) or
+                    (
+                        n_ops > 0 and body.operand(inst, 0) != Val.none and
+                            wide(body.value_type(body.operand(inst, 0)))
+                    )
+                is_call := op == Op.call or op == Op.call_indirect or is_wide
+                is_mem := op == Op.copy or op == Op.copy_bytes or op == Op.zero
+                is_div := op == Op.div or op == Op.rem
+                prev_c := self.call_bar.get(pos as u64)
+                prev_m := self.mem_bar.get(pos as u64)
+                prev_d := self.div_bar.get(pos as u64)
+                self.call_bar.push(prev_c + (if is_call { 1 as u32 } else { 0 as u32 }))
+                self.mem_bar.push(prev_m + (if is_mem { 1 as u32 } else { 0 as u32 }))
+                self.div_bar.push(prev_d + (if is_div { 1 as u32 } else { 0 as u32 }))
+                if res != Val.none {
+                    slot := self.at(res)
+                    slot.def_block = b
+                    slot.def_pos = pos
+                    slot.end_pos = pos
+                    slot.weight = if op == Op.constant { 0 as u64 } else { w * 8 }
+                    slot.hint = Val.none
+                    self.order.push(res)
+                }
+                for oi in Range.new(0, n_ops as i32) {
+                    operand := body.operand(inst, oi as u64)
+                    if operand != Val.none {
+                        oslot := self.at(operand)
+                        if pos > oslot.end_pos { oslot.end_pos = pos }
+                        odef := body.defining_inst(operand)
+                        if odef == Inst.none or body.opcode(odef) != Op.constant {
+                            oslot.weight = oslot.weight + w * 8
+                        }
+                    }
+                }
+                if op == Op.jump or op == Op.branch {
+                    for s_i in Range.new(0, 2) {
+                        edge := body.successor(inst, s_i as u64)
+                        if edge == Edge.none { break }
+                        target := body.edge_target(edge)
+                        t_rpo := self.rpo_idx.get(target as u64)
+                        is_back := t_rpo != 0 and t_rpo <= r_idx
+                        a_count := body.argument_count(edge)
+                        for a_i in Range.new(0, a_count as i32) {
+                            arg_v := body.argument(edge, a_i as u32)
+                            if arg_v != Val.none {
+                                aslot := self.at(arg_v)
+                                if pos > aslot.end_pos { aslot.end_pos = pos }
+                                adef := body.defining_inst(arg_v)
+                                if adef == Inst.none or body.opcode(adef) != Op.constant {
+                                    aslot.weight = aslot.weight + w * 8
+                                }
+                                param_v := body.parameter(target, a_i as u32)
+                                if param_v != Val.none {
+                                    pslot := self.at(param_v)
+                                    if pslot.hint == Val.none { pslot.hint = arg_v }
+                                    if is_back and aslot.hint == Val.none { aslot.hint = param_v }
+                                }
+                            }
+                        }
+                    }
+                }
+                pos = pos + 1
                 inst = body.next_inst(inst)
             }
+            self.blk_end.set(b as u64, pos - 1)
+            ri = ri + 1
+        }
+        changed := true
+        while changed {
+            changed = false
+            be: u64 = 0
+            while be < self.back_hdr.len {
+                hdr := self.rpo.get(self.back_hdr.get(be) as u64 - 1)
+                tail := self.rpo.get(self.back_tail.get(be) as u64 - 1)
+                h_start := self.blk_start.get(hdr as u64)
+                t_end := self.blk_end.get(tail as u64)
+                oi: u64 = 0
+                while oi < self.order.len {
+                    v := self.order.get(oi)
+                    slot := self.at(v)
+                    if slot.def_pos < h_start and slot.end_pos >= h_start and slot.end_pos < t_end {
+                        slot.end_pos = t_end
+                        changed = true
+                    }
+                    oi = oi + 1
+                }
+                be = be + 1
+            }
         }
     }
 
-    globals :: fn(self &Self, body &Function) u64 {
-        best: [3]Val
-        scores: [3]u64
-        for index in Range.new(0, self.info.len as i32) {
-            at := index as u64
-            self.homes.set(at, spill())
-            value := (at + 1) as Val
-            item := self.info.get(at)
-            if item.local() or item.uses == 0 { cont }
-            ty := body.value_type(value)
-            if floating(ty) or wide(ty) { cont }
-            score := item.uses as u64 * 2
-            if body.defining_inst(value) == Inst.none and item.def_block != Block.entry {
-                score = score + 5
-            }
-            if score <= scores[2] { cont }
-            pos: u64 = 2
-            while pos != 0 and score > scores[pos - 1] {
-                best[pos] = best[pos - 1]
-                scores[pos] = scores[pos - 1]
-                pos = pos - 1
-            }
-            best[pos] = value
-            scores[pos] = score
+    try_hint_reg :: fn(self &Self, hint Val, is_xmm bool, has_call, has_mem, has_div bool) u64 {
+        if hint == Val.none { ret 999 }
+        h := self.homes.get(hint as u64 - 1)
+        if not in_register(h) { ret 999 }
+        if is_xmm {
+            if h >= 18 and h < 32 and not has_call { ret h }
+            ret 999
         }
-        used: u64 = 0
-        while used < 3 and best[used] != Val.none {
-            self.homes.set(best[used] as u64 - 1, callee(used))
-            used = used + 1
-        }
-        used
-    }
-
-    place :: fn(self &Self, value Val, ty Ty, position u32, globals u64, active &Active) {
-        item := self.at(value)
-        if not item.local() or item.uses == 0 or wide(ty) { ret }
-        across_call := item.barrier > position
-        if floating(ty) and across_call { ret }
-        general: [7]u64 = .[ 10, 11, 3, 12, 13, 14, 15 ]
-        remaining := if floating(ty) { 8 } else { 7 }
-        best: u64 = 32
-        farthest := item.last
-        index: u64 = if floating(ty) { 0 } else { (if across_call { 2 } else { 0 }) as u64 }
-        while index < remaining {
-            pos := index
-            index = index + 1
-            if not floating(ty) and pos >= 2 and pos < 2 + globals { cont }
-            reg := if floating(ty) { 24 + pos } else { general[pos] }
-            previous := active[reg]
-            if previous.last <= position {
-                best = reg
-                break
-            }
-            if previous.last > farthest {
-                farthest = previous.last
-                best = reg
-            }
-        }
-        if best == 32 { ret }
-        previous := active[best]
-        if previous.last > position { self.homes.set(previous.value as u64 - 1, spill()) }
-        active[best] = .{ value: value, last: item.last }
-        self.homes.set(value as u64 - 1, best)
+        if in_xmm(h) { ret 999 }
+        if h == 3 or (h >= 12 and h <= 15) { ret h }
+        if has_call { ret 999 }
+        if h == 10 or h == 8 or h == 9 or h == 11 { ret h }
+        if h == 2 and not has_div { ret h }
+        if (h == 6 or h == 7) and not has_mem { ret h }
+        999
     }
 
     allocate :: fn(self &Self, body &Function) Allocation {
         self.inspect(body)
-        globals := self.globals(body)
-        active: [32]Active
-        position: u32 = 0
-        for index in Range.new(1, (body.block_count() + 1) as i32) {
-            block := index as Block
-            position = position + 1
-            for param in Range.new(0, body.parameter_count(block) as i32) {
-                value := body.parameter(block, param as u32)
-                self.place(value, body.value_type(value), position, globals, &active[0])
+        reg_owner: [32]Val
+        reg_end: [32]u32
+        reg_weight: [32]u64
+        for r in Range.new(0, 32) {
+            reg_owner[r] = Val.none
+            reg_end[r] = 0
+            reg_weight[r] = 0
+        }
+        saved_mask: u32 = 0
+        saved_count: u64 = 0
+        caller_regs: [7]u64 = .[ 10, 8, 9, 11, 2, 6, 7 ]
+        callee_regs: [5]u64 = .[ 3, 12, 13, 14, 15 ]
+        oi: u64 = 0
+        while oi < self.order.len {
+            v := self.order.get(oi)
+            oi = oi + 1
+            slot := self.at(v)
+            start := slot.def_pos
+            end := slot.end_pos
+            w := slot.weight
+            ty := body.value_type(v)
+            if wide(ty) {
+                self.homes.set(v as u64 - 1, spill())
+                cont
             }
-            inst := body.first_inst(block)
-            while inst != Inst.none {
-                position = position + 1
-                value := body.result(inst)
-                if value != Val.none {
-                    self.place(value, body.value_type(value), position, globals, &active[0])
+            vdef := body.defining_inst(v)
+            is_const := vdef != Inst.none and body.opcode(vdef) == Op.constant
+            has_call := self.call_bar.get(end as u64 + 1) > self.call_bar.get(start as u64 + 1)
+            has_mem := self.mem_bar.get(end as u64 + 1) > self.mem_bar.get(start as u64 + 1)
+            has_div := self.div_bar.get(end as u64 + 1) > self.div_bar.get(start as u64 + 1)
+            if is_const and has_call {
+                self.homes.set(v as u64 - 1, spill())
+                cont
+            }
+            if floating(ty) {
+                if has_call {
+                    self.homes.set(v as u64 - 1, spill())
+                    cont
                 }
-                inst = body.next_inst(inst)
+                chosen: u64 = 999
+                hinted := self.try_hint_reg(slot.hint, true, has_call, has_mem, has_div)
+                if hinted != 999 and reg_end[hinted] <= start { chosen = hinted }
+                if chosen == 999 {
+                    r: u64 = 18
+                    while r < 32 {
+                        if reg_end[r] <= start {
+                            chosen = r
+                            break
+                        }
+                        r = r + 1
+                    }
+                }
+                if chosen != 999 {
+                    reg_owner[chosen] = v
+                    reg_end[chosen] = end
+                    reg_weight[chosen] = w
+                    self.homes.set(v as u64 - 1, chosen)
+                } else {
+                    vic_r: u64 = 18
+                    r: u64 = 19
+                    while r < 32 {
+                        if reg_weight[r] < reg_weight[vic_r] or
+                            (reg_weight[r] == reg_weight[vic_r] and reg_end[r] > reg_end[vic_r]) {
+                            vic_r = r
+                        }
+                        r = r + 1
+                    }
+                    if w > reg_weight[vic_r] or (w == reg_weight[vic_r] and end < reg_end[vic_r]) {
+                        old := reg_owner[vic_r]
+                        self.homes.set(old as u64 - 1, spill())
+                        reg_owner[vic_r] = v
+                        reg_end[vic_r] = end
+                        reg_weight[vic_r] = w
+                        self.homes.set(v as u64 - 1, vic_r)
+                    } else {
+                        self.homes.set(v as u64 - 1, spill())
+                    }
+                }
+                cont
+            }
+            chosen: u64 = 999
+            hinted := self.try_hint_reg(slot.hint, false, has_call, has_mem, has_div)
+            if hinted != 999 and reg_end[hinted] <= start { chosen = hinted }
+            if chosen == 999 and not has_call {
+                limit: u64 = if not has_mem { 7 } else if not has_div { 5 } else { 4 }
+                ci: u64 = 0
+                while ci < limit {
+                    r := caller_regs[ci]
+                    if r == 2 and has_div { ci = ci + 1, cont }
+                    if reg_end[r] <= start {
+                        chosen = r
+                        break
+                    }
+                    ci = ci + 1
+                }
+            }
+            if chosen == 999 and not is_const {
+                ci: u64 = 0
+                while ci < 5 {
+                    r := callee_regs[ci]
+                    if reg_end[r] <= start {
+                        chosen = r
+                        break
+                    }
+                    ci = ci + 1
+                }
+            }
+            if chosen != 999 {
+                reg_owner[chosen] = v
+                reg_end[chosen] = end
+                reg_weight[chosen] = w
+                self.homes.set(v as u64 - 1, chosen)
+                if chosen == 3 or chosen >= 12 {
+                    bit := (1 as u32) << chosen as u32
+                    if (saved_mask & bit) == 0 {
+                        saved_mask = saved_mask | bit
+                        saved_count = saved_count + 1
+                    }
+                }
+                cont
+            }
+            if is_const {
+                self.homes.set(v as u64 - 1, spill())
+                cont
+            }
+            vic_r: u64 = 999
+            if not has_call {
+                limit: u64 = if not has_mem { 7 } else if not has_div { 5 } else { 4 }
+                ci: u64 = 0
+                while ci < limit {
+                    r := caller_regs[ci]
+                    if r == 2 and has_div { ci = ci + 1, cont }
+                    if vic_r == 999 or reg_weight[r] < reg_weight[vic_r] or
+                        (reg_weight[r] == reg_weight[vic_r] and reg_end[r] > reg_end[vic_r]) {
+                        vic_r = r
+                    }
+                    ci = ci + 1
+                }
+            }
+            ci: u64 = 0
+            while ci < 5 {
+                r := callee_regs[ci]
+                if vic_r == 999 or reg_weight[r] < reg_weight[vic_r] or
+                    (reg_weight[r] == reg_weight[vic_r] and reg_end[r] > reg_end[vic_r]) {
+                    vic_r = r
+                }
+                ci = ci + 1
+            }
+            if vic_r != 999 and
+                (w > reg_weight[vic_r] or (w == reg_weight[vic_r] and end < reg_end[vic_r])) {
+                old := reg_owner[vic_r]
+                self.homes.set(old as u64 - 1, spill())
+                reg_owner[vic_r] = v
+                reg_end[vic_r] = end
+                reg_weight[vic_r] = w
+                self.homes.set(v as u64 - 1, vic_r)
+                if vic_r == 3 or vic_r >= 12 {
+                    bit := (1 as u32) << vic_r as u32
+                    if (saved_mask & bit) == 0 {
+                        saved_mask = saved_mask | bit
+                        saved_count = saved_count + 1
+                    }
+                }
+            } else {
+                self.homes.set(v as u64 - 1, spill())
             }
         }
-        saved: u32 = 0
-        bytes: u64 = 0
-        for home in self.homes {
-            if home == 3 or (home >= 12 and home < 16) {
-                bit := (1 as u32) << home as u32
-                if (saved & bit) == 0 {
-                    saved = saved | bit
+        bytes := saved_count * 8
+        self.spill_slots.clear()
+        self.spill_ends.clear()
+        oi = 0
+        while oi < self.order.len {
+            v := self.order.get(oi)
+            oi = oi + 1
+            if self.homes.get(v as u64 - 1) != spill() { cont }
+            ty := body.value_type(v)
+            slot := self.at(v)
+            if wide(ty) {
+                aligned_top := (bytes + 15) & (0 - (16 as u64))
+                bytes = aligned_top + 16
+                self.homes.set(v as u64 - 1, memory(bytes))
+            } else {
+                start := slot.def_pos
+                end := slot.end_pos
+                reused: u64 = 9999999
+                k: u64 = 0
+                while k < self.spill_ends.len {
+                    if self.spill_ends.get(k) <= start {
+                        reused = k
+                        break
+                    }
+                    k = k + 1
+                }
+                if reused != 9999999 {
+                    self.spill_ends.set(reused, end)
+                    self.homes.set(v as u64 - 1, memory(self.spill_slots.get(reused)))
+                } else {
                     bytes = bytes + 8
+                    self.spill_slots.push(bytes)
+                    self.spill_ends.push(end)
+                    self.homes.set(v as u64 - 1, memory(bytes))
                 }
             }
         }
-        for index in Range.new(0, self.homes.len as i32) {
-            at := index as u64
-            if self.homes.get(at) != spill() { cont }
-            ty := body.value_type((at + 1) as Val)
-            if ty == Ty.void_ { cont }
-            bytes = if wide(ty) { (bytes + 31) & ~(15 as u64) } else { bytes + 8 }
-            self.homes.set(at, memory(bytes))
+        value_count := body.value_count()
+        for idx in Range.new(0, value_count as i32) {
+            if self.homes.get(idx as u64) == 999 {
+                self.homes.set(idx as u64, memory(bytes))
+            }
         }
-        .{ homes: self.homes.ptr, info: self.info.ptr, saved: saved, bytes: bytes }
+        .{ homes: self.homes.ptr, info: self.info.ptr, bytes: bytes, saved: saved_mask }
     }
-}
-
-clobbers :: fn(body &Function, inst Inst, op Op) bool {
-    if op == Op.call or op == Op.call_indirect or op == Op.c_value { ret true }
-    if op == Op.div or op == Op.rem { ret wide(body.value_type(body.operand(inst, 0))) }
-    if op == Op.cast {
-        source := body.value_type(body.operand(inst, 0))
-        result := body.value_type(body.result(inst))
-        ret (floating(source) and (wide(result) or result == Ty.u64_)) or
-            (wide(source) and floating(result))
-    }
-    false
 }

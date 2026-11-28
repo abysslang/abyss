@@ -3,6 +3,7 @@ Phase :: profile.Phase
 elf :: @import("pods/keel/target/elf64")
 abi :: @import("pods/keel/abi_types")
 ir :: @import("pods/keel/ir")
+id :: @import("pods/keel/id")
 program :: @import("pods/keel/program")
 sysv :: @import("pods/keel/target/sysv")
 regalloc :: @import("./regalloc")
@@ -13,6 +14,9 @@ Val :: ir.Val
 Inst :: ir.Inst
 Block :: ir.Block
 Edge :: ir.Edge
+Use :: id.Use
+Function :: ir.Function
+Allocation :: regalloc.Allocation
 Buffer :: elf.Buffer
 Program :: program.Program
 Classification :: sysv.Classification
@@ -108,7 +112,7 @@ normalize_reg :: fn(code &Buffer, ty Ty, reg u64) {
         ty == Ty.u16_ or
         ty == Ty.u32_ {
         rex := ((reg >> 3) << 2) | (reg >> 3)
-        if rex != 0 { code.put(0x40 | rex, 1) }
+        if rex != 0 or (ty == Ty.u8_ and reg >= 4) { code.put(0x40 | rex, 1) }
         if ty == Ty.u32_ { code.put(0x8b, 1) } else {
             code.put(0x0f, 1)
             code.put(if ty == Ty.u8_ { 0xb6 } else { 0xb7 }, 1)
@@ -393,6 +397,134 @@ Arguments :: struct {
         }
         self.stack = self.stack + 8
     }
+}
+
+EntryMove :: struct {
+    src, dst, stack u64
+    ty              Ty
+    done            bool
+}
+
+resolve_reg_copies :: fn(code &Buffer, moves &EntryMove, count, scratch u64, is_xmm bool) {
+    done: u64 = 0
+    while done < count {
+        progress := false
+        i: u64 = 0
+        while i < count {
+            m := moves + i
+            if m.done { i = i + 1, cont }
+            blocked := false
+            j: u64 = 0
+            while j < count {
+                if i != j and not (moves + j).done and (moves + j).src == m.dst {
+                    blocked = true
+                    break
+                }
+                j = j + 1
+            }
+            if not blocked {
+                if is_xmm {
+                    if m.src != m.dst { xmm_copy(code, m.dst - 16, m.src - 16) }
+                } else {
+                    if m.src != m.dst { move_reg(code, m.dst, m.src) }
+                    normalize_reg(code, m.ty, m.dst)
+                }
+                m.done = true
+                done = done + 1
+                progress = true
+            }
+            i = i + 1
+        }
+        if not progress {
+            i = 0
+            while i < count {
+                m := moves + i
+                if not m.done {
+                    if is_xmm { xmm_copy(code, scratch - 16, m.src - 16) } else {
+                        move_reg(code, scratch, m.src)
+                    }
+                    broken := m.src
+                    j: u64 = 0
+                    while j < count {
+                        mj := moves + j
+                        if not mj.done and mj.src == broken { mj.src = scratch }
+                        j = j + 1
+                    }
+                    break
+                }
+                i = i + 1
+            }
+        }
+    }
+}
+
+emit_entry_params :: fn(code &Buffer, body &ir.Function, allocation &regalloc.Allocation) {
+    count := body.parameter_count(Block.entry)
+    if count == 0 { ret }
+    gp_moves: [6]EntryMove
+    gp_count: u64 = 0
+    xmm_moves: [8]EntryMove
+    xmm_count: u64 = 0
+    stack_moves := Vec(EntryMove).new()
+    args := Arguments.new()
+    pos: u32 = 0
+    while pos < count {
+        val := body.parameter(Block.entry, pos)
+        home := allocation.get(val)
+        ty := body.value_type(val)
+        if wide(ty) {
+            if args.gp + 2 <= 6 {
+                args.move(code, home, ty, true)
+            } else {
+                args.stack = aligned(args.stack, 16)
+                stack_moves.push(.{ src: 0, dst: home, stack: args.stack, ty: ty, done: false })
+                args.stack = args.stack + 16
+            }
+        } else if floating(ty) and args.sse < 8 {
+            src := 16 + args.sse
+            if regalloc.in_xmm(home) {
+                xmm_moves[xmm_count] = .{ src: src, dst: home, stack: 0, ty: ty, done: false }
+                xmm_count = xmm_count + 1
+            } else {
+                xmm_home(code, home, args.sse, true)
+            }
+            args.sse = args.sse + 1
+        } else if not floating(ty) and args.gp < 6 {
+            src := arg_reg(args.gp as u32)
+            if regalloc.in_register(home) and not regalloc.in_xmm(home) {
+                gp_moves[gp_count] = .{ src: src, dst: home, stack: 0, ty: ty, done: false }
+                gp_count = gp_count + 1
+            } else if ty == Ty.i64_ or ty == Ty.u64_ or ty == Ty.ptr {
+                save_home(code, home, src)
+            } else {
+                move_reg(code, 0, src)
+                normalize(code, ty)
+                save_home(code, home, 0)
+            }
+            args.gp = args.gp + 1
+        } else {
+            stack_moves.push(.{ src: 0, dst: home, stack: args.stack, ty: ty, done: false })
+            args.stack = args.stack + 8
+        }
+        pos = pos + 1
+    }
+    if gp_count > 0 { resolve_reg_copies(code, &gp_moves[0], gp_count, 0, false) }
+    if xmm_count > 0 { resolve_reg_copies(code, &xmm_moves[0], xmm_count, 16, true) }
+    for sm in stack_moves {
+        if wide(sm.ty) {
+            code.raw("\x48\x8b\x85")
+            code.put(16 + sm.stack, 4)
+            frame_access(code, 0x89, 0, regalloc.offset(sm.dst))
+            code.raw("\x48\x8b\x85")
+            code.put(24 + sm.stack, 4)
+            frame_access(code, 0x89, 0, regalloc.offset(sm.dst) - 8)
+        } else {
+            frame_access(code, 0x8b, 0, 0 - (16 + sm.stack))
+            normalize(code, sm.ty)
+            save_home(code, sm.dst, 0)
+        }
+    }
+    stack_moves.destroy()
 }
 
 adjust_stack :: fn(code &elf.Buffer, size u64, reserve bool) {
@@ -719,6 +851,7 @@ Encoder :: struct {
     jumps              Vec(Fixup)
     scratch, stack_top u64
     next_block         Block
+    leaf               bool
 
     slot :: fn(self &Self, value Val) u64 { regalloc.offset(self.allocation.get(value)) }
 
@@ -857,88 +990,501 @@ Encoder :: struct {
         }
     }
 
+    copy_home :: fn(code &Buffer, from, to u64, ty Ty) {
+        if from == to { ret }
+        if wide(ty) {
+            frame_access(code, 0x8b, 0, regalloc.offset(from))
+            frame_access(code, 0x89, 0, regalloc.offset(to))
+            frame_access(code, 0x8b, 0, regalloc.offset(from) - 8)
+            frame_access(code, 0x89, 0, regalloc.offset(to) - 8)
+            ret
+        }
+        if regalloc.in_xmm(from) {
+            xmm_home(code, to, from - 16, true)
+        } else if regalloc.in_xmm(to) {
+            xmm_home(code, from, to - 16, false)
+        } else if regalloc.in_register(from) {
+            save_home(code, to, from)
+        } else if regalloc.in_register(to) {
+            load_home(code, from, to)
+        } else {
+            load_home(code, from, 0)
+            save_home(code, to, 0)
+        }
+    }
+
+    in_gp :: fn(home u64) bool {
+        regalloc.in_register(home) and not regalloc.in_xmm(home)
+    }
+
+    const_i32 :: fn(body &Function, val Val, out &i64) bool {
+        if val == Val.none { ret false }
+        def := body.defining_inst(val)
+        if def == Inst.none or body.opcode(def) != Op.constant { ret false }
+        bits := body.constant_bits(def)
+        ty := body.value_type(val)
+        if ty == Ty.i1 {
+            *out = (bits & 1) as i64
+            ret true
+        }
+        if ty == Ty.i8_ {
+            *out = (bits as u8 as i8) as i64
+            ret true
+        }
+        if ty == Ty.u8_ {
+            *out = (bits as u8) as i64
+            ret true
+        }
+        if ty == Ty.i16_ {
+            *out = (bits as u16 as i16) as i64
+            ret true
+        }
+        if ty == Ty.u16_ {
+            *out = (bits as u16) as i64
+            ret true
+        }
+        if ty == Ty.i32_ and (bits >> 32) == 0 {
+            *out = (bits as u32 as i32) as i64
+            ret true
+        }
+        if ty == Ty.u32_ and (bits >> 32) == 0 {
+            if bits <= 2147483647 {
+                *out = bits as i64
+                ret true
+            }
+            ret false
+        }
+        signed_bits := (bits as i32) as i64
+        if (signed_bits as u64) == bits {
+            *out = signed_bits
+            ret true
+        }
+        false
+    }
+
+    single_use :: fn(body &Function, val Val) bool {
+        if val == Val.none { ret false }
+        u := body.graph.uses.head(val)
+        u != Use.none and body.graph.uses.next.get(id.slot(u)) == Use.none
+    }
+
+    is_cmp_op :: fn(op Op) bool {
+        op as u8 >= Op.eq as u8 and op as u8 <= Op.ge as u8
+    }
+
+    alu_imm_subop :: fn(op Op) u64 {
+        match op {
+            iadd { 0 }
+            bor { 1 }
+            band { 4 }
+            sub { 5 }
+            bxor { 6 }
+            else { 99 }
+        }
+    }
+
+    stride_log2 :: fn(stride u32) u64 {
+        if stride == 1 { ret 0 }
+        if stride == 2 { ret 1 }
+        if stride == 4 { ret 2 }
+        if stride == 8 { ret 3 }
+        99
+    }
+
+    emit_alu_imm :: fn(code &Buffer, subop, dest u64, imm i64) {
+        code.put(0x48 | (dest >> 3), 1)
+        if imm >= -128 and imm <= 127 {
+            code.put(0x83, 1)
+            code.put(0xc0 | (subop << 3) | (dest & 7), 1)
+            code.put(imm as u64, 1)
+        } else {
+            code.put(0x81, 1)
+            code.put(0xc0 | (subop << 3) | (dest & 7), 1)
+            code.put(imm as u64, 4)
+        }
+    }
+
+    emit_mem :: fn(
+        code &Buffer
+        rex_w bool
+        prefix, ext_op, op, reg, base, idx, scale_log2 u64
+        has_idx bool
+        disp i64
+    ) {
+        if prefix != 0 { code.put(prefix, 1) }
+        rex := (if rex_w { 8 as u64 } else { 0 }) | ((reg >> 3) << 2) |
+            (if has_idx { (idx >> 3) << 1 } else { 0 }) |
+            (base >> 3)
+        if rex != 0 or (op == 0x88 and reg >= 4) { code.put(0x40 | rex, 1) }
+        if ext_op != 0 { code.put(ext_op, 1) }
+        code.put(op, 1)
+        need_sib := has_idx or (base & 7) == 4
+        mod := if disp == 0 and (base & 7) != 5 { 0 as u64 } else if disp >= -128 and disp <= 127 {
+            0x40 as u64
+        } else { 0x80 as u64 }
+        rm := if need_sib { 4 as u64 } else { base & 7 }
+        code.put(mod | ((reg & 7) << 3) | rm, 1)
+        if need_sib {
+            idx_enc := if has_idx { idx & 7 } else { 4 as u64 }
+            sc := if has_idx { scale_log2 } else { 0 as u64 }
+            code.put((sc << 6) | (idx_enc << 3) | (base & 7), 1)
+        }
+        if mod == 0x40 { code.put(disp as u64, 1) } else if mod == 0x80 {
+            code.put(disp as u64, 4)
+        }
+    }
+
+    emit_store_imm :: fn(
+        code &Buffer
+        size, base, idx, scale_log2 u64
+        has_idx bool
+        disp, imm i64
+    ) {
+        if size == 1 {
+            Encoder.emit_mem(code, false, 0, 0, 0xc6, 0, base, idx, scale_log2, has_idx, disp)
+            code.put(imm as u64, 1)
+        } else if size == 2 {
+            Encoder.emit_mem(code, false, 0x66, 0, 0xc7, 0, base, idx, scale_log2, has_idx, disp)
+            code.put(imm as u64, 2)
+        } else {
+            Encoder.emit_mem(
+                code
+                size == 8
+                0
+                0
+                0xc7
+                0
+                base
+                idx
+                scale_log2
+                has_idx
+                disp
+            )
+            code.put(imm as u64, 4)
+        }
+    }
+
+    emit_load_mem :: fn(
+        code &Buffer
+        size, dest, base, idx, scale_log2 u64
+        has_idx bool
+        disp i64
+    ) {
+        if size == 1 {
+            Encoder.emit_mem(code, false, 0, 0x0f, 0xb6, dest, base, idx, scale_log2, has_idx, disp)
+        } else if size == 2 {
+            Encoder.emit_mem(code, false, 0, 0x0f, 0xb7, dest, base, idx, scale_log2, has_idx, disp)
+        } else {
+            Encoder.emit_mem(
+                code
+                size == 8
+                0
+                0
+                0x8b
+                dest
+                base
+                idx
+                scale_log2
+                has_idx
+                disp
+            )
+        }
+    }
+
+    emit_store_reg :: fn(
+        code &Buffer
+        size, reg, base, idx, scale_log2 u64
+        has_idx bool
+        disp i64
+    ) {
+        if size == 1 {
+            Encoder.emit_mem(code, false, 0, 0, 0x88, reg, base, idx, scale_log2, has_idx, disp)
+        } else if size == 2 {
+            Encoder.emit_mem(code, false, 0x66, 0, 0x89, reg, base, idx, scale_log2, has_idx, disp)
+        } else {
+            Encoder.emit_mem(code, size == 8, 0, 0, 0x89, reg, base, idx, scale_log2, has_idx, disp)
+        }
+    }
+
+    emit_cmp_operands :: fn(
+        code &Buffer
+        body &Function
+        allocation &Allocation
+        first, second Val
+    ) {
+        imm: i64 = 0
+        l_home := allocation.get(first)
+        if Encoder.const_i32(body, second, &imm) {
+            if Encoder.in_gp(l_home) {
+                Encoder.emit_alu_imm(code, 7, l_home, imm)
+            } else {
+                load_home(code, l_home, 0)
+                Encoder.emit_alu_imm(code, 7, 0, imm)
+            }
+            ret
+        }
+        r_home := allocation.get(second)
+        if Encoder.in_gp(l_home) and Encoder.in_gp(r_home) {
+            reg_op(code, 0x39, r_home, l_home)
+        } else if Encoder.in_gp(l_home) {
+            load_home(code, r_home, 1)
+            reg_op(code, 0x39, 1, l_home)
+        } else if Encoder.in_gp(r_home) {
+            load_home(code, l_home, 0)
+            reg_op(code, 0x39, r_home, 0)
+        } else {
+            load_home(code, l_home, 0)
+            load_home(code, r_home, 1)
+            code.raw("\x48\x39\xc8")
+        }
+    }
+
+    can_fold_offset :: fn(body &Function, off_inst Inst, disp_out &i64) bool {
+        if off_inst == Inst.none or body.opcode(off_inst) != Op.offset { ret false }
+        off_res := body.result(off_inst)
+        if not Encoder.single_use(body, off_res) { ret false }
+        next := body.next_inst(off_inst)
+        if next == Inst.none { ret false }
+        nop := body.opcode(next)
+        if nop == Op.load {
+            if body.operand(next, 0) != off_res { ret false }
+            if wide(body.value_type(body.result(next))) { ret false }
+        } else if nop == Op.store {
+            if body.operand(next, 0) != off_res or body.operand(next, 1) == off_res { ret false }
+            if wide(body.value_type(body.operand(next, 1))) { ret false }
+        } else { ret false }
+        idx := body.operand(off_inst, 1)
+        stride := body.payload(off_inst, 2)
+        c_idx: i64 = 0
+        if Encoder.const_i32(body, idx, &c_idx) {
+            d := c_idx * stride as i64
+            if d >= -2147483648 and d <= 2147483647 {
+                *disp_out = d
+                ret true
+            }
+        }
+        *disp_out = 0
+        Encoder.stride_log2(stride) < 4
+    }
+
+    const_folds_into :: fn(body &Function, c_inst, next Inst, c_val Val) bool {
+        if next == Inst.none { ret false }
+        nop := body.opcode(next)
+        imm: i64 = 0
+        if ir.binary(nop) {
+            op0 := body.operand(next, 0)
+            op1 := body.operand(next, 1)
+            op_ty := body.value_type(op0)
+            if floating(op_ty) or wide(op_ty) { ret false }
+            if nop == Op.shl or nop == Op.shr { ret op1 == c_val }
+            if not Encoder.const_i32(body, c_val, &imm) { ret false }
+            if op1 == c_val {
+                ret alu_opcode(nop) != 0 or Encoder.is_cmp_op(nop)
+            }
+            if op0 == c_val and
+                (
+                    nop == Op.iadd or nop == Op.band or nop == Op.bor or nop == Op.bxor or
+                        nop == Op.mul
+                ) {
+                dummy: i64 = 0
+                ret not Encoder.const_i32(body, op1, &dummy)
+            }
+            ret false
+        }
+        if nop == Op.store {
+            op0 := body.operand(next, 0)
+            op1 := body.operand(next, 1)
+            if op1 != c_val or op0 == c_val { ret false }
+            sty := body.value_type(op1)
+            ret not floating(sty) and not wide(sty) and Encoder.const_i32(body, c_val, &imm)
+        }
+        if nop == Op.offset and body.operand(next, 1) == c_val {
+            disp: i64 = 0
+            ret Encoder.can_fold_offset(body, next, &disp) and Encoder.const_i32(body, c_val, &imm)
+        }
+        false
+    }
+
+    resolve_addr :: fn(
+        self &Self
+        inst Inst
+        addr Val
+        base_out, idx_out, scale_out &u64
+        has_idx_out &bool
+        disp_out &i64
+        allow_val_spill_conflict Val
+    ) bool {
+        body := self.body
+        off_inst := body.defining_inst(addr)
+        disp: i64 = 0
+        if off_inst != Inst.none and body.next_inst(off_inst) == inst and
+            Encoder.can_fold_offset(body, off_inst, &disp) {
+            base_v := body.operand(off_inst, 0)
+            idx_v := body.operand(off_inst, 1)
+            c_idx: i64 = 0
+            if Encoder.const_i32(body, idx_v, &c_idx) {
+                b_home := self.allocation.get(base_v)
+                b_reg := if Encoder.in_gp(b_home) { b_home } else {
+                    load_home(&self.image.text, b_home, 0)
+                    0 as u64
+                }
+                *base_out = b_reg
+                *idx_out = 0
+                *scale_out = 0
+                *has_idx_out = false
+                *disp_out = disp
+                ret true
+            }
+            b_home := self.allocation.get(base_v)
+            i_home := self.allocation.get(idx_v)
+            if allow_val_spill_conflict != Val.none and not Encoder.in_gp(b_home) and
+                not Encoder.in_gp(i_home) {
+                v_home := self.allocation.get(allow_val_spill_conflict)
+                v_imm: i64 = 0
+                if not Encoder.in_gp(v_home) and
+                    not Encoder.const_i32(body, allow_val_spill_conflict, &v_imm) {
+                    ret false
+                }
+            }
+            b_reg := if Encoder.in_gp(b_home) { b_home } else {
+                load_home(&self.image.text, b_home, 0)
+                0 as u64
+            }
+            i_reg := if Encoder.in_gp(i_home) { i_home } else {
+                load_home(&self.image.text, i_home, 1)
+                1 as u64
+            }
+            *base_out = b_reg
+            *idx_out = i_reg
+            *scale_out = Encoder.stride_log2(body.payload(off_inst, 2))
+            *has_idx_out = true
+            *disp_out = 0
+            ret true
+        }
+        a_home := self.allocation.get(addr)
+        b_reg := if Encoder.in_gp(a_home) { a_home } else {
+            load_home(&self.image.text, a_home, 0)
+            0 as u64
+        }
+        *base_out = b_reg
+        *idx_out = 0
+        *scale_out = 0
+        *has_idx_out = false
+        *disp_out = 0
+        true
+    }
+
+    move_edge_heap :: fn(self &Self, edge Edge) {
+        body := self.body
+        code := &self.image.text
+        target := body.edge_target(edge)
+        count := body.argument_count(edge)
+        heap := Vec(EntryMove).with_cap(count as u64)
+        pos: u32 = 0
+        while pos < count {
+            value := body.argument(edge, pos)
+            from := self.allocation.get(value)
+            to := self.allocation.get(body.parameter(target, pos))
+            if from != to {
+                heap.push(
+                    .{
+                        src: from
+                        dst: to
+                        stack: 0
+                        ty: body.value_type(value)
+                        done: false
+                    }
+                )
+            }
+            pos = pos + 1
+        }
+        Encoder.resolve_edge_slice(code, heap.ptr, heap.len, self.scratch)
+        heap.destroy()
+    }
+
+    resolve_edge_slice :: fn(code &Buffer, moves &EntryMove, m_count, scratch u64) {
+        done: u64 = 0
+        while done < m_count {
+            progress := false
+            i: u64 = 0
+            while i < m_count {
+                m := moves + i
+                if m.done { i = i + 1, cont }
+                blocked := false
+                j: u64 = 0
+                while j < m_count {
+                    if i != j and not (moves + j).done and (moves + j).src == m.dst {
+                        blocked = true
+                        break
+                    }
+                    j = j + 1
+                }
+                if not blocked {
+                    Encoder.copy_home(code, m.src, m.dst, m.ty)
+                    m.done = true
+                    done = done + 1
+                    progress = true
+                }
+                i = i + 1
+            }
+            if not progress {
+                i = 0
+                while i < m_count {
+                    m := moves + i
+                    if not m.done {
+                        temp := if wide(m.ty) {
+                            regalloc.memory(scratch + 16)
+                        } else if regalloc.in_xmm(m.src) {
+                            16 as u64
+                        } else {
+                            1 as u64
+                        }
+                        Encoder.copy_home(code, m.src, temp, m.ty)
+                        broken := m.src
+                        j: u64 = 0
+                        while j < m_count {
+                            mj := moves + j
+                            if not mj.done and mj.src == broken { mj.src = temp }
+                            j = j + 1
+                        }
+                        break
+                    }
+                    i = i + 1
+                }
+            }
+        }
+    }
+
     move_edge :: fn(self &Self, edge Edge) {
         body := self.body
         code := &self.image.text
         target := body.edge_target(edge)
         count := body.argument_count(edge)
-        written: u32 = 0
+        if count == 0 { ret }
+        if count > 32 {
+            self.move_edge_heap(edge)
+            ret
+        }
+        buf: [32]EntryMove
+        n: u64 = 0
         pos: u32 = 0
         while pos < count {
             value := body.argument(edge, pos)
             from := self.allocation.get(value)
             to := self.allocation.get(body.parameter(target, pos))
             if from != to {
-                if regalloc.in_register(from) {
-                    if (written & ((1 as u32) << from as u32)) != 0 {
-                        self.stage_edge(edge)
-                        ret
-                    }
-                } else if pos != 0 and self.allocation.block(value) == target and
-                    body.defining_inst(value) == Inst.none {
-                    self.stage_edge(edge)
-                    ret
+                buf[n] = .{
+                    src: from
+                    dst: to
+                    stack: 0
+                    ty: body.value_type(value)
+                    done: false
                 }
-                if regalloc.in_register(to) { written = written | ((1 as u32) << to as u32) }
+                n = n + 1
             }
             pos = pos + 1
         }
-        pos = 0
-        while pos < count {
-            value := body.argument(edge, pos)
-            from := self.allocation.get(value)
-            to := self.allocation.get(body.parameter(target, pos))
-            if from != to {
-                if regalloc.in_xmm(from) {
-                    xmm_home(code, to, from - 16, true)
-                } else if regalloc.in_xmm(to) {
-                    xmm_home(code, from, to - 16, false)
-                } else if regalloc.in_register(from) {
-                    save_home(code, to, from)
-                } else if regalloc.in_register(to) {
-                    load_home(code, from, to)
-                } else {
-                    load_home(code, from, 0)
-                    save_home(code, to, 0)
-                    if wide(body.value_type(value)) {
-                        frame_access(code, 0x8b, 0, regalloc.offset(from) - 8)
-                        frame_access(code, 0x89, 0, regalloc.offset(to) - 8)
-                    }
-                }
-            }
-            pos = pos + 1
-        }
-    }
-
-    stage_edge :: fn(self &Self, edge Edge) {
-        code := &self.image.text
-        body := self.body
-        target := body.edge_target(edge)
-        count := body.argument_count(edge)
-        pos: u32 = 0
-        while pos < count {
-            self.load_value(code, body.argument(edge, pos), 0)
-            temp := self.scratch + (pos as u64 + 1) * 16
-            frame_access(code, 0x89, 0, temp)
-            value := body.argument(edge, pos)
-            if wide(body.value_type(value)) {
-                frame_access(code, 0x8b, 0, self.slot(value) - 8)
-                frame_access(code, 0x89, 0, temp - 8)
-            }
-            pos = pos + 1
-        }
-        pos = 0
-        while pos < count {
-            temp := self.scratch + (pos as u64 + 1) * 16
-            value := body.parameter(target, pos)
-            frame_access(code, 0x8b, 0, temp)
-            self.save_value(code, value)
-            if wide(body.value_type(value)) {
-                frame_access(code, 0x8b, 0, temp - 8)
-                frame_access(code, 0x89, 0, self.slot(value) - 8)
-            }
-            pos = pos + 1
-        }
+        Encoder.resolve_edge_slice(code, &buf[0], n, self.scratch)
     }
 
     jump_to :: fn(self &Self, target Block) {
@@ -969,6 +1515,10 @@ Encoder :: struct {
         arg2 := body.payload(inst, 2)
 
         if op == Op.constant and result != Val.none and not wide(ty) {
+            if Encoder.single_use(body, result) and
+                Encoder.const_folds_into(body, inst, body.next_inst(inst), result) {
+                ret
+            }
             home := self.allocation.get(result)
             if regalloc.in_register(home) and not regalloc.in_xmm(home) {
                 imm_reg(code, home, arg0 as u64 | ((arg1 as u64) << 32))
@@ -999,9 +1549,47 @@ Encoder :: struct {
             opcode := alu_opcode(op)
             if opcode != 0 and not floating(operand_ty) {
                 to := self.allocation.get(result)
+                dest := if regalloc.in_register(to) { to } else { 0 }
+                imm: i64 = 0
+                if op == Op.mul and Encoder.const_i32(body, second, &imm) {
+                    l_home := self.allocation.get(first)
+                    src := if Encoder.in_gp(l_home) { l_home } else {
+                        load_home(code, l_home, dest)
+                        dest
+                    }
+                    code.put(0x48 | ((dest >> 3) << 2) | (src >> 3), 1)
+                    if imm >= -128 and imm <= 127 {
+                        code.put(0x6b, 1)
+                        code.put(0xc0 | ((dest & 7) << 3) | (src & 7), 1)
+                        code.put(imm as u64, 1)
+                    } else {
+                        code.put(0x69, 1)
+                        code.put(0xc0 | ((dest & 7) << 3) | (src & 7), 1)
+                        code.put(imm as u64, 4)
+                    }
+                    normalize_reg(code, ty, dest)
+                    save_home(code, to, dest)
+                    ret
+                }
+                subop := Encoder.alu_imm_subop(op)
+                if subop != 99 {
+                    if Encoder.const_i32(body, second, &imm) {
+                        load_home(code, self.allocation.get(first), dest)
+                        Encoder.emit_alu_imm(code, subop, dest, imm)
+                        normalize_reg(code, ty, dest)
+                        save_home(code, to, dest)
+                        ret
+                    }
+                    if op != Op.sub and Encoder.const_i32(body, first, &imm) {
+                        load_home(code, self.allocation.get(second), dest)
+                        Encoder.emit_alu_imm(code, subop, dest, imm)
+                        normalize_reg(code, ty, dest)
+                        save_home(code, to, dest)
+                        ret
+                    }
+                }
                 left := self.allocation.get(first)
                 right := self.allocation.get(second)
-                dest := if regalloc.in_register(to) { to } else { 0 }
                 rhs := if regalloc.in_register(right) and (to != right or left == right) {
                     right
                 } else {
@@ -1014,10 +1602,46 @@ Encoder :: struct {
                 save_home(code, to, dest)
                 ret
             }
-            self.load_value(code, first, 0)
-            self.load_value(code, second, 1)
-            if floating(operand_ty) { float_binary(code, op, operand_ty) } else {
-                binary(code, op, operand_ty)
+            if (op == Op.shl or op == Op.shr) and not floating(operand_ty) {
+                cdef := body.defining_inst(second)
+                if cdef != Inst.none and body.opcode(cdef) == Op.constant {
+                    mask := if operand_ty == Ty.i1 { 0 as u64 } else { width(operand_ty) * 8 - 1 }
+                    shift := body.constant_bits(cdef) & mask
+                    to := self.allocation.get(result)
+                    dest := if Encoder.in_gp(to) { to } else { 0 }
+                    load_home(code, self.allocation.get(first), dest)
+                    code.put(0x48 | (dest >> 3), 1)
+                    code.put(0xc1, 1)
+                    code.put(
+                        (
+                            if op == Op.shl { 0xe0 } else if signed(operand_ty) { 0xf8 } else {
+                                0xe8
+                            }
+                        ) |
+                            (dest & 7)
+                        1
+                    )
+                    code.put(shift, 1)
+                    normalize_reg(code, ty, dest)
+                    save_home(code, to, dest)
+                    ret
+                }
+            }
+            if Encoder.is_cmp_op(op) and not floating(operand_ty) {
+                next := body.next_inst(inst)
+                if next != Inst.none and body.opcode(next) == Op.branch and
+                    body.operand(next, 0) == result and
+                    Encoder.single_use(body, result) {
+                    ret
+                }
+                Encoder.emit_cmp_operands(code, body, &self.allocation, first, second)
+                condition(code, compare_flag(op, signed(operand_ty)))
+            } else {
+                self.load_value(code, first, 0)
+                self.load_value(code, second, 1)
+                if floating(operand_ty) { float_binary(code, op, operand_ty) } else {
+                    binary(code, op, operand_ty)
+                }
             }
         } else {
             match op {
@@ -1035,6 +1659,8 @@ Encoder :: struct {
                     self.image.relative(self.addresses.get(arg0 as u64 - 1), 9)
                 }
                 offset {
+                    disp: i64 = 0
+                    if Encoder.can_fold_offset(body, inst, &disp) { ret }
                     self.load_value(code, first, 0)
                     self.load_value(code, second, 1)
                     if arg2 != 1 {
@@ -1080,19 +1706,110 @@ Encoder :: struct {
                     }
                 }
                 load {
-                    self.load_value(code, first, 0)
-                    if wide(ty) { code.raw("\x48\x8b\x50\x08\x48\x8b\x00") } else {
-                        read_mem(code, width(ty))
+                    if wide(ty) {
+                        self.load_value(code, first, 0)
+                        code.raw("\x48\x8b\x50\x08\x48\x8b\x00")
+                    } else {
+                        base: u64 = 0
+                        idx: u64 = 0
+                        scale: u64 = 0
+                        has_idx := false
+                        disp: i64 = 0
+                        self.resolve_addr(
+                            inst
+                            first
+                            &base
+                            &idx
+                            &scale
+                            &has_idx
+                            &disp
+                            Val.none
+                        )
+                        to := self.allocation.get(result)
+                        dest := if Encoder.in_gp(to) { to } else { 0 }
+                        Encoder.emit_load_mem(
+                            code
+                            width(ty)
+                            dest
+                            base
+                            idx
+                            scale
+                            has_idx
+                            disp
+                        )
+                        normalize_reg(code, ty, dest)
+                        save_home(code, to, dest)
+                        ret
                     }
                 }
                 store {
-                    self.load_value(code, first, 0)
-                    self.load_value(code, second, 1)
                     source := body.value_type(second)
                     if wide(source) {
+                        self.load_value(code, first, 0)
+                        self.load_value(code, second, 1)
                         frame_access(code, 0x8b, 2, self.slot(second) - 8)
                         code.raw("\x48\x89\x50\x08\x48\x89\x08")
-                    } else { write_mem(code, width(source)) }
+                    } else {
+                        base: u64 = 0
+                        idx: u64 = 0
+                        scale: u64 = 0
+                        has_idx := false
+                        disp: i64 = 0
+                        if self.resolve_addr(
+                            inst
+                            first
+                            &base
+                            &idx
+                            &scale
+                            &has_idx
+                            &disp
+                            second
+                        ) {
+                            sz := width(source)
+                            imm: i64 = 0
+                            if not floating(source) and Encoder.const_i32(body, second, &imm) {
+                                Encoder.emit_store_imm(
+                                    code
+                                    sz
+                                    base
+                                    idx
+                                    scale
+                                    has_idx
+                                    disp
+                                    imm
+                                )
+                            } else {
+                                v_home := self.allocation.get(second)
+                                v_reg := if Encoder.in_gp(v_home) { v_home } else {
+                                    scratch := if base != 0 and (not has_idx or idx != 0) {
+                                        0 as u64
+                                    } else { 1 as u64 }
+                                    load_home(code, v_home, scratch)
+                                    scratch
+                                }
+                                Encoder.emit_store_reg(
+                                    code
+                                    sz
+                                    v_reg
+                                    base
+                                    idx
+                                    scale
+                                    has_idx
+                                    disp
+                                )
+                            }
+                        } else {
+                            off_inst := body.defining_inst(first)
+                            b_home := self.allocation.get(body.operand(off_inst, 0))
+                            i_home := self.allocation.get(body.operand(off_inst, 1))
+                            load_home(code, b_home, 0)
+                            load_home(code, i_home, 1)
+                            sc := Encoder.stride_log2(body.payload(off_inst, 2))
+                            Encoder.emit_mem(code, true, 0, 0, 0x8d, 0, 0, 1, sc, true, 0)
+                            self.load_value(code, second, 1)
+                            write_mem(code, width(source))
+                        }
+                    }
                 }
                 zero {
                     self.load_value(code, first, 7)
@@ -1125,21 +1842,40 @@ Encoder :: struct {
                 branch {
                     yes := body.successor(inst, 0)
                     no := body.successor(inst, 1)
-                    home := self.allocation.get(first)
-                    reg := if regalloc.in_register(home) { home } else { 0 }
-                    load_home(code, home, reg)
-                    reg_op(code, 0x85, reg, reg)
+                    prev := body.defining_inst(first)
+                    cc: u64 = 0x85
+                    ncc: u64 = 0x84
+                    if prev != Inst.none and body.next_inst(prev) == inst and
+                        Encoder.is_cmp_op(body.opcode(prev)) and
+                        Encoder.single_use(body, first) and
+                        not floating(body.value_type(body.operand(prev, 0))) and
+                        not wide(body.value_type(body.operand(prev, 0))) {
+                        op0 := body.operand(prev, 0)
+                        op1 := body.operand(prev, 1)
+                        op_ty := body.value_type(op0)
+                        Encoder.emit_cmp_operands(code, body, &self.allocation, op0, op1)
+                        cc = compare_flag(body.opcode(prev), signed(op_ty)) - 0x10
+                        ncc = cc ^ 1
+                    } else {
+                        home := self.allocation.get(first)
+                        reg := if regalloc.in_register(home) { home } else { 0 }
+                        load_home(code, home, reg)
+                        reg_op(code, 0x85, reg, reg)
+                    }
                     if body.argument_count(yes) == 0 and body.edge_target(yes) != self.next_block {
-                        code.raw("\x0f\x85")
+                        code.put(0x0f, 1)
+                        code.put(cc, 1)
                         self.jump_to(body.edge_target(yes))
                         self.edge(no, true)
                     } else if body.argument_count(no) == 0 {
-                        code.raw("\x0f\x84")
+                        code.put(0x0f, 1)
+                        code.put(ncc, 1)
                         self.jump_to(body.edge_target(no))
                         self.edge(yes, true)
                     } else {
                         flip := body.edge_target(yes) == self.next_block
-                        code.raw(if flip { "\x0f\x85" } else { "\x0f\x84" })
+                        code.put(0x0f, 1)
+                        code.put(if flip { cc } else { ncc }, 1)
                         skip := code.len()
                         code.put(0, 4)
                         self.edge(if flip { no } else { yes }, false)
@@ -1157,7 +1893,7 @@ Encoder :: struct {
                         }
                     }
                     saved_registers(code, self.allocation.saved, false)
-                    code.raw("\xc9\xc3")
+                    if self.leaf { code.put(0xc3, 1) } else { code.raw("\xc9\xc3") }
                 }
                 trap { code.raw("\x0f\x0b") }
                 abi_size { immediate(code, sysv.layout(self.air, arg0).size) }
@@ -1250,17 +1986,51 @@ emit_body :: fn(
     }
     frame := aligned(end, 16)
     if frame > 2147483647 { fail("stack frame is too large") }
-    code.raw("\x55\x48\x89\xe5")
-    adjust_stack(code, frame, true)
-    saved_registers(code, allocation.saved, true)
-    count := body.parameter_count(Block.entry)
-    pos: u32 = 0
-    args := Arguments.new()
-    while pos < count {
-        val := body.parameter(Block.entry, pos)
-        args.move(code, allocation.get(val), body.value_type(val), true)
-        pos = pos + 1
+    has_call := false
+    block = 1
+    while block <= block_count and not has_call {
+        inst := body.first_inst(block as Block)
+        while inst != Inst.none {
+            op := body.opcode(inst)
+            if op == Op.call or op == Op.call_indirect or op == Op.c_value {
+                has_call = true
+                break
+            }
+            if op == Op.cast {
+                dest_t := body.value_type(body.result(inst))
+                src_t := body.value_type(body.operand(inst, 0))
+                if floating(dest_t) or floating(src_t) {
+                    has_call = true
+                    break
+                }
+            }
+            inst = body.next_inst(inst)
+        }
+        block = block + 1
     }
+    gp_n: u64 = 0
+    sse_n: u64 = 0
+    has_stack_entry := false
+    ep_count := body.parameter_count(Block.entry)
+    ep_i: u32 = 0
+    while ep_i < ep_count {
+        ety := body.value_type(body.parameter(Block.entry, ep_i))
+        if wide(ety) {
+            if gp_n + 2 <= 6 { gp_n = gp_n + 2 } else { has_stack_entry = true, break }
+        } else if floating(ety) {
+            if sse_n < 8 { sse_n = sse_n + 1 } else { has_stack_entry = true, break }
+        } else {
+            if gp_n < 6 { gp_n = gp_n + 1 } else { has_stack_entry = true, break }
+        }
+        ep_i = ep_i + 1
+    }
+    is_leaf := frame == 0 and allocation.saved == 0 and not has_call and not has_stack_entry
+    if not is_leaf {
+        code.raw("\x55\x48\x89\xe5")
+        adjust_stack(code, frame, true)
+        saved_registers(code, allocation.saved, true)
+    }
+    emit_entry_params(code, body, &allocation)
     encoder: Encoder = .{
         image: image
         air: air
@@ -1273,6 +2043,7 @@ emit_body :: fn(
         scratch: scratch
         stack_top: stack_top
         next_block: Block.none
+        leaf: is_leaf
     }
     block = 1
     while block <= block_count {
