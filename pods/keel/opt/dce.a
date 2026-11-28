@@ -163,12 +163,14 @@ eliminate_dead_stacks :: fn(
     arena &Arena
     wq &WorkQueue
     stored &Vec(Val)
+    dead_offsets &Vec(Inst)
 ) bool {
     vcount := body.value_count()
     if vcount == 0 { ret false }
     slots := table(StackSlot, arena, vcount)
     root := table(Val, arena, vcount)
-    offsets := Vec(Inst).new()
+    offsets := dead_offsets
+    offsets.clear()
     has_stack := false
     bcount := body.block_count()
     for b in Range.new(1, ((bcount + 1) as i32)) {
@@ -188,10 +190,7 @@ eliminate_dead_stacks :: fn(
             inst = body.next_inst(inst)
         }
     }
-    if not has_stack {
-        offsets.destroy()
-        ret false
-    }
+    if not has_stack { ret false }
     prop := true
     while prop {
         prop = false
@@ -207,7 +206,6 @@ eliminate_dead_stacks :: fn(
             }
         }
     }
-    offsets.destroy()
     next_link := table(Inst, arena, body.graph.ops.len)
     for b in Range.new(1, ((bcount + 1) as i32)) {
         inst := body.first_inst(b as Block)
@@ -263,7 +261,6 @@ eliminate_dead_stacks :: fn(
         }
     }
     changed := false
-    dead_offsets := Vec(Inst).new()
     for idx in Range.new(0, (vcount as i32)) {
         item := slots + idx as u64
         if not item.active or item.invalid { cont }
@@ -310,15 +307,15 @@ eliminate_dead_stacks :: fn(
             }
         }
     }
-    dead_offsets.destroy()
     changed
 }
 
-mark_sweep :: fn(body &Function, arena &Arena) bool {
+mark_sweep :: fn(body &Function, ws &Workspace, has_stack &bool, cfg_hint &bool) bool {
     bcount := body.block_count()
     icount := body.graph.ops.len
     vcount := body.value_count()
     if bcount == 0 or icount == 0 or vcount == 0 { ret false }
+    arena := &ws.arena
     starts := table(u32, arena, bcount + 2)
     edges := table(Edge, arena, body.graph.targets.len + 1)
     for src in Range.new(1, ((bcount + 1) as i32)) {
@@ -360,8 +357,10 @@ mark_sweep :: fn(body &Function, arena &Arena) bool {
     }
     live_inst := table(bool, arena, icount)
     live_val := table(bool, arena, vcount)
-    mark_insts := Vec(Inst).new()
-    mark_vals := Vec(Val).new()
+    mark_insts := &ws.insts
+    mark_vals := &ws.vals
+    mark_insts.clear()
+    mark_vals.clear()
     ep: u32 = 0
     ec := body.parameter_count(Block.entry)
     while ep < ec {
@@ -419,11 +418,11 @@ mark_sweep :: fn(body &Function, arena &Arena) bool {
             }
         }
     }
-    mark_insts.destroy()
-    mark_vals.destroy()
     changed := false
     for b in Range.new(1, ((bcount + 1) as i32)) {
-        inst := body.first_inst(b as Block)
+        block := b as Block
+        removed := false
+        inst := body.first_inst(block)
         while inst != Inst.none {
             nxt := body.next_inst(inst)
             if not live_inst[id.slot(inst)] {
@@ -435,8 +434,18 @@ mark_sweep :: fn(body &Function, arena &Arena) bool {
                 }
                 body.layout.unlink(inst)
                 changed = true
+                removed = true
+            } else if body.opcode(inst) == Op.stack {
+                *has_stack = true
             }
             inst = nxt
+        }
+        if removed and b > 1 {
+            first := body.first_inst(block)
+            if first != Inst.none and first == body.last_inst(block) and
+                body.opcode(first) == Op.jump {
+                *cfg_hint = true
+            }
         }
     }
     for b in Range.new(2, ((bcount + 1) as i32)) {
@@ -455,6 +464,7 @@ mark_sweep :: fn(body &Function, arena &Arena) bool {
             if live_val[id.slot(param)] { cont }
             for edge in incoming { body.graph.remove_edge_arg(edge, pos) }
             body.remove_parameter(block, pos)
+            *cfg_hint = true
             changed = true
         }
     }
@@ -469,13 +479,18 @@ run :: fn(body &Function) bool {
 }
 
 run_in :: fn(body &Function, ws &Workspace) bool {
+    cfg_hint := false
+    run_with_cfg(body, ws, &cfg_hint)
+}
+
+run_with_cfg :: fn(body &Function, ws &Workspace, cfg_hint &bool) bool {
     timing := profile.enter(Phase.backend_dce)
-    result := run_impl(body, ws)
+    result := run_impl(body, ws, cfg_hint)
     profile.leave(timing)
     result
 }
 
-run_impl :: fn(body &Function, ws &Workspace) bool {
+run_impl :: fn(body &Function, ws &Workspace, cfg_hint &bool) bool {
     count := body.graph.ops.len
     if count == 0 { ret false }
     ws.reset()
@@ -491,10 +506,12 @@ run_impl :: fn(body &Function, ws &Workspace) bool {
     pass_changed := true
     while pass_changed {
         pass_changed = false
-        if mark_sweep(body, arena) { pass_changed = true }
-        if eliminate_dead_stacks(body, arena, &wq, stored) {
+        has_stack := false
+        if mark_sweep(body, ws, &has_stack, cfg_hint) { pass_changed = true }
+        if has_stack and eliminate_dead_stacks(body, arena, &wq, stored, &ws.insts2) {
             pass_changed = true
-            if wq.drain(operands) { pass_changed = true }
+            *cfg_hint = true
+            wq.drain(operands)
         }
         if pass_changed { changed = true }
     }

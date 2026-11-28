@@ -12,18 +12,27 @@ Program :: @import("../program").Program
 Workspace :: workspace.Workspace
 
 fold_body :: fn(body &ir.Function) bool {
+    cfg_hint := false
+    fold_body_with_cfg(body, &cfg_hint)
+}
+
+fold_body_with_cfg :: fn(body &ir.Function, cfg_hint &bool) bool {
     timing := profile.enter(Phase.backend_fold)
-    result := fold_body_impl(body)
+    result := fold_body_impl(body, cfg_hint)
     profile.leave(timing)
     result
 }
 
-fold_body_impl :: fn(body &ir.Function) bool {
+fold_body_impl :: fn(body &ir.Function, cfg_hint &bool) bool {
     changed := false
     for b in Range.new(1, ((body.block_count() + 1) as i32)) {
         inst := body.first_inst(b as ir.Block)
         while inst != ir.Inst.none {
-            if body.fold_inst(inst) { changed = true }
+            if body.fold_inst(inst) {
+                changed = true
+                res := body.result(inst)
+                if res != id.Val.none and body.value_type(res) == ops.Ty.i1 { *cfg_hint = true }
+            }
             inst = body.next_inst(inst)
         }
     }
@@ -48,18 +57,21 @@ optimize_body :: fn(body &ir.Function, pointer_bytes u32, ws &Workspace, do_mem2
     straight := is_straight_entry(body)
     if not straight { cfg.run_in(body, ws) }
     promoted := if do_mem2reg { mem2reg.run_in(body, pointer_bytes, ws) } else { false }
-    folded0 := if promoted { fold_body(body) } else { false }
-    need_cfg := (promoted or folded0) and not is_straight_entry(body)
+    fold0_cfg := false
+    if promoted { fold_body_with_cfg(body, &fold0_cfg) }
+    need_cfg := (promoted or fold0_cfg) and not is_straight_entry(body)
     round := 0
     while round < 4 {
         changed := false
         if need_cfg and cfg.run_in(body, ws) { changed = true }
         need_cfg = false
-        dce_changed := dce.run_in(body, ws)
-        fold_changed := fold_body(body)
+        dce_cfg := false
+        dce_changed := dce.run_with_cfg(body, ws, &dce_cfg)
+        fold_cfg := false
+        fold_changed := fold_body_with_cfg(body, &fold_cfg)
         if dce_changed or fold_changed {
             changed = true
-            need_cfg = not is_straight_entry(body)
+            need_cfg = (dce_cfg or fold_cfg) and not is_straight_entry(body)
         }
         if not changed { break }
         round = round + 1

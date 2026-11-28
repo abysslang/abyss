@@ -9,6 +9,7 @@ Workspace :: struct {
     vals2   Vec(id.Val)
     vals3   Vec(id.Val)
     insts   Vec(id.Inst)
+    insts2  Vec(id.Inst)
     syms    Vec(id.Symbol)
 
     new :: fn() Self {
@@ -20,6 +21,7 @@ Workspace :: struct {
             vals2: Vec(id.Val).new()
             vals3: Vec(id.Val).new()
             insts: Vec(id.Inst).new()
+            insts2: Vec(id.Inst).new()
             syms: Vec(id.Symbol).new()
         }
     }
@@ -32,6 +34,7 @@ Workspace :: struct {
         self.vals2.clear()
         self.vals3.clear()
         self.insts.clear()
+        self.insts2.clear()
         self.syms.clear()
     }
 
@@ -43,6 +46,7 @@ Workspace :: struct {
         self.vals2.destroy()
         self.vals3.destroy()
         self.insts.destroy()
+        self.insts2.destroy()
         self.syms.destroy()
     }
 }
